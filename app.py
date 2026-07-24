@@ -54,7 +54,7 @@ if prompt := st.chat_input("Postavite pitanje o zaposlenima ili Birou..."):
                 search_response = qdrant.query_points(
                     collection_name=COLLECTION_NAME,
                     query=query_vector,
-                    limit=5
+                    limit=10
                 )
 
                 kontekst = "\n".join([hit.payload["tekst"] for hit in search_response.points])
