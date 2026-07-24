@@ -28,22 +28,29 @@ st.title("🌲 Biro za planiranje — Asistent")
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Prikaz prethodnih poruka iz istorije
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 if prompt := st.chat_input("Postavite pitanje o zaposlenima ili Birou..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    # Prikaz trenutnog pitanja korisnika
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
         with st.spinner("Pretražujem bazu podataka..."):
             try:
-                # 1. Generisanje vektora besplatnim modelom
-                query_vector = list(embed_model.embed([prompt]))[0].tolist()
+                # 1. Pametna pretraga: Spajamo prethodno pitanje sa trenutnim ako postoji zamenica (npr. "njegovu")
+                search_query = prompt
+                if len(st.session_state.messages) >= 2:
+                    last_user_msg = next((m["content"] for m in reversed(st.session_state.messages) if m["role"] == "user"), "")
+                    if last_user_msg:
+                        search_query = f"{last_user_msg} {prompt}"
 
-                # 2. Pretraga u Qdrant bazi
+                # 2. Generisanje vektora i pretraga u Qdrant bazi
+                query_vector = list(embed_model.embed([search_query]))[0].tolist()
+                
                 search_response = qdrant.query_points(
                     collection_name=COLLECTION_NAME,
                     query=query_vector,
@@ -52,26 +59,36 @@ if prompt := st.chat_input("Postavite pitanje o zaposlenima ili Birou..."):
 
                 kontekst = "\n".join([hit.payload["tekst"] for hit in search_response.points])
 
+                # 3. System prompt sa strogim uputstvom za Markdown slike
                 system_prompt = (
-                    "Ti si koristan asistent Biroa za planiranje (PD Srbijašume). "
-                    "Odgovaraj tačno na osnovu datog konteksta. "
-                    "Ako kontekst sadrži URL fotografije, obavezno ga prikaži korisniku."
+                    "Ti si koristan asistent Biroa za planiranje (PD Srbijašume).\n"
+                    "Odgovaraj tačno na osnovu datog konteksta iz baze podataka i dosadašnjeg razgovora.\n\n"
+                    "STROGO PRAVILO ZA SLIKE:\n"
+                    "Ako u kontekstu postoji URL fotografije, UVEK je prikaži koristeći Markdown sintaksu za slike:\n"
+                    "![Opis slike](URL_slike)\n"
+                    "Primer: ![Brano Vamović](https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/brano_vamovic.jpg)\n"
+                    "Nikada nemoj ostavljati go URL link bez ![...](...).\n\n"
+                    f"KONTEKST IZ BAZE PODATAKA:\n{kontekst}"
                 )
 
-                user_prompt = f"Kontekst:\n{kontekst}\n\nPitanje: {prompt}"
+                # 4. Sastavljanje kompletne istorije konverzacije za Groq
+                messages_for_groq = [{"role": "system", "content": system_prompt}]
+                for msg in st.session_state.messages:
+                    messages_for_groq.append({"role": msg["role"], "content": msg["content"]})
+                messages_for_groq.append({"role": "user", "content": prompt})
 
-                # 3. Slanje na Groq LLM
+                # 5. Poziv ka LLM-u
                 response = groq.chat.completions.create(
                     model="llama-3.3-70b-versatile",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
+                    messages=messages_for_groq,
                     temperature=0.2
                 )
 
                 odgovor = response.choices[0].message.content
                 st.markdown(odgovor)
+
+                # Sačuvanje u istoriju tek NAKON uspešnog odgovora
+                st.session_state.messages.append({"role": "user", "content": prompt})
                 st.session_state.messages.append({"role": "assistant", "content": odgovor})
 
             except Exception as e:
