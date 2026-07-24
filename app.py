@@ -44,7 +44,7 @@ st.markdown("""
 # ----------------- INICIJALIZACIJA KLIJENATA -----------------
 @st.cache_resource
 def init_clients():
-    qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, check_compatibility=False)
     groq = Groq(api_key=GROQ_API_KEY)
     embed_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     return qdrant, groq, embed_model
@@ -92,8 +92,8 @@ with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expand
         clicked_prompt = "Ko je direktor Biroa i pokaži njegovu sliku?"
     if col2.button("👥 Ko su zamenici?", use_container_width=True):
         clicked_prompt = "Ko su zamenici direktora u Birou?"
-    if col3.button("🌲 Crni vrh?", use_container_width=True):
-        clicked_prompt = "Postoji li Crni vrh u bazi i šta piše o njemu?"
+    if col3.button("🌲 Donji Pek?", use_container_width=True):
+        clicked_prompt = "Postoji li Donji pek u bazi i šta piše o njemu?"
         
     if clicked_prompt:
         st.session_state.prompt_input = clicked_prompt
@@ -118,18 +118,13 @@ if prompt:
     with st.chat_message("assistant", avatar="🌲"):
         with st.spinner("Pretražujem bazu podataka..."):
             try:
-                search_query = prompt
-                if len(st.session_state.messages) >= 2:
-                    last_user_msg = next((m["content"] for m in reversed(st.session_state.messages) if m["role"] == "user"), "")
-                    if last_user_msg:
-                        search_query = f"{last_user_msg} {prompt}"
-
-                query_vector = list(embed_model.embed([search_query]))[0].tolist()
+                # Pretražujemo Qdrant direktno po novom pitanju (bez trovanja prethodnim temama)
+                query_vector = list(embed_model.embed([prompt]))[0].tolist()
                 
                 search_response = qdrant.query_points(
                     collection_name=COLLECTION_NAME,
                     query=query_vector,
-                    limit=10
+                    limit=15
                 )
 
                 kontekst = "\n\n".join([hit.payload["tekst"] for hit in search_response.points])
@@ -137,8 +132,12 @@ if prompt:
                 system_prompt = (
                     "Ti si ljubazan i stručan asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj tačno na osnovu datog konteksta iz baze podataka i dosadašnjeg razgovora.\n\n"
+                    "STROGO PRAVILO ZA PISMO:\n"
+                    "Pisac odgovora mora koristiti ISKLJUČIVO srpsku latinicu (Gajevicu).\n"
+                    "STROGO JE ZABRANJENO mešanje ćiriličnih i latiničnih slova unutar reči ili rečenice (npr. zabranjene su reči poput 'Kучаj' ili 'Kучevo').\n"
+                    "Prevedi sve ćirilične pojmove iz konteksta u čistu latinicu.\n\n"
                     "STROGO PRAVILO ZA SLIKE:\n"
-                    "Ako u kontekstu postoji URL fotografije, UVEK je prikaži koristeći Markdown sintaksu za slike:\n"
+                    "Ako u kontekstu postoji URL fotografije tražene osobe ili logoa, UVEK je prikaži koristeći Markdown sintaksu za slike:\n"
                     "![Opis slike](URL_slike)\n"
                     "Nikada nemoj ostavljati samo link bez ![...](...).\n\n"
                     f"KONTEKST IZ BAZE PODATAKA:\n{kontekst}"
@@ -152,7 +151,7 @@ if prompt:
                 response = groq.chat.completions.create(
                     model="llama-3.3-70b-versatile",
                     messages=messages_for_groq,
-                    temperature=0.2
+                    temperature=0.1
                 )
 
                 odgovor = response.choices[0].message.content
