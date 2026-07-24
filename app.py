@@ -1,5 +1,6 @@
 import streamlit as st
 from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, MatchText
 from groq import Groq
 from fastembed import TextEmbedding
 
@@ -51,6 +52,44 @@ def init_clients():
 
 qdrant, groq, embed_model = init_clients()
 
+# ----------------- FUNKCIJA ZA HIBRIDNU PRETRAGU -----------------
+def dobij_hibridni_kontekst(upit):
+    rezultujuci_tekstovi = []
+    
+    # 1. Vektorska pretraga (po smislu)
+    query_vector = list(embed_model.embed([upit]))[0].tolist()
+    vector_response = qdrant.query_points(
+        collection_name=COLLECTION_NAME,
+        query=query_vector,
+        limit=15
+    )
+    for hit in vector_response.points:
+        rezultujuci_tekstovi.append(hit.payload["tekst"])
+
+    # 2. Tekstualna pretraga po ključnim rečima (po rečima/imenima)
+    reci = [w.strip("?,.!\"':;") for w in upit.split() if len(w.strip("?,.!\"':;")) > 3]
+    stop_reci = {"bazi", "bazu", "neki", "neka", "neko", "postoji", "ima", "ovom", "znas", "kazi"}
+
+    for rec in reci:
+        if rec.lower() in stop_reci:
+            continue
+        try:
+            kw_hits, _ = qdrant.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="tekst", match=MatchText(text=rec))]
+                ),
+                limit=5
+            )
+            for hit in kw_hits:
+                txt = hit.payload["tekst"]
+                if txt not in rezultujuci_tekstovi:
+                    rezultujuci_tekstovi.append(txt)
+        except Exception:
+            pass
+
+    return "\n\n".join(rezultujuci_tekstovi)
+
 # ----------------- BOČNI MENI (SIDEBAR) -----------------
 with st.sidebar:
     st.image("https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/biro_logo.jpg", use_container_width=True)
@@ -92,8 +131,8 @@ with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expand
         clicked_prompt = "Ko je direktor Biroa i pokaži njegovu sliku?"
     if col2.button("👥 Ko su zamenici?", use_container_width=True):
         clicked_prompt = "Ko su zamenici direktora u Birou?"
-    if col3.button("🌲 Donji Pek?", use_container_width=True):
-        clicked_prompt = "Postoji li Donji pek u bazi i šta piše o njemu?"
+    if col3.button("🌲 Crni vrh?", use_container_width=True):
+        clicked_prompt = "Postoji li Crni vrh u bazi i šta piše o njemu?"
         
     if clicked_prompt:
         st.session_state.prompt_input = clicked_prompt
@@ -118,23 +157,15 @@ if prompt:
     with st.chat_message("assistant", avatar="🌲"):
         with st.spinner("Pretražujem bazu podataka..."):
             try:
-                # Pretražujemo Qdrant direktno po novom pitanju (bez trovanja prethodnim temama)
-                query_vector = list(embed_model.embed([prompt]))[0].tolist()
-                
-                search_response = qdrant.query_points(
-                    collection_name=COLLECTION_NAME,
-                    query=query_vector,
-                    limit=15
-                )
-
-                kontekst = "\n\n".join([hit.payload["tekst"] for hit in search_response.points])
+                # Dobijanje konteksta hibridnom pretragom (Vektorski + Keyword)
+                kontekst = dobij_hibridni_kontekst(prompt)
 
                 system_prompt = (
                     "Ti si ljubazan i stručan asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj tačno na osnovu datog konteksta iz baze podataka i dosadašnjeg razgovora.\n\n"
                     "STROGO PRAVILO ZA PISMO:\n"
                     "Pisac odgovora mora koristiti ISKLJUČIVO srpsku latinicu (Gajevicu).\n"
-                    "STROGO JE ZABRANJENO mešanje ćiriličnih i latiničnih slova unutar reči ili rečenice (npr. zabranjene su reči poput 'Kучаj' ili 'Kучevo').\n"
+                    "STROGO JE ZABRANJENO mešanje ćiriličnih i latiničnih slova unutar reči ili rečenice.\n"
                     "Prevedi sve ćirilične pojmove iz konteksta u čistu latinicu.\n\n"
                     "STROGO PRAVILO ZA SLIKE:\n"
                     "Ako u kontekstu postoji URL fotografije tražene osobe ili logoa, UVEK je prikaži koristeći Markdown sintaksu za slike:\n"
