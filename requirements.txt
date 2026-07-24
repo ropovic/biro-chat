@@ -1,4 +1,4 @@
 streamlit
 qdrant-client
 groq
-openai
+fastembed
