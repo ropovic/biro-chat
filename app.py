@@ -23,7 +23,7 @@ def init_clients():
 qdrant, groq, embed_model = init_clients()
 
 # ----------------- CHAT INTERFEJS -----------------
-st.title("🌲 Biro za planiranje, PD Srbijašume — Asistent")
+st.title("🌲 Biro za planiranje — Asistent")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -43,7 +43,7 @@ if prompt := st.chat_input("Postavite pitanje o zaposlenima ili Birou..."):
                 # 1. Generisanje vektora besplatnim modelom
                 query_vector = list(embed_model.embed([prompt]))[0].tolist()
 
-                # 2. Pretraga u Qdrant bazi (nova sintaksa za query_points)
+                # 2. Pretraga u Qdrant bazi
                 search_response = qdrant.query_points(
                     collection_name=COLLECTION_NAME,
                     query=query_vector,
