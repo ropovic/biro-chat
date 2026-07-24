@@ -1,4 +1,5 @@
 import streamlit as st
+import re
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchText
 from groq import Groq
@@ -52,11 +53,33 @@ def init_clients():
 
 qdrant, groq, embed_model = init_clients()
 
+# ----------------- POMOĆNE FUNKCIJE ZA SRPSKI JEZIK -----------------
+def ukloni_dijakritike(tekst):
+    sve = str.maketrans("čćšđžČĆŠĐŽ", "ccsdzCCSDZ")
+    return tekst.translate(sve)
+
+def generisi_korene(rec):
+    """Generiše koren reči skidanjem srpskih padežnih nastavaka i dijakritika."""
+    r = rec.strip("?,.!\"':;()[]{}").lower()
+    if len(r) <= 3:
+        return []
+
+    varijacije = {r, ukloni_dijakritike(r)}
+    nastavci = ["ovima", "evima", "ama", "ima", "om", "em", "ov", "ev", "in", "og", "u", "a", "e", "i", "o"]
+
+    for nastavak in nastavci:
+        if r.endswith(nastavak) and len(r) - len(nastavak) >= 3:
+            koren = r[:-len(nastavak)]
+            varijacije.add(koren)
+            varijacije.add(ukloni_dijakritike(koren))
+
+    return list(varijacije)
+
 # ----------------- FUNKCIJA ZA HIBRIDNU PRETRAGU -----------------
 def dobij_hibridni_kontekst(upit):
     rezultujuci_tekstovi = []
     
-    # 1. Vektorska pretraga (po smislu)
+    # 1. Vektorska pretraga (po opštem smislu)
     query_vector = list(embed_model.embed([upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
@@ -66,27 +89,35 @@ def dobij_hibridni_kontekst(upit):
     for hit in vector_response.points:
         rezultujuci_tekstovi.append(hit.payload["tekst"])
 
-    # 2. Tekstualna pretraga po ključnim rečima (po rečima/imenima)
-    reci = [w.strip("?,.!\"':;") for w in upit.split() if len(w.strip("?,.!\"':;")) > 3]
-    stop_reci = {"bazi", "bazu", "neki", "neka", "neko", "postoji", "ima", "ovom", "znas", "kazi"}
+    # 2. Pametna tekstualna pretraga po korenima reči (rešava padeže i kvačice)
+    reci = [w for w in upit.split() if len(w) > 3]
+    stop_reci = {"bazi", "bazu", "neki", "neka", "neko", "postoji", "ima", "ovom", "znas", "kazi", "pise", "izvesni", "izvesnog"}
 
+    pretrazeni_koreni = set()
     for rec in reci:
         if rec.lower() in stop_reci:
             continue
-        try:
-            kw_hits, _ = qdrant.scroll(
-                collection_name=COLLECTION_NAME,
-                scroll_filter=Filter(
-                    must=[FieldCondition(key="tekst", match=MatchText(text=rec))]
-                ),
-                limit=5
-            )
-            for hit in kw_hits:
-                txt = hit.payload["tekst"]
-                if txt not in rezultujuci_tekstovi:
-                    rezultujuci_tekstovi.append(txt)
-        except Exception:
-            pass
+        
+        koreni = generisi_korene(rec)
+        for koren in koreni:
+            if koren in pretrazeni_koreni or len(koren) < 3:
+                continue
+            pretrazeni_koreni.add(koren)
+
+            try:
+                kw_hits, _ = qdrant.scroll(
+                    collection_name=COLLECTION_NAME,
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key="tekst", match=MatchText(text=koren))]
+                    ),
+                    limit=5
+                )
+                for hit in kw_hits:
+                    txt = hit.payload["tekst"]
+                    if txt not in rezultujuci_tekstovi:
+                        rezultujuci_tekstovi.append(txt)
+            except Exception:
+                pass
 
     return "\n\n".join(rezultujuci_tekstovi)
 
@@ -131,8 +162,8 @@ with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expand
         clicked_prompt = "Ko je direktor Biroa i pokaži njegovu sliku?"
     if col2.button("👥 Ko su zamenici?", use_container_width=True):
         clicked_prompt = "Ko su zamenici direktora u Birou?"
-    if col3.button("🌲 Crni vrh?", use_container_width=True):
-        clicked_prompt = "Postoji li Crni vrh u bazi i šta piše o njemu?"
+    if col3.button("🌲 Donji Pek?", use_container_width=True):
+        clicked_prompt = "Postoji li Donji pek u bazi i šta piše o njemu?"
         
     if clicked_prompt:
         st.session_state.prompt_input = clicked_prompt
@@ -157,7 +188,6 @@ if prompt:
     with st.chat_message("assistant", avatar="🌲"):
         with st.spinner("Pretražujem bazu podataka..."):
             try:
-                # Dobijanje konteksta hibridnom pretragom (Vektorski + Keyword)
                 kontekst = dobij_hibridni_kontekst(prompt)
 
                 system_prompt = (
