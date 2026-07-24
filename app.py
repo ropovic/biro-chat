@@ -20,7 +20,6 @@ st.set_page_config(
 # ----------------- CUSTOM CSS DIZAJN -----------------
 st.markdown("""
     <style>
-    /* Stilizovanje glavnog naslova */
     .main-title {
         color: #1b4332;
         font-weight: 700;
@@ -32,13 +31,11 @@ st.markdown("""
         font-size: 0.95rem;
         margin-bottom: 10px;
     }
-    /* Zaobljene ivice za chat poruke */
     .stChatMessage {
         border-radius: 12px;
         padding: 10px;
         margin-bottom: 8px;
     }
-    /* Sakrivanje Streamlit watermark-a */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     </style>
@@ -56,7 +53,6 @@ qdrant, groq, embed_model = init_clients()
 
 # ----------------- BOČNI MENI (SIDEBAR) -----------------
 with st.sidebar:
-    # Logo Biroa u bočnom meniju
     st.image("https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/biro_logo.jpg", use_container_width=True)
     st.title("🌲 Biro Chat")
     st.markdown("**Digitalni asistent Biroa za planiranje**\n\n*PD Srbijašume*")
@@ -69,12 +65,11 @@ with st.sidebar:
     
     st.divider()
     
-    # Dugme za čišćenje istorije razgovora
     if st.button("🧹 Obriši razgovor", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
-# ----------------- GLAVNO ZAGLAVLJE SA LOGOM SRBIJAŠUMA -----------------
+# ----------------- GLAVNO ZAGLAVLJE -----------------
 col_logo, col_title = st.columns([1, 4])
 
 with col_logo:
@@ -89,18 +84,16 @@ st.divider()
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# ----------------- PREDLOŽENA PITANJA (BRZI DUGMIĆI) -----------------
-if len(st.session_state.messages) == 0:
-    st.markdown("**Brza pitanja za početak:**")
+# ----------------- TRAJNA BRZA PITANJA (EXPANDER) -----------------
+with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expanded=(len(st.session_state.messages) == 0)):
     col1, col2, col3 = st.columns(3)
-    
     clicked_prompt = None
     if col1.button("👔 Ko je direktor?", use_container_width=True):
         clicked_prompt = "Ko je direktor Biroa i pokaži njegovu sliku?"
     if col2.button("👥 Ko su zamenici?", use_container_width=True):
         clicked_prompt = "Ko su zamenici direktora u Birou?"
-    if col3.button("💻 Ko radi sa bazom?", use_container_width=True):
-        clicked_prompt = "Ko je rukovalac bazom podataka i kako izgleda?"
+    if col3.button("🌲 Donji Pek?", use_container_width=True):
+        clicked_prompt = "Postoji li Donji pek u bazi i šta piše o njemu?"
         
     if clicked_prompt:
         st.session_state.prompt_input = clicked_prompt
@@ -114,27 +107,23 @@ for msg in st.session_state.messages:
 # ----------------- OBRADA UNOSA KORISNIKA -----------------
 prompt = st.chat_input("Postavite pitanje...")
 
-# Ako je kliknuto neko od brzih dugmadi
 if "prompt_input" in st.session_state and st.session_state.prompt_input:
     prompt = st.session_state.prompt_input
     del st.session_state.prompt_input
 
 if prompt:
-    # Prikaz pitanja korisnika
     with st.chat_message("user", avatar="👤"):
         st.markdown(prompt)
 
     with st.chat_message("assistant", avatar="🌲"):
         with st.spinner("Pretražujem bazu podataka..."):
             try:
-                # 1. Pametna kontekstualna pretraga (spajanje sa prethodnim pitanjem)
                 search_query = prompt
                 if len(st.session_state.messages) >= 2:
                     last_user_msg = next((m["content"] for m in reversed(st.session_state.messages) if m["role"] == "user"), "")
                     if last_user_msg:
                         search_query = f"{last_user_msg} {prompt}"
 
-                # 2. Generisanje vektora i pretraga u Qdrant-u (limit=10)
                 query_vector = list(embed_model.embed([search_query]))[0].tolist()
                 
                 search_response = qdrant.query_points(
@@ -143,9 +132,8 @@ if prompt:
                     limit=10
                 )
 
-                kontekst = "\n".join([hit.payload["tekst"] for hit in search_response.points])
+                kontekst = "\n\n".join([hit.payload["tekst"] for hit in search_response.points])
 
-                # 3. System prompt
                 system_prompt = (
                     "Ti si ljubazan i stručan asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj tačno na osnovu datog konteksta iz baze podataka i dosadašnjeg razgovora.\n\n"
@@ -156,13 +144,11 @@ if prompt:
                     f"KONTEKST IZ BAZE PODATAKA:\n{kontekst}"
                 )
 
-                # 4. Sastavljanje istorije za Groq
                 messages_for_groq = [{"role": "system", "content": system_prompt}]
                 for msg in st.session_state.messages:
                     messages_for_groq.append({"role": msg["role"], "content": msg["content"]})
                 messages_for_groq.append({"role": "user", "content": prompt})
 
-                # 5. Poziv ka LLM-u
                 response = groq.chat.completions.create(
                     model="llama-3.3-70b-versatile",
                     messages=messages_for_groq,
@@ -172,7 +158,6 @@ if prompt:
                 odgovor = response.choices[0].message.content
                 st.markdown(odgovor)
 
-                # Čuvanje u istoriju
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 st.session_state.messages.append({"role": "assistant", "content": odgovor})
 
