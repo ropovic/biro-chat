@@ -1,0 +1,3 @@
+venv_chat/
+.streamlit/secrets.toml
+__pycache__/
