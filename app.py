@@ -92,8 +92,8 @@ with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expand
         clicked_prompt = "Ko je direktor Biroa i pokaži njegovu sliku?"
     if col2.button("👥 Ko su zamenici?", use_container_width=True):
         clicked_prompt = "Ko su zamenici direktora u Birou?"
-    if col3.button("🌲 Donji Pek?", use_container_width=True):
-        clicked_prompt = "Postoji li Donji pek u bazi i šta piše o njemu?"
+    if col3.button("🌲 Crni vrh?", use_container_width=True):
+        clicked_prompt = "Postoji li Crni vrh u bazi i šta piše o njemu?"
         
     if clicked_prompt:
         st.session_state.prompt_input = clicked_prompt
