@@ -132,15 +132,19 @@ def dobij_hibridni_kontekst(upit, max_karaktera=6000):
     sve_poruke = ucitaj_sve_tekstove()
     brojevi = re.findall(r'\b\d+\b', upit)
 
-    # 1. SKENIRANJE ZA TAČAN BROJ ČLANA (PRIORITET #1)
+# 1. SKENIRANJE ZA TAČAN BROJ ČLANA (SA PRIORITETOM NA SRODNE DOKUMENTE)
     if brojevi:
         for br in brojevi:
             for txt in sve_poruke:
+                # Ako tražimo kolektivni ugovor, ignorišemo kartone deponovanih potpisa i tabele
+                if "kolektivn" in upit.lower() and "karton deponovanih potpisa" in txt.lower():
+                    continue
+
                 if je_pogodjen_clan(txt, br) and txt not in svi_vidjeni:
                     svi_vidjeni.add(txt)
                     prioritetni_tekstovi.append(txt)
 
-    # 2. FALLBACK: AKO JE U PITANJU UGOVOR A REČ "ČLAN" NIJE DIREKTNO UZ BROJ
+# 2. FALLBACK: AKO JE U PITANJU UGOVOR A REČ "ČLAN" NIJE DIREKTNO UZ BROJ
     if brojevi and len(prioritetni_tekstovi) == 0 and ("kolektivn" in upit.lower() or "ugovor" in upit.lower()):
         for txt in sve_poruke:
             txt_low = txt.lower()
@@ -149,7 +153,7 @@ def dobij_hibridni_kontekst(upit, max_karaktera=6000):
                     svi_vidjeni.add(txt)
                     prioritetni_tekstovi.append(txt)
 
-    # 3. VEKTORSKA PRETRAGA ZA ŠIROKI SEMANTIČKI KONTEKST
+# 3. VEKTORSKA PRETRAGA ZA ŠIROKI SEMANTIČKI KONTEKST
     norm_upit = sredi_tekst(upit)
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
