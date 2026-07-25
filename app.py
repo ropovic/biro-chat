@@ -132,7 +132,6 @@ def pretvori_u_rimske(broj_str):
     return mapping.get(broj_str, "")
 
 def je_pogodak_za_clan(txt_low, broj_str):
-    """Proverava prisustvo latiničnih i ćiriličnih naziva članova uz traženi broj."""
     rimski = pretvori_u_rimske(broj_str)
     pats = [
         rf'\b(član|clan|čl|cl|члан|член|чл)\.?\s*0?{broj_str}\b',
@@ -145,6 +144,43 @@ def je_pogodak_za_clan(txt_low, broj_str):
         if re.search(pat, txt_low, re.IGNORECASE):
             return True
     return False
+
+def pronadji_tacnan_clan(svi_odlomci, broj_str):
+    """Direktna i robustna pretraga tačnog člana u svim tekstovima (latinica/ćirilica)."""
+    rezultati = []
+    rimski = pretvori_u_rimske(broj_str)
+    kljucne_reci = ["član", "clan", "čl", "cl", "члан", "член", "чл"]
+    
+    for idx, item in enumerate(svi_odlomci):
+        txt = item["tekst"]
+        izvor = item["izvor"]
+        txt_low = txt.lower()
+        
+        nadjeno = False
+        for kr in kljucne_reci:
+            pats = [
+                rf'\b{kr}\.?\s*0?{broj_str}\b',
+                rf'\b0?{broj_str}\b\.\s*{kr}\b'
+            ]
+            if rimski:
+                pats.append(rf'\b{kr}\.?\s*{rimski}\b')
+                
+            for pat in pats:
+                if re.search(pat, txt_low, re.IGNORECASE):
+                    nadjeno = True
+                    break
+            if nadjeno:
+                break
+                
+        if nadjeno:
+            prosirani_tekst = txt
+            for step in range(1, 3):
+                if idx + step < len(svi_odlomci):
+                    sledeci_item = svi_odlomci[idx + step]
+                    prosirani_tekst += "\n" + sledeci_item["tekst"]
+            rezultati.append({"tekst": prosirani_tekst, "izvor": izvor})
+            
+    return rezultati
 
 def je_sadrzaj_toc(txt_low):
     if "sadržaj" in txt_low or "sadrzaj" in txt_low:
@@ -185,12 +221,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
             if brojevi and je_clan:
                 for br in brojevi:
                     if je_pogodak_za_clan(txt_low, br):
-                        if "kolektivn" in izvor_low or "kolektivn" in txt_low:
-                            skor += 15000  # MAKSIMALAN PRIORITET ZA TAČAN ČLAN UGOVORA!
-                        else:
-                            skor += 3000
-                    elif f"{br}." in txt_low and "kolektivn" in izvor_low:
-                        skor += 1500
+                        skor += 30000  # MAKSIMALAN PRIORITET ZA TRAŽENI ČLAN!
 
         if je_direktor:
             if "zamenik" in txt_low or "direktor" in txt_low:
@@ -208,7 +239,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     skorovani_kandidati.sort(key=lambda x: x[0], reverse=True)
     return skorovani_kandidati[:15]
 
-# ----------------- HIBRIDNA PRETRAGA SA SPAJANJEM SUSREDNIH ČANAKA -----------------
+# ----------------- HIBRIDNA PRETRAGA SA DIREKTNIM UBACIVANJEM ČLANA -----------------
 def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     svi_odlomci = ucitaj_sve_tekstove()
     svi_kandidati = []
@@ -217,30 +248,16 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     brojevi = re.findall(r'\b\d+\b', upit)
     upit_low = norm_upit.lower()
 
+    # 1. DIREKTNA PRETRAGA: Ako korisnik traži član, odmah ga izvlačimo iz baze bez obzira na vektore
     if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl", "члан", "чл"]):
         for br in brojevi:
-            for idx, item in enumerate(svi_odlomci):
-                txt = item["tekst"]
-                izvor = item["izvor"]
-                txt_low = txt.lower()
-                izvor_low = izvor.lower()
+            direktni_pogodci = pronadji_tacnan_clan(svi_odlomci, br)
+            for dp in direktni_pogodci:
+                if dp["tekst"] not in svi_vidjeni:
+                    svi_vidjeni.add(dp["tekst"])
+                    svi_kandidati.append(dp)
 
-                if je_sadrzaj_toc(txt_low):
-                    continue
-
-                if je_pogodak_za_clan(txt_low, br) or (f"{br}." in txt_low and "kolektivn" in izvor_low):
-                    if ("kolektivn" in upit_low and ("kolektivn" in izvor_low or "kolektivn" in txt_low)) or "kolektivn" not in upit_low:
-                        prosirani_tekst = txt
-                        for step in range(1, 3):
-                            if idx + step < len(svi_odlomci):
-                                sledeci_item = svi_odlomci[idx + step]
-                                if "kolektivn" in sledeci_item["izvor"].lower() or "kolektivn" in izvor_low:
-                                    prosirani_tekst += "\n" + sledeci_item["tekst"]
-
-                        if prosirani_tekst not in svi_vidjeni:
-                            svi_kandidati.append({"tekst": prosirani_tekst, "izvor": izvor})
-                            svi_vidjeni.add(prosirani_tekst)
-
+    # 2. VEKTORSKA PRETRAGA ZA OSTALE KONTEKSTE
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
@@ -311,7 +328,7 @@ with st.sidebar:
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
     st.caption("🟢 **LLM:** Llama-3.3 / Llama-3.1 (Auto-Fallback)")
     st.caption("🟢 **Embeddings:** FastEmbed")
-    st.caption(f"{'🟢' if HAS_RERANKER else '🟡'} **Reranker:** {'Aktivan' if HAS_RERANKER else 'Fallback heurisitka'}")
+    st.caption(f"{'🟢' if HAS_RERANKER else '🟡'} **Reranker:** {'Aktivan' if HAS_RERANKER else 'Fallback heuristika'}")
     
     st.divider()
     
