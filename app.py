@@ -110,28 +110,24 @@ def generisi_korene(rec):
 
     return list(varijacije)
 
-# ----------------- NAPREDNA HIBRIDNA PRETRAGA -----------------
+# ----------------- NAPREDNA HIBRIDNA PRETRAGA SA PRIORITIZACIJOM -----------------
 def dobij_hibridni_kontekst(upit, max_karaktera=4500):
-    rezultujuci_tekstovi = []
-    
-    # 1. VEKTORSKA PRETRAGA
-    query_vector = list(embed_model.embed([upit]))[0].tolist()
-    vector_response = qdrant.query_points(
-        collection_name=COLLECTION_NAME,
-        query=query_vector,
-        limit=10
-    )
-    for hit in vector_response.points:
-        rezultujuci_tekstovi.append(hit.payload["tekst"])
+    prioritetni_tekstovi = []
+    ostali_tekstovi = []
+    svi_vidjeni = set()
 
-    # 2. CILJANA PRETRAGA ZA BROJEVE ČLANOVA (npr. član 5, član 6, član 114)
+    # 1. CILJANA PRETRAGA ZA BROJEVE ČLANOVA (STAVLJA SE NA PRVO MESTO)
     brojevi = re.findall(r'\b\d+\b', upit)
     for br in brojevi:
         varijacije_broja = [
-            br,
-            f"član {br}", f"čl. {br}",
-            f"члан {br}", f"чл. {br}"
+            f"Član {br}.", f"Član {br}", f"ČLAN {br}.", f"ČLAN {br}",
+            f"Члан {br}.", f"Члан {br}", f"ЧЛАН {br}.", f"ЧЛАН {br}",
+            f"član {br}", f"члан {br}", f"čl. {br}", f"чл. {br}"
         ]
+        
+        # Regex obrazac za proveru tačnosti u dobijenom tekstu
+        pattern = re.compile(rf'(?i)\b(član|члан|čl|чл)\.?\s*{br}\b')
+
         for var in varijacije_broja:
             try:
                 num_hits, _ = qdrant.scroll(
@@ -139,14 +135,32 @@ def dobij_hibridni_kontekst(upit, max_karaktera=4500):
                     scroll_filter=Filter(
                         must=[FieldCondition(key="tekst", match=MatchText(text=var))]
                     ),
-                    limit=3
+                    limit=5
                 )
                 for hit in num_hits:
                     txt = hit.payload["tekst"]
-                    if txt not in rezultujuci_tekstovi:
-                        rezultujuci_tekstovi.append(txt)
+                    if txt not in svi_vidjeni:
+                        svi_vidjeni.add(txt)
+                        # Ako tekst zaista sadrži traženi član, ide na TOP prioritet
+                        if pattern.search(txt):
+                            prioritetni_tekstovi.append(txt)
+                        else:
+                            ostali_tekstovi.append(txt)
             except Exception:
                 pass
+
+    # 2. VEKTORSKA PRETRAGA
+    query_vector = list(embed_model.embed([upit]))[0].tolist()
+    vector_response = qdrant.query_points(
+        collection_name=COLLECTION_NAME,
+        query=query_vector,
+        limit=8
+    )
+    for hit in vector_response.points:
+        txt = hit.payload["tekst"]
+        if txt not in svi_vidjeni:
+            svi_vidjeni.add(txt)
+            ostali_tekstovi.append(txt)
 
     # 3. DVOSMERNA TEKSTUALNA PRETRAGA (LATINICA I ĆIRILICA)
     upit_lat = cirilica_u_latinicu(upit)
@@ -166,7 +180,6 @@ def dobij_hibridni_kontekst(upit, max_karaktera=4500):
 
             koren_cir = latinica_u_cirilicu(koren_lat)
 
-            # Pretražujemo i latinični i ćirilični koren u Qdrant-u
             for koren_search in {koren_lat, koren_cir}:
                 try:
                     kw_hits, _ = qdrant.scroll(
@@ -178,14 +191,17 @@ def dobij_hibridni_kontekst(upit, max_karaktera=4500):
                     )
                     for hit in kw_hits:
                         txt = hit.payload["tekst"]
-                        if txt not in rezultujuci_tekstovi:
-                            rezultujuci_tekstovi.append(txt)
+                        if txt not in svi_vidjeni:
+                            svi_vidjeni.add(txt)
+                            ostali_tekstovi.append(txt)
                 except Exception:
                     pass
 
-    spojeni_tekst = "\n\n".join(rezultujuci_tekstovi)
+    # KOMBINOVANJE: Prioritetni tekstovi idu PRVI na listi
+    spojeni_rezultati = prioritetni_tekstovi + ostali_tekstovi
+    spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(spojeni_rezultati)
     
-    # Pretvaramo sav pronađeni tekst u čistiju latinicu pre slanja LLM-u
+    # Preslovljavanje ćirilice u čistiju latinicu
     spojeni_tekst = cirilica_u_latinicu(spojeni_tekst)
 
     if len(spojeni_tekst) > max_karaktera:
@@ -236,7 +252,7 @@ with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expand
         clicked_prompt = "Ko su zamenici direktora u Birou?"
     if col3.button("🌲 Crni vrh?", use_container_width=True):
         clicked_prompt = "Postoji li Crni vrh u bazi i šta piše o njemu?"
-    if col4.button("🌲 Član 4. Kol. ugovora?", use_container_width=True):
+    if col4.button("📜 Član 4. Kol. ugovora?", use_container_width=True):
         clicked_prompt = "Navedi član 4. kolektivnog ugovora?"
 
     if clicked_prompt:
