@@ -102,9 +102,16 @@ def ucitaj_sve_tekstove():
             with_vectors=False
         )
         for r in records:
-            if r.payload and "tekst" in r.payload:
-                norm_txt = sredi_tekst(r.payload["tekst"])
-                sve_tacke.append(norm_txt)
+            if r.payload:
+                # Provera više mogućih ključeva za tekst
+                raw_txt = r.payload.get("tekst") or r.payload.get("text") or r.payload.get("content") or r.payload.get("page_content") or ""
+                izvor = str(r.payload.get("izvor") or r.payload.get("dokument") or r.payload.get("source") or "")
+                
+                if raw_txt:
+                    sve_tacke.append({
+                        "tekst": sredi_tekst(raw_txt),
+                        "izvor": sredi_tekst(izvor)
+                    })
         
         if next_offset is None or len(records) == 0:
             break
@@ -112,6 +119,15 @@ def ucitaj_sve_tekstove():
         offset = next_offset
 
     return sve_tacke
+
+# ----------------- HELPER ZA RIMSKE BROJEVE -----------------
+def pretvori_u_rimske(broj_str):
+    mapping = {
+        "1": "I", "2": "II", "3": "III", "4": "IV", "5": "V",
+        "6": "VI", "7": "VII", "8": "VIII", "9": "IX", "10": "X",
+        "11": "XI", "12": "XII", "13": "XIII", "14": "XIV", "15": "XV"
+    }
+    return mapping.get(broj_str, "")
 
 # ----------------- INTELIGENTNO FILTRIRANJE I RANGIRANJE KANDIDATA -----------------
 def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
@@ -123,26 +139,42 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
 
     skorovani_kandidati = []
 
-    for txt in svi_kandidati:
+    for item in svi_kandidati:
+        txt = item["tekst"]
+        izvor = item["izvor"]
         txt_low = txt.lower()
+        izvor_low = izvor.lower()
         skor = 0
 
-        # Ako tražimo ugovor ili direktora, drastično kažnjavamo šumske HTML tabele
-        if (je_ugovor or je_direktor) and "<table>" in txt_low and "kolektivn" not in txt_low and "direktor" not in txt_low:
+        # Ako tražimo ugovor ili direktora, eliminišemo masivne HTML tabele šuma
+        if (je_ugovor or je_direktor) and "<table>" in txt_low and "kolektivn" not in izvor_low and "direktor" not in txt_low:
             continue
 
-        # 1. PRAVILO ZA ČLANOVE UGOVORA
+        # 1. DIREKTNO BODOVANJE ČLANOVA UGOVORA
         if je_ugovor:
-            if "kolektivn" in txt_low:
+            if "kolektivn" in izvor_low or "kolektivn" in txt_low:
                 skor += 50
-            for br in brojevi:
-                # Najveći prioritet ako naslov počinje sa Član X.
-                if re.search(rf'(?:^|\n|#|\*)\s*(član|clan|čl|cl)\.?\s*{br}\b', txt_low):
-                    skor += 250
-                elif re.search(rf'\b(član|clan|čl|cl)\.?\s*{br}\b', txt_low):
-                    skor += 100
 
-        # 2. PRAVILO ZA DIREKTORA
+            for br in brojevi:
+                rimski = pretvori_u_rimske(br)
+                # Obrasci za prepoznavanje naslova člana
+                pats = [
+                    rf'(?:^|\n|#|\*)\s*(član|clan|čl|cl)[a-z]*[\s\.:\-_*#]+{br}\b',
+                    rf'\b(član|clan|čl|cl)[a-z]*[\s\.:\-_*#]+{br}\b'
+                ]
+                if rimski:
+                    pats.append(rf'\b(član|clan|čl|cl)[a-z]*[\s\.:\-_*#]+{rimski}\b')
+
+                for pat in pats:
+                    if re.search(pat, txt_low):
+                        # Apsolutni prioritet za odlomak iz Kolektivnog ugovora
+                        if "kolektivn" in izvor_low or "kolektivn" in txt_low:
+                            skor += 1000
+                        else:
+                            skor += 300
+                        break
+
+        # 2. BODOVANJE ZA DIREKTORA
         if je_direktor:
             if "direktor" in txt_low:
                 skor += 200
@@ -155,28 +187,41 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
             if rec in txt_low:
                 skor += 10
 
-        skorovani_kandidati.append((skor, txt))
+        skorovani_kandidati.append((skor, txt, izvor))
 
-    # Sortiramo po skor-u i vraćamo najbolje pripremljene kandidate
+    # Sortiramo po skor-u od najvećeg ka najmanjem
     skorovani_kandidati.sort(key=lambda x: x[0], reverse=True)
-    return [item[1] for item in skorovani_kandidati[:20]]
+    return skorovani_kandidati[:20]
 
-# ----------------- HIBRIDNA PRETRAGA SA PAMETNIM FILTEROM -----------------
+# ----------------- HIBRIDNA PRETRAGA SA BODOVANJEM -----------------
 def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     svi_odlomci = ucitaj_sve_tekstove()
-    svi_kandidati = set()
+    svi_kandidati = []
+    svi_vidjeni = set()
     norm_upit = sredi_tekst(upit)
     brojevi = re.findall(r'\b\d+\b', upit)
 
-    # 1. PRETRAGA PO TAČNOM ČLANU (Strogi regex bez praznih pogodaka)
+    # 1. DEDIKOVANA PRETRAGA U KEŠU ZA TRAŽENI ČLAN
     if brojevi:
         for br in brojevi:
-            pat = re.compile(rf'\b(član|clan|čl|cl)\.?\s*{br}\b', re.IGNORECASE)
-            for txt in svi_odlomci:
-                if pat.search(txt):
-                    svi_kandidati.add(txt)
+            rimski = pretvori_u_rimske(br)
+            pats = [
+                rf'\b(član|clan|čl|cl)[a-z]*[\s\.:\-_*#]+{br}\b',
+                rf'\b{br}\.?\s*(član|clan|čl|cl)\b'
+            ]
+            if rimski:
+                pats.append(rf'\b(član|clan|čl|cl)[a-z]*[\s\.:\-_*#]+{rimski}\b')
 
-    # 2. VEKTORSKA PRETRAGA (Dopuna konteksta)
+            for item in svi_odlomci:
+                txt = item["tekst"]
+                for pat in pats:
+                    if re.search(pat, txt, re.IGNORECASE):
+                        if txt not in svi_vidjeni:
+                            svi_kandidati.append(item)
+                            svi_vidjeni.add(txt)
+                        break
+
+    # 2. VEKTORSKA PRETRAGA (Dopuna ostalih odlomaka)
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
@@ -184,36 +229,56 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
         limit=30
     )
     for hit in vector_response.points:
-        raw_txt = hit.payload.get("tekst", "")
-        if raw_txt:
-            svi_kandidati.add(sredi_tekst(raw_txt))
+        if hit.payload:
+            raw_txt = hit.payload.get("tekst") or hit.payload.get("text") or hit.payload.get("content") or ""
+            izvor = str(hit.payload.get("izvor") or hit.payload.get("dokument") or hit.payload.get("source") or "")
+            if raw_txt:
+                norm_txt = sredi_tekst(raw_txt)
+                if norm_txt not in svi_vidjeni:
+                    svi_vidjeni.add(norm_txt)
+                    svi_kandidati.append({
+                        "tekst": norm_txt,
+                        "izvor": sredi_tekst(izvor)
+                    })
 
-    kandidati_lista = list(svi_kandidati)
-    if not kandidati_lista:
+    if not svi_kandidati:
         return "", 0, len(svi_odlomci)
 
-    # 3. FILTRIRANJE I BODOVANJE (Čišćenje šumskih tabela)
-    procisceni_kandidati = filtriraj_i_skoruj_kandidate(kandidati_lista, upit)
+    # 3. FILTRIRANJE I RANGIRANJE
+    skorovani = filtriraj_i_skoruj_kandidate(svi_kandidati, upit)
 
-    # 4. FINALNI RERANKING (Ocenjivanje samo čistih kandidata)
+    # 4. FINALNI RERANKING ILI TOP-K SELEKCIJA
     top_odlomci = []
-    if reranker_model is not None and len(procisceni_kandidati) > 0:
+    kandidati_tekstovi = [item[1] for item in skorovani]
+
+    if reranker_model is not None and len(kandidati_tekstovi) > 0:
         try:
-            reranked = list(reranker_model.rerank(query=norm_upit, documents=procisceni_kandidati))
+            reranked = list(reranker_model.rerank(query=norm_upit, documents=kandidati_tekstovi))
             reranked.sort(key=lambda x: x["score"], reverse=True)
             top_odlomci = [res["document"] for res in reranked[:top_k_rezultata]]
         except Exception:
             top_odlomci = []
 
     if not top_odlomci:
-        top_odlomci = procisceni_kandidati[:top_k_rezultata]
+        top_odlomci = kandidati_tekstovi[:top_k_rezultata]
 
-    spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(top_odlomci)
+    # Formatiranje konteksta sa nazivom izvora za lakši debug
+    kontekst_lista = []
+    for txt in top_odlomci:
+        # Pronalazimo izvor za dati tekst
+        izvor_naziv = "Kolektivni Ugovor / Baza"
+        for item in skorovani:
+            if item[1] == txt:
+                izvor_naziv = item[2] if item[2] else izvor_naziv
+                break
+        kontekst_lista.append(f"Izvor: {izvor_naziv}\n{txt}")
+
+    spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(kontekst_lista)
 
     if len(spojeni_tekst) > max_karaktera:
         spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
 
-    return spojeni_tekst, len(procisceni_kandidati), len(svi_odlomci)
+    return spojeni_tekst, len(skorovani), len(svi_odlomci)
 
 # ----------------- BOČNI MENI (SIDEBAR) -----------------
 with st.sidebar:
@@ -321,7 +386,8 @@ if prompt:
 
                 # DEBUG EXPANDER
                 with st.expander("🔍 Pregled pročišćenog konteksta poslatog Llami"):
-                    st.caption(f"Razmotreno pročišćenih kandidata: **{br_kandidata}**")
+                    st.caption(f"Ukupno odlomaka u kešu: **{ukupno_keširano}**")
+                    st.caption(f"Razmotreno rangiranih kandidata: **{br_kandidata}**")
                     st.text_area("Sadržaj poslat Llami:", value=kontekst, height=220)
 
                 st.session_state.messages.append({"role": "user", "content": prompt})
