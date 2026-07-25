@@ -2,7 +2,14 @@ import streamlit as st
 import re
 from qdrant_client import QdrantClient
 from groq import Groq
-from fastembed import TextEmbedding, TextReRank
+from fastembed import TextEmbedding
+
+# Siguran import za TextRerank (malo 'r')
+try:
+    from fastembed import TextRerank
+    HAS_RERANKER = True
+except ImportError:
+    HAS_RERANKER = False
 
 # ----------------- UČITAVANJE KLJUČEVA -----------------
 QDRANT_URL = st.secrets["QDRANT_URL"]
@@ -49,9 +56,14 @@ def init_clients():
     groq = Groq(api_key=GROQ_API_KEY)
     embed_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     
-    # Višejezični Reranker model
-    reranker_model = TextReRank(model_name="BAAI/bge-reranker-base")
-    
+    reranker_model = None
+    if HAS_RERANKER:
+        try:
+            # Koristimo lakši model prilagođen Streamlit Cloud memoriji
+            reranker_model = TextRerank(model_name="BAAI/bge-reranker-base")
+        except Exception:
+            reranker_model = None
+            
     return qdrant, groq, embed_model, reranker_model
 
 qdrant, groq, embed_model, reranker_model = init_clients()
@@ -108,7 +120,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     svi_kandidati = set()
     norm_upit = sredi_tekst(upit)
 
-    # 1. PRVI SLOD: Skeniranje ključnih reči/brojeva u kešu
+    # 1. ŠIROKO SKENIRANJE PO BROJEVIMA I ČLANOVIMA
     brojevi = re.findall(r'\b\d+\b', upit)
     if brojevi:
         for br in brojevi:
@@ -117,7 +129,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
                 if pat.search(txt):
                     svi_kandidati.add(txt)
 
-    # 2. DRUGI SLOJ: Vektorska pretraga (hvata širi izbor)
+    # 2. VEKTORSKA PRETRAGA (Izvlači širi kontekst)
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
@@ -134,13 +146,33 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     if not kandidati_lista:
         return "", 0, len(svi_odlomci)
 
-    # 3. TREĆI SLOJ: RERANKING (Ocenjivanje svih kandidata)
-    # Reranker rangira kandidate prema tome koliko dobro odgovaraju pitanju
-    reranked_results = list(reranker_model.rerank(query=norm_upit, documents=kandidati_lista))
+    # 3. RANGIRANJE (FastEmbed Reranker ili Pametni Heuristički Skor)
+    top_odlomci = []
     
-    # Sortiramo po oceni (score) i uzimamo najbolje
-    reranked_results.sort(key=lambda x: x["score"], reverse=True)
-    top_odlomci = [res["document"] for res in reranked_results[:top_k_rezultata]]
+    if reranker_model is not None:
+        try:
+            reranked = list(reranker_model.rerank(query=norm_upit, documents=kandidati_lista))
+            reranked.sort(key=lambda x: x["score"], reverse=True)
+            top_odlomci = [res["document"] for res in reranked[:top_k_rezultata]]
+        except Exception:
+            top_odlomci = []
+
+    # Rezervni algoritam ako Reranker nije dostupan
+    if not top_odlomci:
+        def izracunaj_skor(tekst):
+            skor = 0
+            txt_low = tekst.lower()
+            if brojevi:
+                for br in brojevi:
+                    # Najveća težina ako odlomak zapravo počinje sa traženim članom
+                    if re.search(rf'(?:^|\n|#|\*)\s*(clan|cl)\.?\s*{br}\b', txt_low):
+                        skor += 100
+                    elif re.search(rf'\b(clan|cl)\.?\s*{br}\b', txt_low):
+                        skor += 50
+            return skor
+
+        kandidati_lista.sort(key=izracunaj_skor, reverse=True)
+        top_odlomci = kandidati_lista[:top_k_rezultata]
 
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(top_odlomci)
 
