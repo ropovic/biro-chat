@@ -52,7 +52,7 @@ def init_clients():
 
 qdrant, groq, embed_model = init_clients()
 
-# ----------------- BRZO KEŠIRANJE SVIH ODLOMAKA IZ BAZE -----------------
+# ----------------- BRZO KEŠIRANJE SVIH ODLOMAKA IZ BAZE (ISPRAVLJENO) -----------------
 @st.cache_data(ttl=1800)  # Kešira odlomke na 30 minuta
 def ucitaj_sve_tekstove():
     sve_tacke = []
@@ -68,8 +68,12 @@ def ucitaj_sve_tekstove():
         for r in records:
             if r.payload and "tekst" in r.payload:
                 sve_tacke.append(r.payload["tekst"])
+        
         if next_offset is None or len(records) == 0:
             break
+            
+        offset = next_offset  # ISPRAVLJENO: Pomera pokazivač na sledeću stranu
+
     return sve_tacke
 
 # ----------------- FUNKCIJE ZA KONVERZIJU PISMA -----------------
@@ -78,9 +82,9 @@ def cirilica_u_latinicu(tekst):
     monografi = {
         'А': 'A', 'а': 'a', 'Б': 'B', 'б': 'b', 'В': 'V', 'в': 'v',
         'Г': 'G', 'г': 'g', 'Д': 'D', 'д': 'd', 'Ђ': 'Đ', 'ђ': 'đ',
-        'Е': 'E', 'е': 'e', 'Ж': 'Ž', 'ж': 'ž', 'З': 'Z', 'з': 'z',
+        'Е': 'E', 'е': 'e', 'Ж': 'Ž', 'ž': 'ž', 'З': 'Z', 'з': 'z',
         'И': 'I', 'и': 'i', 'Ј': 'J', 'ј': 'j', 'К': 'K', 'к': 'k',
-        'Л': 'L', 'л': 'l', 'М': 'M', 'м': 'm', 'Н': 'N', 'н': 'n',
+        'Л': 'L', 'l': 'l', 'М': 'M', 'м': 'm', 'Н': 'N', 'н': 'n',
         'О': 'O', 'о': 'o', 'П': 'P', 'п': 'p', 'Р': 'R', 'р': 'r',
         'С': 'S', 'с': 's', 'Т': 'T', 'т': 't', 'Ћ': 'Ć', 'ћ': 'ć',
         'У': 'U', 'у': 'u', 'Ф': 'F', 'ф': 'f', 'Х': 'H', 'х': 'h',
@@ -97,12 +101,11 @@ def dobij_hibridni_kontekst(upit, max_karaktera=6000):
     vektorski_tekstovi = []
     svi_vidjeni = set()
 
-    # 1. DIREKTNO SKENIRANJE KEŠIRANIH TEKSTOVA ZA BR. ČLANA (100% SIGURNOST)
+    # 1. DIREKTNO SKENIRANJE KEŠIRANIH TEKSTOVA ZA BR. ČLANA
     brojevi = re.findall(r'\b\d+\b', upit)
     if brojevi:
         sve_poruke = ucitaj_sve_tekstove()
         for br in brojevi:
-            # Obrazac hvata: Član 4, Član 4., Члан 4, ЧЛАН 4., čl. 4 itd.
             pattern = re.compile(rf'(?i)\b(član|члан|čl|чл)\.?\s*{br}\b')
             for txt in sve_poruke:
                 if pattern.search(txt) and txt not in svi_vidjeni:
