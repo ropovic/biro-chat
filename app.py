@@ -89,7 +89,11 @@ def ucitaj_sve_tekstove():
         for r in records:
             if r.payload and "tekst" in r.payload:
                 norm_txt = sredi_tekst(r.payload["tekst"])
-                sve_tacke.append(norm_txt)
+                izvor = sredi_tekst(str(r.payload.get("izvor", r.payload.get("dokument", r.payload.get("source", "")))))
+                sve_tacke.append({
+                    "tekst": norm_txt,
+                    "izvor": izvor
+                })
         
         if next_offset is None or len(records) == 0:
             break
@@ -98,58 +102,56 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- NAPREDNA PROVERA POGOTKA ČLANA -----------------
-def je_pogodjen_clan(tekst, broj):
-    norm_txt = tekst.lower()
+# ----------------- INTELIGENTNO BODOVANJE ČLANOVA -----------------
+def oceni_pogodak_clana(tekst_obj, broj, je_ugovor_upit):
+    txt = tekst_obj["tekst"].lower()
+    izvor = tekst_obj["izvor"].lower()
     br_str = str(broj)
 
-    # Ignorišemo tabele i kartone deponovanih potpisa ako tražimo ugovore
-    if "karton deponovanih" in norm_txt or "podaciokorisniku" in norm_txt:
-        return False
+    # Pametna eliminacija irelevantnih dokumenata ako se traži ugovor
+    if je_ugovor_upit and ("dnevnice" in izvor or "karton" in izvor or "siera leone" in txt or "frituan" in txt):
+        return 0
 
-    pat1 = re.compile(rf'\b(clan|cl)\b[\s\.:\-\*#_]*{br_str}\b')
-    if pat1.search(norm_txt):
-        return True
+    # 1. NAJVIŠI PRIORITET (100b): Sam naslov člana (npr. "Član 114." ili "Član 5.")
+    naslov_pat = re.compile(rf'(?:^|\n|#|\*)\s*(clan|cl)\.?\s*{br_str}\b')
+    if naslov_pat.search(txt):
+        if je_ugovor_upit and ("kolektivn" in izvor or "kolektivn" in txt):
+            return 100
+        return 80
 
-    pat2 = re.compile(rf'\b{br_str}\b[\s\.:\-\*#_]*(clan|cl)\b')
-    if pat2.search(norm_txt):
-        return True
+    # 2. SREDNJI PRIORITET (60b): Spominjanje člana u tekstu ugovora
+    clan_pat = re.compile(rf'\b(clan|cl)\b[\s\.:\-\*#_]*{br_str}\b')
+    if clan_pat.search(txt):
+        if je_ugovor_upit and ("kolektivn" in izvor or "kolektivn" in txt):
+            return 60
+        return 30
 
-    pat3 = re.compile(rf'\b(clan|cl)\b.{{0,30}}\b{br_str}\b')
-    if pat3.search(norm_txt):
-        return True
+    return 0
 
-    return False
-
-# ----------------- HIBRIDNA PRETRAGA SA DVOSTRUKIM FILTEROM -----------------
+# ----------------- HIBRIDNA PRETRAGA SA BODOVANJEM -----------------
 def dobij_hibridni_kontekst(upit, max_karaktera=6000):
-    prioritetni_tekstovi = []
-    vektorski_tekstovi = []
+    svi_odlomci = ucitaj_sve_tekstove()
+    brojevi = re.findall(r'\b\d+\b', upit)
+    upit_low = upit.lower()
+    je_ugovor_upit = "kolektivn" in upit_low or "ugovor" in upit_low or "clan" in upit_low or "član" in upit_low
+
+    rangirani_odlomci = []
     svi_vidjeni = set()
 
-    sve_poruke = ucitaj_sve_tekstove()
-    brojevi = re.findall(r'\b\d+\b', upit)
-
-    # 1. SKENIRANJE ZA TAČAN BROJ ČLANA
+    # 1. PRETRAGA PO TAČNOM BROJU ČLANA SA BODOVANJEM
     if brojevi:
         for br in brojevi:
-            for txt in sve_poruke:
-                if je_pogodjen_clan(txt, br) and txt not in svi_vidjeni:
-                    svi_vidjeni.add(txt)
-                    prioritetni_tekstovi.append(txt)
+            for item in svi_odlomci:
+                skor = oceni_pogodak_clana(item, br, je_ugovor_upit)
+                if skor > 0 and item["tekst"] not in svi_vidjeni:
+                    rangirani_odlomci.append((skor, item["tekst"]))
+                    svi_vidjeni.add(item["tekst"])
 
-    # 2. FALLBACK ZA KOLEKTIVNI UGOVOR
-    if brojevi and len(prioritetni_tekstovi) == 0 and ("kolektivn" in upit.lower() or "ugovor" in upit.lower()):
-        for txt in sve_poruke:
-            txt_low = txt.lower()
-            if "karton" in txt_low:
-                continue
-            if "kolektivn" in txt_low and any(re.search(rf'\b{br}\b', txt_low) for br in brojevi):
-                if txt not in svi_vidjeni:
-                    svi_vidjeni.add(txt)
-                    prioritetni_tekstovi.append(txt)
+    # Sortiranje: Najbolji mečevi idu na sam vrh konteksta
+    rangirani_odlomci.sort(key=lambda x: x[0], reverse=True)
+    prioritetni_tekstovi = [t[1] for t in rangirani_odlomci]
 
-    # 3. VEKTORSKA PRETRAGA
+    # 2. VEKTORSKA PRETRAGA (DOPUNA)
     norm_upit = sredi_tekst(upit)
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
@@ -157,10 +159,17 @@ def dobij_hibridni_kontekst(upit, max_karaktera=6000):
         query=query_vector,
         limit=15
     )
+    
+    vektorski_tekstovi = []
     for hit in vector_response.points:
         raw_txt = hit.payload.get("tekst", "")
         if raw_txt:
             txt = sredi_tekst(raw_txt)
+            izvor = sredi_tekst(str(hit.payload.get("izvor", hit.payload.get("dokument", hit.payload.get("source", ""))))).lower()
+            
+            if je_ugovor_upit and ("dnevnice" in izvor or "siera leone" in txt.lower() or "karton" in izvor):
+                continue
+
             if txt not in svi_vidjeni:
                 svi_vidjeni.add(txt)
                 vektorski_tekstovi.append(txt)
@@ -171,7 +180,7 @@ def dobij_hibridni_kontekst(upit, max_karaktera=6000):
     if len(spojeni_tekst) > max_karaktera:
         spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
 
-    return spojeni_tekst, len(prioritetni_tekstovi), len(sve_poruke)
+    return spojeni_tekst, len(prioritetni_tekstovi), len(svi_odlomci)
 
 # ----------------- BOČNI MENI (SIDEBAR) -----------------
 with st.sidebar:
@@ -254,8 +263,8 @@ if prompt:
                     "PRAVILA STRUKTURIRANJA I FORMATIRANJA TEKSTA:\n"
                     "1. Odgovaraj na srpskom jeziku (latinica).\n"
                     "2. Formatiraj odgovor u jasne paragrafe sa praznim redovima između njih.\n"
-                    "3. Kada objašnjavaš članove, pravila ili više tačaka, OBAVEZNO koristi tačke (bullet points `- `) i podebljaj (**bold**) ključne pojmove ili trajanja.\n"
-                    "4. Nemoj spajati sve u jedan gust blok teksta — tekst mora biti pregledan, vizuelno odvojen i lak za čitanje na prvi pogled.\n"
+                    "3. Kada objašnjavaš članove, pravila ili više tačaka, OBAVEZNO koristi tačke (bullet points `- `) i podebljaj (**bold**) ključne pojmove.\n"
+                    "4. Ako se u kontekstu nalazi više odlomaka, fokusiraj se ISKLJUČIVO na onaj koji direktno definira traženi član ili pojam.\n"
                     "5. Ako u kontekstu postoji URL fotografije tražene osobe ili logoa, prikaži je koristeći Markdown sintaksu: ![Opis slike](URL_slike).\n\n"
                     f"KONTEKST IZ BAZE PODATAKA:\n{kontekst}"
                 )
@@ -280,7 +289,7 @@ if prompt:
                 # DEBUG EXPANDER
                 with st.expander("🔍 Pregled preuzetog konteksta iz baze (Za debug)"):
                     st.caption(f"Ukupno učitano odlomaka iz Qdrant baze u keš: **{ukupno_keširano}**")
-                    st.caption(f"Pronađeno prioritetnih odlomaka sa traženim članom: **{br_prioritetnih}**")
+                    st.caption(f"Pronađeno rangiranih odlomaka sa traženim članom: **{br_prioritetnih}**")
                     st.text_area("Sadržaj poslat Llami:", value=kontekst, height=220)
 
                 st.session_state.messages.append({"role": "user", "content": prompt})
