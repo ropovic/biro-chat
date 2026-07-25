@@ -214,7 +214,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     return skorovani_kandidati[:15]
 
 # ----------------- HIBRIDNA PRETRAGA SA OPTIMIZACIJOM TOKENA -----------------
-def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=3200):
+def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=3500):
     svi_odlomci = ucitaj_sve_tekstove()
     svi_kandidati = []
     svi_vidjeni = set()
@@ -288,7 +288,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=3200):
         potrebno = top_k_rezultata - len(top_odlomci)
         top_odlomci.extend(ostali_kandidati[:potrebno])
 
-    # Formatiranje čistog konteksta (sa striktnim limitom znakova radi štednje tokena)
+    # Formatiranje čistog konteksta
     kontekst_lista = []
     for txt in top_odlomci:
         if txt.startswith("Izvor"):
@@ -299,7 +299,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=3200):
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(kontekst_lista)
 
     if len(spojeni_tekst) > max_karaktera:
-        spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi štednje tokena]..."
+        spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
 
     return spojeni_tekst, len(skorovani), len(svi_odlomci)
 
@@ -380,26 +380,25 @@ if prompt:
                 kontekst, br_kandidata, ukupno_keširano = dobij_hibridni_kontekst(prompt)
 
                 system_prompt = (
-                    "Ti si ljubazan i stručan asistent Biroa za planiranje (PD Srbijašume).\n"
-                    "Odgovaraj tačno i direktno na osnovu datog konteksta iz baze podataka i dosadašnjeg razgovora.\n\n"
-                    "PRAVILA FORMATIRANJA TEKSTA:\n"
+                    "Ti si ljubazan i profesionalan asistent Biroa za planiranje (PD Srbijašume).\n"
+                    "Odgovaraj tačno, jasno i isključivo na osnovu pruženog konteksta.\n\n"
+                    "PRAVILA ODGOVARANJA:\n"
                     "1. Odgovaraj na srpskom jeziku (latinica).\n"
-                    "2. Svaki odgovor OBAVEZNO organizuj u jasne sekcije sa podnaslovima (`###`), npr. `### 📍 Lokacija`, `### 📜 Odredbe`.\n"
-                    "3. Koristi tačke (`- `) za nabrajanje i **podebljaj** ključne pojmove.\n"
-                    "4. PRAVILO ZA SLIKE: Ako u kontekstu postoji URL fotografije zaposlenog ili objekta, prikaži sliku kao: ![Opis](URL_slike).\n\n"
-                    f"KONTEKST IZ BAZE PODATAKA:\n{kontekst}"
+                    "2. Ako se u tekstu eksplicitno NE NALAZI tačan član ili traženi podatak, Jasno i direktno reci: "
+                    "'Traženi član/podatak se ne nalazi u dostupnim izvodima dokumenta u bazi.' NIKADA ne nudi druge članove niti nagađaj!\n"
+                    "3. Formatiraj odgovor sa podnaslovima (`###`) i listama sa boldovanim ključnim rečima.\n"
+                    "4. Ako u kontekstu postoji slika (URL), prikaži je u formatu: ![Opis](URL).\n\n"
+                    f"KONTEKST IZ BAZE:\n{kontekst}"
                 )
 
                 messages_for_groq = [{"role": "system", "content": system_prompt}]
                 
-                # Smanjena istorija poruka (poslednje 4) radi ušteđivanja tokena
                 skracena_istorija = st.session_state.messages[-4:]
                 for msg in skracena_istorija:
                     messages_for_groq.append({"role": msg["role"], "content": msg["content"]})
                 
                 messages_for_groq.append({"role": "user", "content": prompt})
 
-                # Lista modela po prioritetu (automatski fallback ako 70b dostigne limit)
                 modeli = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
                 odgovor = None
                 korisceni_model = ""
@@ -416,7 +415,7 @@ if prompt:
                         break
                     except Exception as err:
                         if "rate_limit_exceeded" in str(err).lower() or "429" in str(err):
-                            continue # Akumuliran dnevni limit na 70b -> prelazimo automatski na 8b!
+                            continue
                         else:
                             raise err
 
