@@ -57,10 +57,8 @@ def sredi_tekst(tekst):
     if not tekst:
         return ""
     
-    # Prvo menjamo digrafe
     tekst = tekst.replace('Љ', 'Lj').replace('љ', 'lj').replace('Њ', 'Nj').replace('њ', 'nj').replace('Џ', 'Dž').replace('џ', 'dž')
     
-    # Mapa za konverziju svih ćiriličnih i mešanih slova u čistu latinicu
     zamene = {
         'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'đ': 'đ', 'ђ': 'đ',
         'е': 'e', 'ж': 'ž', 'з': 'z', 'и': 'i', 'ј': 'j', 'к': 'k', 'л': 'l',
@@ -90,7 +88,6 @@ def ucitaj_sve_tekstove():
         )
         for r in records:
             if r.payload and "tekst" in r.payload:
-                # Odlomke odmah normalizujemo u čistu latinicu
                 norm_txt = sredi_tekst(r.payload["tekst"])
                 sve_tacke.append(norm_txt)
         
@@ -106,17 +103,18 @@ def je_pogodjen_clan(tekst, broj):
     norm_txt = tekst.lower()
     br_str = str(broj)
 
-    # 1. Obrazac: clan 4, cl. 4, cl 4, clan: 4, clan. 4, clan 4.
+    # Ignorišemo tabele i kartone deponovanih potpisa ako tražimo ugovore
+    if "karton deponovanih" in norm_txt or "podaciokorisniku" in norm_txt:
+        return False
+
     pat1 = re.compile(rf'\b(clan|cl)\b[\s\.:\-\*#_]*{br_str}\b')
     if pat1.search(norm_txt):
         return True
 
-    # 2. Obrnuti obrazac: 4. clan, 4.cl
     pat2 = re.compile(rf'\b{br_str}\b[\s\.:\-\*#_]*(clan|cl)\b')
     if pat2.search(norm_txt):
         return True
 
-    # 3. Bliski kontakt: reč clan/cl i broj u razmaku do 30 karaktera
     pat3 = re.compile(rf'\b(clan|cl)\b.{{0,30}}\b{br_str}\b')
     if pat3.search(norm_txt):
         return True
@@ -132,28 +130,26 @@ def dobij_hibridni_kontekst(upit, max_karaktera=6000):
     sve_poruke = ucitaj_sve_tekstove()
     brojevi = re.findall(r'\b\d+\b', upit)
 
-# 1. SKENIRANJE ZA TAČAN BROJ ČLANA (SA PRIORITETOM NA SRODNE DOKUMENTE)
+    # 1. SKENIRANJE ZA TAČAN BROJ ČLANA
     if brojevi:
         for br in brojevi:
             for txt in sve_poruke:
-                # Ako tražimo kolektivni ugovor, ignorišemo kartone deponovanih potpisa i tabele
-                if "kolektivn" in upit.lower() and "karton deponovanih potpisa" in txt.lower():
-                    continue
-
                 if je_pogodjen_clan(txt, br) and txt not in svi_vidjeni:
                     svi_vidjeni.add(txt)
                     prioritetni_tekstovi.append(txt)
 
-# 2. FALLBACK: AKO JE U PITANJU UGOVOR A REČ "ČLAN" NIJE DIREKTNO UZ BROJ
+    # 2. FALLBACK ZA KOLEKTIVNI UGOVOR
     if brojevi and len(prioritetni_tekstovi) == 0 and ("kolektivn" in upit.lower() or "ugovor" in upit.lower()):
         for txt in sve_poruke:
             txt_low = txt.lower()
+            if "karton" in txt_low:
+                continue
             if "kolektivn" in txt_low and any(re.search(rf'\b{br}\b', txt_low) for br in brojevi):
                 if txt not in svi_vidjeni:
                     svi_vidjeni.add(txt)
                     prioritetni_tekstovi.append(txt)
 
-# 3. VEKTORSKA PRETRAGA ZA ŠIROKI SEMANTIČKI KONTEKST
+    # 3. VEKTORSKA PRETRAGA
     norm_upit = sredi_tekst(upit)
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
@@ -169,7 +165,6 @@ def dobij_hibridni_kontekst(upit, max_karaktera=6000):
                 svi_vidjeni.add(txt)
                 vektorski_tekstovi.append(txt)
 
-    # Spajanje: Prioritetni odlomci idu PRVI
     spojeni_rezultati = prioritetni_tekstovi + vektorski_tekstovi
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(spojeni_rezultati)
 
@@ -256,10 +251,12 @@ if prompt:
                 system_prompt = (
                     "Ti si ljubazan i stručan asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj tačno i direktno na osnovu datog konteksta iz baze podataka i dosadašnjeg razgovora.\n\n"
-                    "PRAVILA ODGOVARANJA:\n"
+                    "PRAVILA STRUKTURIRANJA I FORMATIRANJA TEKSTA:\n"
                     "1. Odgovaraj na srpskom jeziku (latinica).\n"
-                    "2. Daj direktan i potpun odgovor na postavljeno pitanje.\n"
-                    "3. Ako u kontekstu postoji URL fotografije tražene osobe ili logoa, prikaži je koristeći Markdown sintaksu: ![Opis slike](URL_slike).\n\n"
+                    "2. Formatiraj odgovor u jasne paragrafe sa praznim redovima između njih.\n"
+                    "3. Kada objašnjavaš članove, pravila ili više tačaka, OBAVEZNO koristi tačke (bullet points `- `) i podebljaj (**bold**) ključne pojmove ili trajanja.\n"
+                    "4. Nemoj spajati sve u jedan gust blok teksta — tekst mora biti pregledan, vizuelno odvojen i lak za čitanje na prvi pogled.\n"
+                    "5. Ako u kontekstu postoji URL fotografije tražene osobe ili logoa, prikaži je koristeći Markdown sintaksu: ![Opis slike](URL_slike).\n\n"
                     f"KONTEKST IZ BAZE PODATAKA:\n{kontekst}"
                 )
 
@@ -280,7 +277,7 @@ if prompt:
                 odgovor = response.choices[0].message.content
                 st.markdown(odgovor)
 
-                # DEBUG EXPANDER - Prikaz preuzetog konteksta
+                # DEBUG EXPANDER
                 with st.expander("🔍 Pregled preuzetog konteksta iz baze (Za debug)"):
                     st.caption(f"Ukupno učitano odlomaka iz Qdrant baze u keš: **{ukupno_keširano}**")
                     st.caption(f"Pronađeno prioritetnih odlomaka sa traženim članom: **{br_prioritetnih}**")
