@@ -122,7 +122,7 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- HELPER ZA RIMSKE BROJEVE -----------------
+# ----------------- HELPERI ZA ČLANOVE I SADRŽAJ -----------------
 def pretvori_u_rimske(broj_str):
     mapping = {
         "1": "I", "2": "II", "3": "III", "4": "IV", "5": "V",
@@ -130,6 +130,30 @@ def pretvori_u_rimske(broj_str):
         "11": "XI", "12": "XII", "13": "XIII", "14": "XIV", "15": "XV"
     }
     return mapping.get(broj_str, "")
+
+def je_pogodak_za_clan(txt_low, broj_str):
+    """Striktno proverava da li se u tekstu nalazi REČ član/čl/clan/cl NEPOSREDNO uz traženi broj."""
+    rimski = pretvori_u_rimske(broj_str)
+    pats = [
+        rf'\b(član|clan|čl|cl)\.?\s*0?{broj_str}\b',
+        rf'\b0?{broj_str}\b\.\s*(član|clan)\b'
+    ]
+    if rimski:
+        pats.append(rf'\b(član|clan|čl|cl)\.?\s*{rimski}\b')
+        
+    for pat in pats:
+        if re.search(pat, txt_low):
+            return True
+    return False
+
+def je_sadrzaj_toc(txt_low):
+    """Prepoznaje da li je odlomak deo indeksa/sadržaja sa brojevima stranica."""
+    if "sadržaj" in txt_low or "sadrzaj" in txt_low:
+        return True
+    matches = re.findall(r'\.\.\.\s*\d+|\b\d+\s*$', txt_low, re.MULTILINE)
+    if len(matches) >= 3:
+        return True
+    return False
 
 # ----------------- INTELIGENTNO FILTRIRANJE I RANGIRANJE KANDIDATA -----------------
 def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
@@ -153,31 +177,22 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
         if (je_kolektivni or je_direktor or je_clan) and "<table>" in txt_low and "kolektivn" not in txt_low and "direktor" not in txt_low:
             continue
 
-        # 1. NAPREDNO BODOVANJE ZA KOLEKTIVNI UGOVOR
-        if je_kolektivni:
+        # Penalizacija indeksa/sadržaja sa stranicama ako tražimo konkretan član
+        if (je_kolektivni or je_clan) and je_sadrzaj_toc(txt_low):
+            skor -= 5000
+
+        # 1. NAPREDNO STRIKTO BODOVANJE ZA ČLANOVE KOLEKTIVNOG UGOVORA
+        if je_kolektivni or je_clan:
             if "kolektivn" in izvor_low or "kolektivn" in txt_low:
                 skor += 300
 
-            if brojevi:
+            if brojevi and je_clan:
                 for br in brojevi:
-                    rimski = pretvori_u_rimske(br)
-                    
-                    # Fleksibilni obrasci za prepoznavanje traženog člana
-                    pats = [
-                        rf'(član|clan|čl|cl)[^\n\d]{{0,10}}\b0?{br}\b',
-                        rf'(?:^|\n|#|\*|\s){br}\.[\s\-_*#]+',
-                        rf'(?:^|\n|#|\*|\s)član[a-z]*[\s\.:\-_*#]+0?{br}\b'
-                    ]
-                    if rimski:
-                        pats.append(rf'(član|clan|čl|cl)[^\n\d]{{0,10}}\b{rimski}\b')
-
-                    for pat in pats:
-                        if re.search(pat, txt_low):
-                            if "kolektivn" in izvor_low or "kolektivn" in txt_low:
-                                skor += 10000  # MAKSIMALAN PRIORITY ZA EKSAKTAN ČLAN KOLEKTIVNOG UGOVORA!
-                            else:
-                                skor += 100
-                            break
+                    if je_pogodak_za_clan(txt_low, br):
+                        if "kolektivn" in izvor_low or "kolektivn" in txt_low:
+                            skor += 10000  # EKSAKTNI PRIORITY ZA TAČAN ČLAN KOLEKTIVNOG UGOVORA!
+                        else:
+                            skor += 2000
 
         # 2. BODOVANJE ZA DIREKTORA I ZAMENIKE
         if je_direktor:
@@ -207,31 +222,23 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     brojevi = re.findall(r'\b\d+\b', upit)
     upit_low = norm_upit.lower()
 
-    # 1. DIREKTNO SKENIRANJE KEŠA ZA ČLANOVE U KOLEKTIVNOM UGOVORU
-    if brojevi:
+    # 1. DIREKTNO SKENIRANJE KEŠA ZA ČLANOVE (Ignoriše Sadržaj/TOC)
+    if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl"]):
         for br in brojevi:
-            rimski = pretvori_u_rimske(br)
             for item in svi_odlomci:
                 txt = item["tekst"]
                 izvor = item["izvor"]
                 txt_low = txt.lower()
                 izvor_low = izvor.lower()
 
-                # Ako je upit vezan za ugovor, gledamo primarno ugovor
-                if "kolektivn" in upit_low and ("kolektivn" in izvor_low or "kolektivn" in txt_low):
-                    pats = [
-                        rf'(član|clan|čl|cl)[^\n\d]{{0,10}}\b0?{br}\b',
-                        rf'\b{br}\.[\s\-_*#]+'
-                    ]
-                    if rimski:
-                        pats.append(rf'(član|clan|čl|cl)[^\n\d]{{0,10}}\b{rimski}\b')
+                if je_sadrzaj_toc(txt_low):
+                    continue
 
-                    for pat in pats:
-                        if re.search(pat, txt_low):
-                            if txt not in svi_vidjeni:
-                                svi_kandidati.append(item)
-                                svi_vidjeni.add(txt)
-                            break
+                if je_pogodak_za_clan(txt_low, br):
+                    if ("kolektivn" in upit_low and ("kolektivn" in izvor_low or "kolektivn" in txt_low)) or "kolektivn" not in upit_low:
+                        if txt not in svi_vidjeni:
+                            svi_kandidati.append(item)
+                            svi_vidjeni.add(txt)
 
     # 2. VEKTORSKA PRETRAGA ZA DOPUNU
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
@@ -262,11 +269,11 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     # 3. FILTRIRANJE I BODOVANJE
     skorovani = filtriraj_i_skoruj_kandidate(svi_kandidati, upit)
 
-    # Odvajamo kandidate sa ekstremno visokim heurisitčkim skorom (npr. tačan Član ugovor)
+    # Odvajamo kandidate sa ekstremno visokim heurisitčkim skorom (tačni članovi)
     top_prioritetni = [item[1] for item in skorovani if item[0] >= 5000]
     ostali_kandidati = [item[1] for item in skorovani if item[0] < 5000]
 
-    # 4. FINALNI RERANKING (Samo za ostale kandidate)
+    # 4. FINALNI RERANKING
     top_odlomci = list(top_prioritetni)
 
     if reranker_model is not None and len(ostali_kandidati) > 0 and len(top_odlomci) < top_k_rezultata:
