@@ -59,7 +59,6 @@ def ukloni_dijakritike(tekst):
     return tekst.translate(sve)
 
 def generisi_korene(rec):
-    """Generiše koren reči skidanjem srpskih padežnih nastavaka i dijakritika."""
     r = rec.strip("?,.!\"':;()[]{}").lower()
     if len(r) <= 3:
         return []
@@ -75,21 +74,21 @@ def generisi_korene(rec):
 
     return list(varijacije)
 
-# ----------------- FUNKCIJA ZA HIBRIDNU PRETRAGU -----------------
-def dobij_hibridni_kontekst(upit):
+# ----------------- OPTIMIZOVANA HIBRIDNA PRETRAGU -----------------
+def dobij_hibridni_kontekst(upit, max_karaktera=4000):
     rezultujuci_tekstovi = []
     
-    # 1. Vektorska pretraga (po opštem smislu)
+    # 1. Vektorska pretraga (Smanjeno sa 15 na 8 radi uštede tokena)
     query_vector = list(embed_model.embed([upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
-        limit=15
+        limit=8
     )
     for hit in vector_response.points:
         rezultujuci_tekstovi.append(hit.payload["tekst"])
 
-    # 2. Pametna tekstualna pretraga po korenima reči (rešava padeže i kvačice)
+    # 2. Tekstualna pretraga po korenima reči
     reci = [w for w in upit.split() if len(w) > 3]
     stop_reci = {"bazi", "bazu", "neki", "neka", "neko", "postoji", "ima", "ovom", "znas", "kazi", "pise", "izvesni", "izvesnog"}
 
@@ -110,7 +109,7 @@ def dobij_hibridni_kontekst(upit):
                     scroll_filter=Filter(
                         must=[FieldCondition(key="tekst", match=MatchText(text=koren))]
                     ),
-                    limit=5
+                    limit=3
                 )
                 for hit in kw_hits:
                     txt = hit.payload["tekst"]
@@ -119,7 +118,13 @@ def dobij_hibridni_kontekst(upit):
             except Exception:
                 pass
 
-    return "\n\n".join(rezultujuci_tekstovi)
+    spojeni_tekst = "\n\n".join(rezultujuci_tekstovi)
+    
+    # Skraćivanje teksta na max_karaktera da ne prekorači Groq limit
+    if len(spojeni_tekst) > max_karaktera:
+        spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
+
+    return spojeni_tekst
 
 # ----------------- BOČNI MENI (SIDEBAR) -----------------
 with st.sidebar:
@@ -162,8 +167,8 @@ with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expand
         clicked_prompt = "Ko je direktor Biroa i pokaži njegovu sliku?"
     if col2.button("👥 Ko su zamenici?", use_container_width=True):
         clicked_prompt = "Ko su zamenici direktora u Birou?"
-    if col3.button("🌲 Donji Pek?", use_container_width=True):
-        clicked_prompt = "Postoji li Donji pek u bazi i šta piše o njemu?"
+    if col3.button("🌲 Crni vrh?", use_container_width=True):
+        clicked_prompt = "Postoji li Crni vrh u bazi i šta piše o njemu?"
         
     if clicked_prompt:
         st.session_state.prompt_input = clicked_prompt
@@ -205,8 +210,12 @@ if prompt:
                 )
 
                 messages_for_groq = [{"role": "system", "content": system_prompt}]
-                for msg in st.session_state.messages:
+                
+                # UŠTEDA TOKENA: Šaljemo samo poslednjih 6 poruka (poslednja 3 kruga razgovora)
+                skracena_istorija = st.session_state.messages[-6:]
+                for msg in skracena_istorija:
                     messages_for_groq.append({"role": msg["role"], "content": msg["content"]})
+                
                 messages_for_groq.append({"role": "user", "content": prompt})
 
                 response = groq.chat.completions.create(
