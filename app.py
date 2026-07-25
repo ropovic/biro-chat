@@ -53,14 +53,9 @@ def init_clients():
 
 qdrant, groq, embed_model = init_clients()
 
-# ----------------- POMOĆNE FUNKCIJE -----------------
+# ----------------- FUNKCIJE ZA KONVERZIJU PISMA -----------------
 def cirilica_u_latinicu(tekst):
-    """Preslovljava srpsku ćirilicu u čistiju latinicu pre slanja LLM-u."""
-    digrafi = {
-        'Љ': 'Lj', 'љ': 'lj',
-        'Њ': 'Nj', 'њ': 'nj',
-        'Џ': 'Dž', 'џ': 'dž'
-    }
+    digrafi = {'Љ': 'Lj', 'љ': 'lj', 'Њ': 'Nj', 'њ': 'nj', 'Џ': 'Dž', 'џ': 'dž'}
     monografi = {
         'А': 'A', 'а': 'a', 'Б': 'B', 'б': 'b', 'В': 'V', 'в': 'v',
         'Г': 'G', 'г': 'g', 'Д': 'D', 'д': 'd', 'Ђ': 'Đ', 'ђ': 'đ',
@@ -71,6 +66,24 @@ def cirilica_u_latinicu(tekst):
         'С': 'S', 'с': 's', 'Т': 'T', 'т': 't', 'Ћ': 'Ć', 'ћ': 'ć',
         'У': 'U', 'у': 'u', 'Ф': 'F', 'ф': 'f', 'Х': 'H', 'х': 'h',
         'Ц': 'C', 'ц': 'c', 'Ч': 'Č', 'ч': 'č', 'Ш': 'Š', 'ш': 'š'
+    }
+    for k, v in digrafi.items():
+        tekst = tekst.replace(k, v)
+    res = [monografi.get(ch, ch) for ch in tekst]
+    return "".join(res)
+
+def latinica_u_cirilicu(tekst):
+    digrafi = {'Lj': 'Љ', 'LJ': 'Љ', 'lj': 'љ', 'Nj': 'Њ', 'NJ': 'Њ', 'nj': 'њ', 'Dž': 'Џ', 'DŽ': 'Џ', 'dž': 'џ'}
+    monografi = {
+        'A': 'А', 'a': 'а', 'B': 'Б', 'b': 'б', 'V': 'В', 'v': 'в',
+        'G': 'Г', 'g': 'г', 'D': 'Д', 'd': 'д', 'Đ': 'Ђ', 'đ': 'ђ',
+        'E': 'Е', 'e': 'е', 'Ž': 'Ж', 'ž': 'ж', 'Z': 'З', 'z': 'з',
+        'I': 'И', 'i': 'и', 'J': 'Ј', 'j': 'ј', 'K': 'К', 'к': 'к',
+        'L': 'Л', 'l': 'л', 'M': 'М', 'm': 'м', 'N': 'Н', 'n': 'н',
+        'O': 'О', 'o': 'о', 'P': 'П', 'p': 'п', 'R': 'Р', 'r': 'р',
+        'S': 'С', 's': 'с', 'T': 'Т', 't': 'т', 'Ć': 'Ћ', 'ć': 'ћ',
+        'U': 'У', 'u': 'у', 'F': 'Ф', 'f': 'ф', 'H': 'Х', 'h': 'х',
+        'C': 'Ц', 'c': 'ц', 'Č': 'Ч', 'č': 'ч', 'Š': 'Ш', 'ш': 'ш'
     }
     for k, v in digrafi.items():
         tekst = tekst.replace(k, v)
@@ -97,53 +110,82 @@ def generisi_korene(rec):
 
     return list(varijacije)
 
-# ----------------- HIBRIDNA PRETRAGA SA AUTOMATSKIM PRESLOVLJAVANJEM -----------------
-def dobij_hibridni_kontekst(upit, max_karaktera=4000):
+# ----------------- NAPREDNA HIBRIDNA PRETRAGA -----------------
+def dobij_hibridni_kontekst(upit, max_karaktera=4500):
     rezultujuci_tekstovi = []
     
-    # 1. Vektorska pretraga
+    # 1. VEKTORSKA PRETRAGA
     query_vector = list(embed_model.embed([upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
-        limit=8
+        limit=10
     )
     for hit in vector_response.points:
         rezultujuci_tekstovi.append(hit.payload["tekst"])
 
-    # 2. Tekstualna pretraga po korenima reči
-    reci = [w for w in upit.split() if len(w) > 3]
-    stop_reci = {"bazi", "bazu", "neki", "neka", "neko", "postoji", "ima", "ovom", "znas", "kazi", "pise", "izvesni", "izvesnog"}
-
-    pretrazeni_koreni = set()
-    for rec in reci:
-        if rec.lower() in stop_reci:
-            continue
-        
-        koreni = generisi_korene(rec)
-        for koren in koreni:
-            if koren in pretrazeni_koreni or len(koren) < 3:
-                continue
-            pretrazeni_koreni.add(koren)
-
+    # 2. CILJANA PRETRAGA ZA BROJEVE ČLANOVA (npr. član 5, član 6, član 114)
+    brojevi = re.findall(r'\b\d+\b', upit)
+    for br in brojevi:
+        varijacije_broja = [
+            br,
+            f"član {br}", f"čl. {br}",
+            f"члан {br}", f"чл. {br}"
+        ]
+        for var in varijacije_broja:
             try:
-                kw_hits, _ = qdrant.scroll(
+                num_hits, _ = qdrant.scroll(
                     collection_name=COLLECTION_NAME,
                     scroll_filter=Filter(
-                        must=[FieldCondition(key="tekst", match=MatchText(text=koren))]
+                        must=[FieldCondition(key="tekst", match=MatchText(text=var))]
                     ),
                     limit=3
                 )
-                for hit in kw_hits:
+                for hit in num_hits:
                     txt = hit.payload["tekst"]
                     if txt not in rezultujuci_tekstovi:
                         rezultujuci_tekstovi.append(txt)
             except Exception:
                 pass
 
+    # 3. DVOSMERNA TEKSTUALNA PRETRAGA (LATINICA I ĆIRILICA)
+    upit_lat = cirilica_u_latinicu(upit)
+    reci = [w.strip("?,.!\"':;()[]{}") for w in upit_lat.split() if len(w) > 3 and not w.isdigit()]
+    stop_reci = {"bazi", "bazu", "neki", "neka", "neko", "postoji", "ima", "ovom", "znas", "kazi", "pise", "izvesni", "izvesnog", "clan", "clana", "ugovor", "ugovora"}
+
+    pretrazeni_koreni = set()
+    for rec in reci:
+        if rec.lower() in stop_reci:
+            continue
+        
+        koreni_lat = generisi_korene(rec)
+        for koren_lat in koreni_lat:
+            if koren_lat in pretrazeni_koreni or len(koren_lat) < 3:
+                continue
+            pretrazeni_koreni.add(koren_lat)
+
+            koren_cir = latinica_u_cirilicu(koren_lat)
+
+            # Pretražujemo i latinični i ćirilični koren u Qdrant-u
+            for koren_search in {koren_lat, koren_cir}:
+                try:
+                    kw_hits, _ = qdrant.scroll(
+                        collection_name=COLLECTION_NAME,
+                        scroll_filter=Filter(
+                            must=[FieldCondition(key="tekst", match=MatchText(text=koren_search))]
+                        ),
+                        limit=3
+                    )
+                    for hit in kw_hits:
+                        txt = hit.payload["tekst"]
+                        if txt not in rezultujuci_tekstovi:
+                            rezultujuci_tekstovi.append(txt)
+                except Exception:
+                    pass
+
     spojeni_tekst = "\n\n".join(rezultujuci_tekstovi)
     
-    # Automatsko preslovljavanje ćirilice u latinicu pre slanja LLM-u
+    # Pretvaramo sav pronađeni tekst u čistiju latinicu pre slanja LLM-u
     spojeni_tekst = cirilica_u_latinicu(spojeni_tekst)
 
     if len(spojeni_tekst) > max_karaktera:
@@ -186,7 +228,7 @@ if "messages" not in st.session_state:
 
 # ----------------- TRAJNA BRZA PITANJA (EXPANDER) -----------------
 with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expanded=(len(st.session_state.messages) == 0)):
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     clicked_prompt = None
     if col1.button("👔 Ko je direktor?", use_container_width=True):
         clicked_prompt = "Ko je direktor Biroa i pokaži njegovu sliku?"
@@ -194,7 +236,9 @@ with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expand
         clicked_prompt = "Ko su zamenici direktora u Birou?"
     if col3.button("🌲 Crni vrh?", use_container_width=True):
         clicked_prompt = "Postoji li Crni vrh u bazi i šta piše o njemu?"
-        
+    if col4.button("🌲 Član 4. Kol. ugovora?", use_container_width=True):
+        clicked_prompt = "Navedi član 4. kolektivnog ugovora?"
+
     if clicked_prompt:
         st.session_state.prompt_input = clicked_prompt
 
@@ -225,7 +269,7 @@ if prompt:
                     "Odgovaraj tačno i direktno na osnovu datog konteksta iz baze podataka i dosadašnjeg razgovora.\n\n"
                     "PRAVILA ODGOVARANJA:\n"
                     "1. Odgovaraj na srpskom jeziku (latinica).\n"
-                    "2. NIKADA nemoj pisati uvodne fraze poput 'Na osnovu konteksta...', 'Evo odgovora...' ili objašnjavati proces prevođenja. Daj direktan i čist odgovor.\n"
+                    "2. Daj direktan i potpun odgovor na postavljeno pitanje.\n"
                     "3. Ako u kontekstu postoji URL fotografije tražene osobe ili logoa, prikaži je koristeći Markdown sintaksu: ![Opis slike](URL_slike).\n\n"
                     f"KONTEKST IZ BAZE PODATAKA:\n{kontekst}"
                 )
