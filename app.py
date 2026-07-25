@@ -54,6 +54,7 @@ st.markdown("""
 def init_clients():
     qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, check_compatibility=False)
     groq = Groq(api_key=GROQ_API_KEY)
+    # Vraćen originalni model - ne treba menjati napuni_bazu.py
     embed_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     
     reranker_model = None
@@ -122,54 +123,13 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- ROBUSTNA PRETRAGA ČLANA (RELAXED MATCH) -----------------
-def pronadji_tacnan_clan(svi_odlomci, broj_str):
-    """Izuzetno fleksibilna pretraga koja traži bilo koji pomen reči član i broja u istom odlomku."""
-    rezultati = []
-    
-    for idx, item in enumerate(svi_odlomci):
-        txt = item["tekst"]
-        izvor = item["izvor"]
-        txt_low = txt.lower()
-        
-        # Provera da li tekst sadrži reč član/члан i traženi broj
-        ima_rec = any(w in txt_low for w in ["član", "clan", "čl", "cl", "члан", "член", "чл"])
-        # Tražimo broj okružen razmacima, tačkom ili zagradom da ne bi pokupilo pogrešne brojeve
-        ima_broj = (
-            f" {broj_str} " in f" {txt_low} " or 
-            f"{broj_str}." in txt_low or 
-            f"{broj_str})" in txt_low or 
-            f"0{broj_str}" in txt_low or
-            f"član {broj_str}" in txt_low or
-            f"члан {broj_str}" in txt_low
-        )
-        
-        if ima_rec and ima_broj:
-            prosirani_tekst = txt
-            for step in range(1, 3):
-                if idx + step < len(svi_odlomci):
-                    sledeci_item = svi_odlomci[idx + step]
-                    prosirani_tekst += "\n" + sledeci_item["tekst"]
-            rezultati.append({"tekst": prosirani_tekst, "izvor": izvor})
-            
-    return rezultati
-
-def je_sadrzaj_toc(txt_low):
-    if "sadržaj" in txt_low or "sadrzaj" in txt_low:
-        return True
-    matches = re.findall(r'\.\.\.\s*\d+|\b\d+\s*$', txt_low, re.MULTILINE)
-    if len(matches) >= 3:
-        return True
-    return False
-
-# ----------------- FILTRIRANJE I BODOVANJE KANDIDATA -----------------
+# ----------------- FILTRIRANJE I BODOVANJE KANDIDATA SA PAMETNIM PRAVILIMA -----------------
 def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     upit_low = upit.lower()
-    brojevi = re.findall(r'\b\d+\b', upit)
     
-    je_kolektivni = any(w in upit_low for w in ["kolektivn", "ugovor"])
-    je_clan = any(w in upit_low for w in ["clan", "član", "cl", "čl", "члан", "чл"])
-    je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef"])
+    je_dokument_pitanje = any(w in upit_low for w in ["dokument", "naziv", "fajl", "spisak", "koji dokumenti"])
+    je_kyocera = "kyocera" in upit_low or "štampač" in upit_low or "stampac" in upit_low
+    je_mrcajevac = "mrčajevac" in upit_low or "mrcajevac" in upit_low
 
     skorovani_kandidati = []
 
@@ -180,54 +140,44 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
         izvor_low = izvor.lower()
         skor = 0
 
-        if (je_kolektivni or je_direktor or je_clan) and "<table>" in txt_low and "kolektivn" not in txt_low and "direktor" not in txt_low:
-            continue
+        # Direktan prioritet za Kyoceru ako se traži
+        if je_kyocera and ("kyocera" in txt_low or "štampač" in txt_low or "stampac" in txt_low):
+            skor += 50000
 
-        if (je_kolektivni or je_clan) and je_sadrzaj_toc(txt_low):
-            skor -= 5000
+        # Direktan prioritet za Mrčajevac ako se traži
+        if je_mrcajevac and "mrčajevac" in txt_low:
+            skor += 50000
 
-        if je_kolektivni or je_clan:
-            if "kolektivn" in izvor_low or "kolektivn" in txt_low:
-                skor += 300
-
-            if brojevi and je_clan:
-                for br in brojevi:
-                    if br in txt_low:
-                        skor += 30000
-
-        if je_direktor:
-            if "zamenik" in txt_low or "direktor" in txt_low:
-                skor += 1000
-            if "http" in txt_low:
-                skor += 2000
+        # Ako se pitaju nazivi dokumenata, dajemo prednost jedinstvenim nazivima fajlova u izvoru
+        if je_dokument_pitanje and izvor and izvor != "zaposleni_i_foto" and izvor != "osnovne_informacije":
+            skor += 10000
 
         upit_reci = [r for r in upit_low.split() if len(r) > 3]
         for rec in upit_reci:
-            if rec in txt_low:
-                skor += 10
+            if rec in txt_low or rec in izvor_low:
+                skor += 50
 
         skorovani_kandidati.append((skor, txt, izvor))
 
     skorovani_kandidati.sort(key=lambda x: x[0], reverse=True)
     return skorovani_kandidati[:15]
 
-# ----------------- HIBRIDNA PRETRAGA -----------------
+# ----------------- HIBRIDNA PRETRAGA SA LISTOM SVIH DOKUMENATA -----------------
 def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     svi_odlomci = ucitaj_sve_tekstove()
     svi_kandidati = []
     svi_vidjeni = set()
     norm_upit = sredi_tekst(upit)
-    brojevi = re.findall(r'\b\d+\b', upit)
     upit_low = norm_upit.lower()
 
-    if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl", "члан", "чл"]):
-        for br in brojevi:
-            direktni_pogodci = pronadji_tacnan_clan(svi_odlomci, br)
-            for dp in direktni_pogodci:
-                if dp["tekst"] not in svi_vidjeni:
-                    svi_vidjeni.add(dp["tekst"])
-                    svi_kandidati.append(dp)
+    # Ako pita za dokumente, ubacujemo spisak svih jedinstvenih naziva fajlova iz baze direktno u kandidate
+    je_dokument_pitanje = any(w in upit_low for w in ["dokument", "naziv", "fajl", "spisak", "koji dokumenti"])
+    if je_dokument_pitanje:
+        jedinstveni_izvori = sorted(list(set(item["izvor"] for item in svi_odlomci if item["izvor"])))
+        spisak_tekst = "Dostupni nazivi dokumenata u bazi:\n" + "\n".join([f"- {izv}" for izv in jedinstveni_izvori])
+        svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Svi dokumenti"})
 
+    # Standardna vektorska pretraga (bez ikakvih prefiksa, radi sa starom bazom)
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
@@ -255,8 +205,8 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
 
     skorovani = filtriraj_i_skoruj_kandidate(svi_kandidati, upit)
 
-    top_prioritetni = [item[1] for item in skorovani if item[0] >= 5000]
-    ostali_kandidati = [item[1] for item in skorovani if item[0] < 5000]
+    top_prioritetni = [item[1] for item in skorovani if item[0] >= 10000]
+    ostali_kandidati = [item[1] for item in skorovani if item[0] < 10000]
 
     top_odlomci = list(top_prioritetni)
 
@@ -275,7 +225,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
 
     kontekst_lista = []
     for txt in top_odlomci:
-        if txt.startswith("Izvor"):
+        if txt.startswith("Izvor") or txt.startswith("Dostupni nazivi"):
             kontekst_lista.append(txt)
         else:
             kontekst_lista.append(f"Odlomak iz baze:\n{txt}")
@@ -297,7 +247,7 @@ with st.sidebar:
     st.markdown("### 🛠️ Status sistema")
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
     st.caption("🟢 **LLM:** Llama-3.3 / Llama-3.1 (Auto-Fallback)")
-    st.caption("🟢 **Embeddings:** FastEmbed")
+    st.caption("🟢 **Embeddings:** MiniLM-L12-v2")
     st.caption(f"{'🟢' if HAS_RERANKER else '🟡'} **Reranker:** {'Aktivan' if HAS_RERANKER else 'Fallback heuristika'}")
     
     st.divider()
@@ -413,7 +363,7 @@ if prompt:
                 # DEBUG EXPANDER
                 with st.expander("🔍 Pregled pročišćenog konteksta poslatog Llami"):
                     st.caption(f"Ukupno odlomaka u kešu: **{ukupno_keširano}**")
-                    st.caption(f"Razmotreno rangiranih kandidata: **{br_kandidata}**")
+                    st.caption(f-f"Razmotreno rangiranih kandidata: **{br_kandidata}**")
                     st.caption(f"Korišćeni AI Model: **{korisceni_model}**")
                     st.text_area("Sadržaj poslat Llami:", value=kontekst, height=220)
 
