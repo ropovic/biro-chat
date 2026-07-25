@@ -211,10 +211,10 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
 
     # Sortiramo po bodovima od najvećeg ka najmanjem
     skorovani_kandidati.sort(key=lambda x: x[0], reverse=True)
-    return skorovani_kandidati[:20]
+    return skorovani_kandidati[:15]
 
-# ----------------- HIBRIDNA PRETRAGA SA BODOVANJEM -----------------
-def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
+# ----------------- HIBRIDNA PRETRAGA SA OPTIMIZACIJOM TOKENA -----------------
+def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=3200):
     svi_odlomci = ucitaj_sve_tekstove()
     svi_kandidati = []
     svi_vidjeni = set()
@@ -222,7 +222,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     brojevi = re.findall(r'\b\d+\b', upit)
     upit_low = norm_upit.lower()
 
-    # 1. DIREKTNO SKENIRANJE KEŠA ZA ČLANOVE (Ignoriše Sadržaj/TOC)
+    # 1. DIREKTNO SKENIRANJE KEŠA ZA ČLANOVE
     if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl"]):
         for br in brojevi:
             for item in svi_odlomci:
@@ -245,7 +245,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
-        limit=35
+        limit=25
     )
     for hit in vector_response.points:
         if hit.payload:
@@ -269,7 +269,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     # 3. FILTRIRANJE I BODOVANJE
     skorovani = filtriraj_i_skoruj_kandidate(svi_kandidati, upit)
 
-    # Odvajamo kandidate sa ekstremno visokim heurisitčkim skorom (tačni članovi)
     top_prioritetni = [item[1] for item in skorovani if item[0] >= 5000]
     ostali_kandidati = [item[1] for item in skorovani if item[0] < 5000]
 
@@ -289,7 +288,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
         potrebno = top_k_rezultata - len(top_odlomci)
         top_odlomci.extend(ostali_kandidati[:potrebno])
 
-    # Formatiranje čistog konteksta
+    # Formatiranje čistog konteksta (sa striktnim limitom znakova radi štednje tokena)
     kontekst_lista = []
     for txt in top_odlomci:
         if txt.startswith("Izvor"):
@@ -300,7 +299,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(kontekst_lista)
 
     if len(spojeni_tekst) > max_karaktera:
-        spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
+        spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi štednje tokena]..."
 
     return spojeni_tekst, len(skorovani), len(svi_odlomci)
 
@@ -313,7 +312,7 @@ with st.sidebar:
     
     st.markdown("### 🛠️ Status sistema")
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
-    st.caption("🟢 **LLM:** Llama-3.3 (Groq)")
+    st.caption("🟢 **LLM:** Llama-3.3 / Llama-3.1 (Groq Auto-Fallback)")
     st.caption("🟢 **Embeddings:** FastEmbed")
     st.caption(f"{'🟢' if HAS_RERANKER else '🟡'} **Reranker:** {'Aktivan' if HAS_RERANKER else 'Fallback heurisitka'}")
     
@@ -364,7 +363,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(msg["content"])
 
-# ----------------- OBRADA UNOSA KORISNIKA -----------------
+# ----------------- OBRADA UNOSA KORISNIKA SA FALLBACK SVOJSTVOM -----------------
 prompt = st.chat_input("Postavite pitanje...")
 
 if "prompt_input" in st.session_state and st.session_state.prompt_input:
@@ -383,37 +382,54 @@ if prompt:
                 system_prompt = (
                     "Ti si ljubazan i stručan asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj tačno i direktno na osnovu datog konteksta iz baze podataka i dosadašnjeg razgovora.\n\n"
-                    "STROGA PRAVILA STRUKTURIRANJA I FORMATIRANJA TEKSTA:\n"
+                    "PRAVILA FORMATIRANJA TEKSTA:\n"
                     "1. Odgovaraj na srpskom jeziku (latinica).\n"
-                    "2. Svaki odgovor OBAVEZNO organizuj u jasne sekcije koristeći podnaslove (`###`), npr. `### 📍 Lokacija`, `### 🌲 Gazdovanje`, `### 📜 Odredbe`.\n"
-                    "3. Koristi tačke (`- `) za nabrajanje i obavezno **podebljaj** sve ključne pojmove, imena, funkcije i nazive dokumenata.\n"
-                    "4. PRAVILO ZA SLIKE: Ako u kontekstu postoji URL fotografije zaposlenog ili objekta, "
-                    "NIKADA ne ostavljaj čist URL tekst! OBAVEZNO prikaži sliku u odgovoru koristeći Markdown sintaksu: "
-                    "![Opis slike](URL_slike).\n\n"
+                    "2. Svaki odgovor OBAVEZNO organizuj u jasne sekcije sa podnaslovima (`###`), npr. `### 📍 Lokacija`, `### 📜 Odredbe`.\n"
+                    "3. Koristi tačke (`- `) za nabrajanje i **podebljaj** ključne pojmove.\n"
+                    "4. PRAVILO ZA SLIKE: Ako u kontekstu postoji URL fotografije zaposlenog ili objekta, prikaži sliku kao: ![Opis](URL_slike).\n\n"
                     f"KONTEKST IZ BAZE PODATAKA:\n{kontekst}"
                 )
 
                 messages_for_groq = [{"role": "system", "content": system_prompt}]
                 
-                skracena_istorija = st.session_state.messages[-6:]
+                # Smanjena istorija poruka (poslednje 4) radi ušteđivanja tokena
+                skracena_istorija = st.session_state.messages[-4:]
                 for msg in skracena_istorija:
                     messages_for_groq.append({"role": msg["role"], "content": msg["content"]})
                 
                 messages_for_groq.append({"role": "user", "content": prompt})
 
-                response = groq.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=messages_for_groq,
-                    temperature=0.1
-                )
+                # Lista modela po prioritetu (automatski fallback ako 70b dostigne limit)
+                modeli = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+                odgovor = None
+                korisceni_model = ""
 
-                odgovor = response.choices[0].message.content
+                for m in modeli:
+                    try:
+                        response = groq.chat.completions.create(
+                            model=m,
+                            messages=messages_for_groq,
+                            temperature=0.1
+                        )
+                        odgovor = response.choices[0].message.content
+                        korisceni_model = m
+                        break
+                    except Exception as err:
+                        if "rate_limit_exceeded" in str(err).lower() or "429" in str(err):
+                            continue # Akumuliran dnevni limit na 70b -> prelazimo automatski na 8b!
+                        else:
+                            raise err
+
+                if odgovor is None:
+                    odgovor = "Trenutno su svi AI modeli preopterećeni. Molimo vas pokušajte ponovo za nekoliko minuta."
+
                 st.markdown(odgovor)
 
                 # DEBUG EXPANDER
                 with st.expander("🔍 Pregled pročišćenog konteksta poslatog Llami"):
                     st.caption(f"Ukupno odlomaka u kešu: **{ukupno_keširano}**")
                     st.caption(f"Razmotreno rangiranih kandidata: **{br_kandidata}**")
+                    st.caption(f"Korišćeni AI Model: **{korisceni_model}**")
                     st.text_area("Sadržaj poslat Llami:", value=kontekst, height=220)
 
                 st.session_state.messages.append({"role": "user", "content": prompt})
