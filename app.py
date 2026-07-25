@@ -50,7 +50,7 @@ def init_clients():
     embed_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     
     # Višejezični Reranker model
-    reranker_model = TextReRank(model_name="BAAI/bge-reranker-large")
+    reranker_model = TextReRank(model_name="BAAI/bge-reranker-base")
     
     return qdrant, groq, embed_model, reranker_model
 
