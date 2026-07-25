@@ -52,8 +52,31 @@ def init_clients():
 
 qdrant, groq, embed_model = init_clients()
 
-# ----------------- BRZO KEŠIRANJE SVIH ODLOMAKA IZ BAZE (ISPRAVLJENO) -----------------
-@st.cache_data(ttl=1800)  # Kešira odlomke na 30 minuta
+# ----------------- UNIVERZALNA NORMALIZACIJA TEKSTA -----------------
+def sredi_tekst(tekst):
+    if not tekst:
+        return ""
+    
+    # Prvo menjamo digrafe
+    tekst = tekst.replace('Љ', 'Lj').replace('љ', 'lj').replace('Њ', 'Nj').replace('њ', 'nj').replace('Џ', 'Dž').replace('џ', 'dž')
+    
+    # Mapa za konverziju svih ćiriličnih i mešanih slova u čistu latinicu
+    zamene = {
+        'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'đ': 'đ', 'ђ': 'đ',
+        'е': 'e', 'ж': 'ž', 'з': 'z', 'и': 'i', 'ј': 'j', 'к': 'k', 'л': 'l',
+        'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't',
+        'ћ': 'ć', 'у': 'u', 'ф': 'f', 'х': 'h', 'ц': 'c', 'ч': 'č', 'ш': 'š',
+        'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Đ': 'Đ', 'Ђ': 'Đ',
+        'Е': 'E', 'Ж': 'Ž', 'З': 'Z', 'И': 'I', 'Ј': 'J', 'К': 'K', 'Л': 'L',
+        'М': 'M', 'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T',
+        'Ћ': 'Ć', 'У': 'U', 'Ф': 'F', 'Х': 'H', 'Ц': 'C', 'Ч': 'Č', 'Ш': 'Š'
+    }
+    
+    res = [zamene.get(ch, ch) for ch in tekst]
+    return "".join(res)
+
+# ----------------- BRZO KEŠIRANJE SVIH ODLOMAKA IZ BAZE -----------------
+@st.cache_data(ttl=1800)
 def ucitaj_sve_tekstove():
     sve_tacke = []
     offset = None
@@ -67,75 +90,89 @@ def ucitaj_sve_tekstove():
         )
         for r in records:
             if r.payload and "tekst" in r.payload:
-                sve_tacke.append(r.payload["tekst"])
+                # Odlomke odmah normalizujemo u čistu latinicu
+                norm_txt = sredi_tekst(r.payload["tekst"])
+                sve_tacke.append(norm_txt)
         
         if next_offset is None or len(records) == 0:
             break
             
-        offset = next_offset  # ISPRAVLJENO: Pomera pokazivač na sledeću stranu
+        offset = next_offset
 
     return sve_tacke
 
-# ----------------- FUNKCIJE ZA KONVERZIJU PISMA -----------------
-def cirilica_u_latinicu(tekst):
-    digrafi = {'Љ': 'Lj', 'љ': 'lj', 'Њ': 'Nj', 'њ': 'nj', 'Џ': 'Dž', 'џ': 'dž'}
-    monografi = {
-        'А': 'A', 'а': 'a', 'Б': 'B', 'б': 'b', 'В': 'V', 'в': 'v',
-        'Г': 'G', 'г': 'g', 'Д': 'D', 'д': 'd', 'Ђ': 'Đ', 'ђ': 'đ',
-        'Е': 'E', 'е': 'e', 'Ж': 'Ž', 'ž': 'ž', 'З': 'Z', 'з': 'z',
-        'И': 'I', 'и': 'i', 'Ј': 'J', 'ј': 'j', 'К': 'K', 'к': 'k',
-        'Л': 'L', 'l': 'l', 'М': 'M', 'м': 'm', 'Н': 'N', 'н': 'n',
-        'О': 'O', 'о': 'o', 'П': 'P', 'п': 'p', 'Р': 'R', 'р': 'r',
-        'С': 'S', 'с': 's', 'Т': 'T', 'т': 't', 'Ћ': 'Ć', 'ћ': 'ć',
-        'У': 'U', 'у': 'u', 'Ф': 'F', 'ф': 'f', 'Х': 'H', 'х': 'h',
-        'Ц': 'C', 'ц': 'c', 'Ч': 'Č', 'ч': 'č', 'Ш': 'Š', 'ш': 'š'
-    }
-    for k, v in digrafi.items():
-        tekst = tekst.replace(k, v)
-    res = [monografi.get(ch, ch) for ch in tekst]
-    return "".join(res)
+# ----------------- NAPREDNA PROVERA POGOTKA ČLANA -----------------
+def je_pogodjen_clan(tekst, broj):
+    norm_txt = tekst.lower()
+    br_str = str(broj)
 
-# ----------------- HIBRIDNA PRETRAGA SA LOKALNIM REGEX SKENIRANJEM -----------------
+    # 1. Obrazac: clan 4, cl. 4, cl 4, clan: 4, clan. 4, clan 4.
+    pat1 = re.compile(rf'\b(clan|cl)\b[\s\.:\-\*#_]*{br_str}\b')
+    if pat1.search(norm_txt):
+        return True
+
+    # 2. Obrnuti obrazac: 4. clan, 4.cl
+    pat2 = re.compile(rf'\b{br_str}\b[\s\.:\-\*#_]*(clan|cl)\b')
+    if pat2.search(norm_txt):
+        return True
+
+    # 3. Bliski kontakt: reč clan/cl i broj u razmaku do 30 karaktera
+    pat3 = re.compile(rf'\b(clan|cl)\b.{{0,30}}\b{br_str}\b')
+    if pat3.search(norm_txt):
+        return True
+
+    return False
+
+# ----------------- HIBRIDNA PRETRAGA SA DVOSTRUKIM FILTEROM -----------------
 def dobij_hibridni_kontekst(upit, max_karaktera=6000):
     prioritetni_tekstovi = []
     vektorski_tekstovi = []
     svi_vidjeni = set()
 
-    # 1. DIREKTNO SKENIRANJE KEŠIRANIH TEKSTOVA ZA BR. ČLANA
+    sve_poruke = ucitaj_sve_tekstove()
     brojevi = re.findall(r'\b\d+\b', upit)
+
+    # 1. SKENIRANJE ZA TAČAN BROJ ČLANA (PRIORITET #1)
     if brojevi:
-        sve_poruke = ucitaj_sve_tekstove()
         for br in brojevi:
-            pattern = re.compile(rf'(?i)\b(član|члан|čl|чл)\.?\s*{br}\b')
             for txt in sve_poruke:
-                if pattern.search(txt) and txt not in svi_vidjeni:
+                if je_pogodjen_clan(txt, br) and txt not in svi_vidjeni:
                     svi_vidjeni.add(txt)
                     prioritetni_tekstovi.append(txt)
 
-    # 2. VEKTORSKA PRETRAGA ZA ŠIROKI SEMANTIČKI KONTEKST
-    query_vector = list(embed_model.embed([upit]))[0].tolist()
+    # 2. FALLBACK: AKO JE U PITANJU UGOVOR A REČ "ČLAN" NIJE DIREKTNO UZ BROJ
+    if brojevi and len(prioritetni_tekstovi) == 0 and ("kolektivn" in upit.lower() or "ugovor" in upit.lower()):
+        for txt in sve_poruke:
+            txt_low = txt.lower()
+            if "kolektivn" in txt_low and any(re.search(rf'\b{br}\b', txt_low) for br in brojevi):
+                if txt not in svi_vidjeni:
+                    svi_vidjeni.add(txt)
+                    prioritetni_tekstovi.append(txt)
+
+    # 3. VEKTORSKA PRETRAGA ZA ŠIROKI SEMANTIČKI KONTEKST
+    norm_upit = sredi_tekst(upit)
+    query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
         limit=15
     )
     for hit in vector_response.points:
-        txt = hit.payload.get("tekst", "")
-        if txt and txt not in svi_vidjeni:
-            svi_vidjeni.add(txt)
-            vektorski_tekstovi.append(txt)
+        raw_txt = hit.payload.get("tekst", "")
+        if raw_txt:
+            txt = sredi_tekst(raw_txt)
+            if txt not in svi_vidjeni:
+                svi_vidjeni.add(txt)
+                vektorski_tekstovi.append(txt)
 
-    # Spajanje: Odlomci sa tačnim brojem člana idu PRVI na listi
+    # Spajanje: Prioritetni odlomci idu PRVI
     spojeni_rezultati = prioritetni_tekstovi + vektorski_tekstovi
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(spojeni_rezultati)
-    
-    # Prevođenje ćirilice u čistiju latinicu pre slanja LLM-u
-    spojeni_tekst = cirilica_u_latinicu(spojeni_tekst)
 
     if len(spojeni_tekst) > max_karaktera:
         spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
 
-    return spojeni_tekst, len(prioritetni_tekstovi)
+    return spojeni_tekst, len(prioritetni_tekstovi), len(sve_poruke)
 
 # ----------------- BOČNI MENI (SIDEBAR) -----------------
 with st.sidebar:
@@ -210,7 +247,7 @@ if prompt:
     with st.chat_message("assistant", avatar="🌲"):
         with st.spinner("Pretražujem bazu podataka..."):
             try:
-                kontekst, br_prioritetnih = dobij_hibridni_kontekst(prompt)
+                kontekst, br_prioritetnih, ukupno_keširano = dobij_hibridni_kontekst(prompt)
 
                 system_prompt = (
                     "Ti si ljubazan i stručan asistent Biroa za planiranje (PD Srbijašume).\n"
@@ -239,10 +276,11 @@ if prompt:
                 odgovor = response.choices[0].message.content
                 st.markdown(odgovor)
 
-                # DEBUG EXPANDER - Prikaz onoga što je poslato Llami
+                # DEBUG EXPANDER - Prikaz preuzetog konteksta
                 with st.expander("🔍 Pregled preuzetog konteksta iz baze (Za debug)"):
-                    st.caption(f"Pronađeno prioritetnih odlomaka sa tačnim brojem člana: **{br_prioritetnih}**")
-                    st.text_area("Sadržaj poslat Llami:", value=kontekst, height=200)
+                    st.caption(f"Ukupno učitano odlomaka iz Qdrant baze u keš: **{ukupno_keširano}**")
+                    st.caption(f"Pronađeno prioritetnih odlomaka sa traženim članom: **{br_prioritetnih}**")
+                    st.text_area("Sadržaj poslat Llami:", value=kontekst, height=220)
 
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 st.session_state.messages.append({"role": "assistant", "content": odgovor})
