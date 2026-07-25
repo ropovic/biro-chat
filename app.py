@@ -132,7 +132,7 @@ def pretvori_u_rimske(broj_str):
     return mapping.get(broj_str, "")
 
 def je_pogodak_za_clan(txt_low, broj_str):
-    """Striktno proverava da li se u tekstu nalazi REČ član/čl/clan/cl NEPOSREDNO uz traženi broj."""
+    """Proverava prisustvo reči član/čl uz traženi broj."""
     rimski = pretvori_u_rimske(broj_str)
     pats = [
         rf'\b(član|clan|čl|cl)\.?\s*0?{broj_str}\b',
@@ -147,7 +147,6 @@ def je_pogodak_za_clan(txt_low, broj_str):
     return False
 
 def je_sadrzaj_toc(txt_low):
-    """Prepoznaje da li je odlomak deo indeksa/sadržaja sa brojevima stranica."""
     if "sadržaj" in txt_low or "sadrzaj" in txt_low:
         return True
     matches = re.findall(r'\.\.\.\s*\d+|\b\d+\s*$', txt_low, re.MULTILINE)
@@ -155,7 +154,7 @@ def je_sadrzaj_toc(txt_low):
         return True
     return False
 
-# ----------------- INTELIGENTNO FILTRIRANJE I RANGIRANJE KANDIDATA -----------------
+# ----------------- FILTRIRANJE I BODOVANJE KANDIDATA -----------------
 def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     upit_low = upit.lower()
     brojevi = re.findall(r'\b\d+\b', upit)
@@ -173,15 +172,12 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
         izvor_low = izvor.lower()
         skor = 0
 
-        # Eliminacija masivnih šumskih HTML tabela ako se traže ugovori ili ljudi
         if (je_kolektivni or je_direktor or je_clan) and "<table>" in txt_low and "kolektivn" not in txt_low and "direktor" not in txt_low:
             continue
 
-        # Penalizacija indeksa/sadržaja sa stranicama ako tražimo konkretan član
         if (je_kolektivni or je_clan) and je_sadrzaj_toc(txt_low):
             skor -= 5000
 
-        # 1. NAPREDNO STRIKTO BODOVANJE ZA ČLANOVE KOLEKTIVNOG UGOVORA
         if je_kolektivni or je_clan:
             if "kolektivn" in izvor_low or "kolektivn" in txt_low:
                 skor += 300
@@ -190,18 +186,18 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
                 for br in brojevi:
                     if je_pogodak_za_clan(txt_low, br):
                         if "kolektivn" in izvor_low or "kolektivn" in txt_low:
-                            skor += 10000  # EKSAKTNI PRIORITY ZA TAČAN ČLAN KOLEKTIVNOG UGOVORA!
+                            skor += 10000
                         else:
                             skor += 2000
+                    elif f"{br}." in txt_low and "kolektivn" in izvor_low:
+                        skor += 1500
 
-        # 2. BODOVANJE ZA DIREKTORA I ZAMENIKE
         if je_direktor:
             if "zamenik" in txt_low or "direktor" in txt_low:
                 skor += 1000
-            if "biro za planiranje" in txt_low:
-                skor += 200
+            if "http" in txt_low:
+                skor += 2000
 
-        # Opšti meč po rečima iz upita
         upit_reci = [r for r in upit_low.split() if len(r) > 3]
         for rec in upit_reci:
             if rec in txt_low:
@@ -209,12 +205,11 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
 
         skorovani_kandidati.append((skor, txt, izvor))
 
-    # Sortiramo po bodovima od najvećeg ka najmanjem
     skorovani_kandidati.sort(key=lambda x: x[0], reverse=True)
     return skorovani_kandidati[:15]
 
-# ----------------- HIBRIDNA PRETRAGA SA OPTIMIZACIJOM TOKENA -----------------
-def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=3500):
+# ----------------- HIBRIDNA PRETRAGA SA SPAJANJEM SUSREDNIH ČANAKA -----------------
+def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     svi_odlomci = ucitaj_sve_tekstove()
     svi_kandidati = []
     svi_vidjeni = set()
@@ -222,10 +217,10 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=3500):
     brojevi = re.findall(r'\b\d+\b', upit)
     upit_low = norm_upit.lower()
 
-    # 1. DIREKTNO SKENIRANJE KEŠA ZA ČLANOVE
+    # Ako tražimo član, automatski spajamo i sledeće odlomke radi kompletnosti pojmova
     if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl"]):
         for br in brojevi:
-            for item in svi_odlomci:
+            for idx, item in enumerate(svi_odlomci):
                 txt = item["tekst"]
                 izvor = item["izvor"]
                 txt_low = txt.lower()
@@ -234,13 +229,20 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=3500):
                 if je_sadrzaj_toc(txt_low):
                     continue
 
-                if je_pogodak_za_clan(txt_low, br):
+                if je_pogodak_za_clan(txt_low, br) or (f"{br}." in txt_low and "kolektivn" in izvor_low):
                     if ("kolektivn" in upit_low and ("kolektivn" in izvor_low or "kolektivn" in txt_low)) or "kolektivn" not in upit_low:
-                        if txt not in svi_vidjeni:
-                            svi_kandidati.append(item)
-                            svi_vidjeni.add(txt)
+                        # Spajamo trenutni i naredna 2 odlomka iz ugovora da definicije ne bi ostale odsečene
+                        prosirani_tekst = txt
+                        for step in range(1, 3):
+                            if idx + step < len(svi_odlomci):
+                                sledeci_item = svi_odlomci[idx + step]
+                                if "kolektivn" in sledeci_item["izvor"].lower() or "kolektivn" in izvor_low:
+                                    prosirani_tekst += "\n" + sledeci_item["tekst"]
 
-    # 2. VEKTORSKA PRETRAGA ZA DOPUNU
+                        if prosirani_tekst not in svi_vidjeni:
+                            svi_kandidati.append({"tekst": prosirani_tekst, "izvor": izvor})
+                            svi_vidjeni.add(prosirani_tekst)
+
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
@@ -266,13 +268,11 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=3500):
     if not svi_kandidati:
         return "", 0, len(svi_odlomci)
 
-    # 3. FILTRIRANJE I BODOVANJE
     skorovani = filtriraj_i_skoruj_kandidate(svi_kandidati, upit)
 
     top_prioritetni = [item[1] for item in skorovani if item[0] >= 5000]
     ostali_kandidati = [item[1] for item in skorovani if item[0] < 5000]
 
-    # 4. FINALNI RERANKING
     top_odlomci = list(top_prioritetni)
 
     if reranker_model is not None and len(ostali_kandidati) > 0 and len(top_odlomci) < top_k_rezultata:
@@ -288,7 +288,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=3500):
         potrebno = top_k_rezultata - len(top_odlomci)
         top_odlomci.extend(ostali_kandidati[:potrebno])
 
-    # Formatiranje čistog konteksta
     kontekst_lista = []
     for txt in top_odlomci:
         if txt.startswith("Izvor"):
@@ -312,7 +311,7 @@ with st.sidebar:
     
     st.markdown("### 🛠️ Status sistema")
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
-    st.caption("🟢 **LLM:** Llama-3.3 / Llama-3.1 (Groq Auto-Fallback)")
+    st.caption("🟢 **LLM:** Llama-3.3 / Llama-3.1 (Auto-Fallback)")
     st.caption("🟢 **Embeddings:** FastEmbed")
     st.caption(f"{'🟢' if HAS_RERANKER else '🟡'} **Reranker:** {'Aktivan' if HAS_RERANKER else 'Fallback heurisitka'}")
     
@@ -348,7 +347,7 @@ with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expand
     if col1.button("👔 Ko je direktor?", use_container_width=True):
         clicked_prompt = "Ko je direktor Biroa i pokaži njegovu sliku?"
     if col2.button("👥 Ko su zamenici?", use_container_width=True):
-        clicked_prompt = "Ko su zamenici direktora u Birou?"
+        clicked_prompt = "Ko su zamenici direktora u Birou i prikaži njihove slike?"
     if col3.button("🌲 Crni vrh?", use_container_width=True):
         clicked_prompt = "Postoji li Crni vrh u bazi i šta piše o njemu?"
     if col4.button("📜 Član 4. Kol. ugovora?", use_container_width=True):
@@ -380,14 +379,16 @@ if prompt:
                 kontekst, br_kandidata, ukupno_keširano = dobij_hibridni_kontekst(prompt)
 
                 system_prompt = (
-                    "Ti si ljubazan i profesionalan asistent Biroa za planiranje (PD Srbijašume).\n"
-                    "Odgovaraj tačno, jasno i isključivo na osnovu pruženog konteksta.\n\n"
-                    "PRAVILA ODGOVARANJA:\n"
+                    "Ti si asistent Biroa za planiranje (PD Srbijašume).\n"
+                    "Odgovaraj tačno i direktno na osnovu konteksta iz baze.\n\n"
+                    "VAŽNO PRAVILO ZA SLIKE:\n"
+                    "Ako se u kontekstu nalazi bilo koji URL slike (npr. http...jpg ili .png), "
+                    "MORAŠ ga prikazati u odgovoru kao Markdown sliku: ![Opis slike](URL).\n\n"
+                    "OSTALA PRAVILA:\n"
                     "1. Odgovaraj na srpskom jeziku (latinica).\n"
-                    "2. Ako se u tekstu eksplicitno NE NALAZI tačan član ili traženi podatak, Jasno i direktno reci: "
-                    "'Traženi član/podatak se ne nalazi u dostupnim izvodima dokumenta u bazi.' NIKADA ne nudi druge članove niti nagađaj!\n"
-                    "3. Formatiraj odgovor sa podnaslovima (`###`) i listama sa boldovanim ključnim rečima.\n"
-                    "4. Ako u kontekstu postoji slika (URL), prikaži je u formatu: ![Opis](URL).\n\n"
+                    "2. Ako traženi član ili podatak NE POSTOJI u kontekstu, napiši tačno: "
+                    "'Traženi član/podatak se ne nalazi u dostupnim izvodima dokumenta u bazi.'\n"
+                    "3. Koristi podnaslove (`###`) i liste sa boldovanim rečima.\n\n"
                     f"KONTEKST IZ BAZE:\n{kontekst}"
                 )
 
