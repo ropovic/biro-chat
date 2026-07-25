@@ -52,13 +52,33 @@ def init_clients():
 
 qdrant, groq, embed_model = init_clients()
 
+# ----------------- BRZO KEŠIRANJE SVIH ODLOMAKA IZ BAZE -----------------
+@st.cache_data(ttl=1800)  # Kešira odlomke na 30 minuta
+def ucitaj_sve_tekstove():
+    sve_tacke = []
+    offset = None
+    while True:
+        records, next_offset = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=250,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False
+        )
+        for r in records:
+            if r.payload and "tekst" in r.payload:
+                sve_tacke.append(r.payload["tekst"])
+        if next_offset is None or len(records) == 0:
+            break
+    return sve_tacke
+
 # ----------------- FUNKCIJE ZA KONVERZIJU PISMA -----------------
 def cirilica_u_latinicu(tekst):
     digrafi = {'Љ': 'Lj', 'љ': 'lj', 'Њ': 'Nj', 'њ': 'nj', 'Џ': 'Dž', 'џ': 'dž'}
     monografi = {
         'А': 'A', 'а': 'a', 'Б': 'B', 'б': 'b', 'В': 'V', 'в': 'v',
         'Г': 'G', 'г': 'g', 'Д': 'D', 'д': 'd', 'Ђ': 'Đ', 'ђ': 'đ',
-        'Е': 'E', 'е': 'e', 'Ж': 'Ž', 'ž': 'ž', 'З': 'Z', 'з': 'z',
+        'Е': 'E', 'е': 'e', 'Ж': 'Ž', 'ж': 'ž', 'З': 'Z', 'з': 'z',
         'И': 'I', 'и': 'i', 'Ј': 'J', 'ј': 'j', 'К': 'K', 'к': 'k',
         'Л': 'L', 'л': 'l', 'М': 'M', 'м': 'm', 'Н': 'N', 'н': 'n',
         'О': 'O', 'о': 'o', 'П': 'P', 'п': 'p', 'Р': 'R', 'р': 'r',
@@ -71,73 +91,48 @@ def cirilica_u_latinicu(tekst):
     res = [monografi.get(ch, ch) for ch in tekst]
     return "".join(res)
 
-# ----------------- ROBUSTNA MULTI-QUERY PRETRAGA -----------------
+# ----------------- HIBRIDNA PRETRAGA SA LOKALNIM REGEX SKENIRANJEM -----------------
 def dobij_hibridni_kontekst(upit, max_karaktera=6000):
-    kandidati_tekstovi = []
+    prioritetni_tekstovi = []
+    vektorski_tekstovi = []
     svi_vidjeni = set()
 
-    # 1. PRIMARNA VEKTORSKA PRETRAGA (Široki obuhvat: limit=25)
+    # 1. DIREKTNO SKENIRANJE KEŠIRANIH TEKSTOVA ZA BR. ČLANA (100% SIGURNOST)
+    brojevi = re.findall(r'\b\d+\b', upit)
+    if brojevi:
+        sve_poruke = ucitaj_sve_tekstove()
+        for br in brojevi:
+            # Obrazac hvata: Član 4, Član 4., Члан 4, ЧЛАН 4., čl. 4 itd.
+            pattern = re.compile(rf'(?i)\b(član|члан|čl|чл)\.?\s*{br}\b')
+            for txt in sve_poruke:
+                if pattern.search(txt) and txt not in svi_vidjeni:
+                    svi_vidjeni.add(txt)
+                    prioritetni_tekstovi.append(txt)
+
+    # 2. VEKTORSKA PRETRAGA ZA ŠIROKI SEMANTIČKI KONTEKST
     query_vector = list(embed_model.embed([upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
-        limit=25
+        limit=15
     )
     for hit in vector_response.points:
         txt = hit.payload.get("tekst", "")
         if txt and txt not in svi_vidjeni:
             svi_vidjeni.add(txt)
-            kandidati_tekstovi.append(txt)
+            vektorski_tekstovi.append(txt)
 
-    # 2. SEKUNDARNA PRETRAGA AKO POSTOJI BROJ ČLANA U UPITU
-    brojevi = re.findall(r'\b\d+\b', upit)
-    if brojevi:
-        for br in brojevi:
-            pomocni_upit = f"kolektivni ugovor ugovor o radu član {br} opšte odredbe"
-            pomocni_vector = list(embed_model.embed([pomocni_upit]))[0].tolist()
-            pom_resp = qdrant.query_points(
-                collection_name=COLLECTION_NAME,
-                query=pomocni_vector,
-                limit=15
-            )
-            for hit in pom_resp.points:
-                txt = hit.payload.get("tekst", "")
-                if txt and txt not in svi_vidjeni:
-                    svi_vidjeni.add(txt)
-                    kandidati_tekstovi.append(txt)
-
-    # 3. PYTHON REGEX RANGIRANJE I PRIORITIZACIJA
-    prioritetni = []
-    ostali = []
-
-    if brojevi:
-        for txt in kandidati_tekstovi:
-            pogodjen = False
-            for br in brojevi:
-                # Regex koji hvata "Član 4", "Član 4.", "Члан 4", "čl. 4" itd.
-                pattern = re.compile(rf'(?i)\b(član|члан|čl|чл)\.?\s*{br}\b')
-                if pattern.search(txt):
-                    pogodjen = True
-                    break
-            
-            if pogodjen:
-                prioritetni.append(txt)
-            else:
-                ostali.append(txt)
-    else:
-        ostali = kandidati_tekstovi
-
-    # Spajamo: Prioritetni odlomci (koji tačno sadrže traženi član) idu PRVI!
-    spojeni_rezultati = prioritetni + ostali
+    # Spajanje: Odlomci sa tačnim brojem člana idu PRVI na listi
+    spojeni_rezultati = prioritetni_tekstovi + vektorski_tekstovi
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(spojeni_rezultati)
     
-    # Konverzija u čistiju latinicu
+    # Prevođenje ćirilice u čistiju latinicu pre slanja LLM-u
     spojeni_tekst = cirilica_u_latinicu(spojeni_tekst)
 
     if len(spojeni_tekst) > max_karaktera:
         spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
 
-    return spojeni_tekst, len(prioritetni)
+    return spojeni_tekst, len(prioritetni_tekstovi)
 
 # ----------------- BOČNI MENI (SIDEBAR) -----------------
 with st.sidebar:
@@ -153,6 +148,10 @@ with st.sidebar:
     
     st.divider()
     
+    if st.button("🔄 Osveži keš baze", use_container_width=True):
+        st.cache_data.clear()
+        st.success("Keš je osvežen!")
+
     if st.button("🧹 Obriši razgovor", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
@@ -237,7 +236,7 @@ if prompt:
                 odgovor = response.choices[0].message.content
                 st.markdown(odgovor)
 
-                # DEBUG EXPANDER - Prikaz onoga što je poslato modelu
+                # DEBUG EXPANDER - Prikaz onoga što je poslato Llami
                 with st.expander("🔍 Pregled preuzetog konteksta iz baze (Za debug)"):
                     st.caption(f"Pronađeno prioritetnih odlomaka sa tačnim brojem člana: **{br_prioritetnih}**")
                     st.text_area("Sadržaj poslat Llami:", value=kontekst, height=200)
