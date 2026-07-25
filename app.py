@@ -4,7 +4,7 @@ from qdrant_client import QdrantClient
 from groq import Groq
 from fastembed import TextEmbedding
 
-# Siguran import za TextRerank (malo 'r')
+# Siguran import za TextRerank
 try:
     from fastembed import TextRerank
     HAS_RERANKER = True
@@ -49,7 +49,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ----------------- INICIJALIZACIJA KLIJENATA I RERANKERA -----------------
+# ----------------- INICIJALIZACIJA KLIJENATA -----------------
 @st.cache_resource
 def init_clients():
     qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, check_compatibility=False)
@@ -59,7 +59,6 @@ def init_clients():
     reranker_model = None
     if HAS_RERANKER:
         try:
-            # Koristimo lakši model prilagođen Streamlit Cloud memoriji
             reranker_model = TextRerank(model_name="BAAI/bge-reranker-base")
         except Exception:
             reranker_model = None
@@ -114,27 +113,75 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- PRETRAGA SA RERANKEROM -----------------
+# ----------------- INTELIGENTNO FILTRIRANJE I RANGIRANJE KANDIDATA -----------------
+def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
+    upit_low = upit.lower()
+    brojevi = re.findall(r'\b\d+\b', upit)
+    
+    je_ugovor = any(w in upit_low for w in ["kolektivn", "ugovor", "clan", "član"])
+    je_direktor = any(w in upit_low for w in ["direktor", "rukovodstv", "uprava", "sef", "šef"])
+
+    skorovani_kandidati = []
+
+    for txt in svi_kandidati:
+        txt_low = txt.lower()
+        skor = 0
+
+        # Ako tražimo ugovor ili direktora, drastično kažnjavamo šumske HTML tabele
+        if (je_ugovor or je_direktor) and "<table>" in txt_low and "kolektivn" not in txt_low and "direktor" not in txt_low:
+            continue
+
+        # 1. PRAVILO ZA ČLANOVE UGOVORA
+        if je_ugovor:
+            if "kolektivn" in txt_low:
+                skor += 50
+            for br in brojevi:
+                # Najveći prioritet ako naslov počinje sa Član X.
+                if re.search(rf'(?:^|\n|#|\*)\s*(član|clan|čl|cl)\.?\s*{br}\b', txt_low):
+                    skor += 250
+                elif re.search(rf'\b(član|clan|čl|cl)\.?\s*{br}\b', txt_low):
+                    skor += 100
+
+        # 2. PRAVILO ZA DIREKTORA
+        if je_direktor:
+            if "direktor" in txt_low:
+                skor += 200
+            if "biro za planiranje" in txt_low:
+                skor += 30
+
+        # Opšti meč po rečima
+        upit_reci = [r for r in upit_low.split() if len(r) > 3]
+        for rec in upit_reci:
+            if rec in txt_low:
+                skor += 10
+
+        skorovani_kandidati.append((skor, txt))
+
+    # Sortiramo po skor-u i vraćamo najbolje pripremljene kandidate
+    skorovani_kandidati.sort(key=lambda x: x[0], reverse=True)
+    return [item[1] for item in skorovani_kandidati[:20]]
+
+# ----------------- HIBRIDNA PRETRAGA SA PAMETNIM FILTEROM -----------------
 def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     svi_odlomci = ucitaj_sve_tekstove()
     svi_kandidati = set()
     norm_upit = sredi_tekst(upit)
-
-    # 1. ŠIROKO SKENIRANJE PO BROJEVIMA I ČLANOVIMA
     brojevi = re.findall(r'\b\d+\b', upit)
+
+    # 1. PRETRAGA PO TAČNOM ČLANU (Strogi regex bez praznih pogodaka)
     if brojevi:
         for br in brojevi:
-            pat = re.compile(rf'\b(clan|cl|\b)\.?\s*{br}\b', re.IGNORECASE)
+            pat = re.compile(rf'\b(član|clan|čl|cl)\.?\s*{br}\b', re.IGNORECASE)
             for txt in svi_odlomci:
                 if pat.search(txt):
                     svi_kandidati.add(txt)
 
-    # 2. VEKTORSKA PRETRAGA (Izvlači širi kontekst)
+    # 2. VEKTORSKA PRETRAGA (Dopuna konteksta)
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
-        limit=25
+        limit=30
     )
     for hit in vector_response.points:
         raw_txt = hit.payload.get("tekst", "")
@@ -142,44 +189,31 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
             svi_kandidati.add(sredi_tekst(raw_txt))
 
     kandidati_lista = list(svi_kandidati)
-    
     if not kandidati_lista:
         return "", 0, len(svi_odlomci)
 
-    # 3. RANGIRANJE (FastEmbed Reranker ili Pametni Heuristički Skor)
+    # 3. FILTRIRANJE I BODOVANJE (Čišćenje šumskih tabela)
+    procisceni_kandidati = filtriraj_i_skoruj_kandidate(kandidati_lista, upit)
+
+    # 4. FINALNI RERANKING (Ocenjivanje samo čistih kandidata)
     top_odlomci = []
-    
-    if reranker_model is not None:
+    if reranker_model is not None and len(procisceni_kandidati) > 0:
         try:
-            reranked = list(reranker_model.rerank(query=norm_upit, documents=kandidati_lista))
+            reranked = list(reranker_model.rerank(query=norm_upit, documents=procisceni_kandidati))
             reranked.sort(key=lambda x: x["score"], reverse=True)
             top_odlomci = [res["document"] for res in reranked[:top_k_rezultata]]
         except Exception:
             top_odlomci = []
 
-    # Rezervni algoritam ako Reranker nije dostupan
     if not top_odlomci:
-        def izracunaj_skor(tekst):
-            skor = 0
-            txt_low = tekst.lower()
-            if brojevi:
-                for br in brojevi:
-                    # Najveća težina ako odlomak zapravo počinje sa traženim članom
-                    if re.search(rf'(?:^|\n|#|\*)\s*(clan|cl)\.?\s*{br}\b', txt_low):
-                        skor += 100
-                    elif re.search(rf'\b(clan|cl)\.?\s*{br}\b', txt_low):
-                        skor += 50
-            return skor
-
-        kandidati_lista.sort(key=izracunaj_skor, reverse=True)
-        top_odlomci = kandidati_lista[:top_k_rezultata]
+        top_odlomci = procisceni_kandidati[:top_k_rezultata]
 
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(top_odlomci)
 
     if len(spojeni_tekst) > max_karaktera:
         spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
 
-    return spojeni_tekst, len(kandidati_lista), len(svi_odlomci)
+    return spojeni_tekst, len(procisceni_kandidati), len(svi_odlomci)
 
 # ----------------- BOČNI MENI (SIDEBAR) -----------------
 with st.sidebar:
@@ -192,7 +226,7 @@ with st.sidebar:
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
     st.caption("🟢 **LLM:** Llama-3.3 (Groq)")
     st.caption("🟢 **Embeddings:** FastEmbed")
-    st.caption("🟢 **Reranker:** BGE-Reranker-Large")
+    st.caption(f"{'🟢' if HAS_RERANKER else '🟡'} **Reranker:** {'Aktivan' if HAS_RERANKER else 'Fallback heurisitka'}")
     
     st.divider()
     
@@ -286,9 +320,8 @@ if prompt:
                 st.markdown(odgovor)
 
                 # DEBUG EXPANDER
-                with st.expander("🔍 Pregled rangiranog konteksta znatno poboljšanog Rerankerom"):
-                    st.caption(f"Razmotreno potencijalnih kandidata: **{br_kandidata}**")
-                    st.caption(f"Reranker je izabrao najboljih top 6 odlomaka.")
+                with st.expander("🔍 Pregled pročišćenog konteksta poslatog Llami"):
+                    st.caption(f"Razmotreno pročišćenih kandidata: **{br_kandidata}**")
                     st.text_area("Sadržaj poslat Llami:", value=kontekst, height=220)
 
                 st.session_state.messages.append({"role": "user", "content": prompt})
