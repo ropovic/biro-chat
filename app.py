@@ -54,8 +54,7 @@ st.markdown("""
 def init_clients():
     qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, check_compatibility=False)
     groq = Groq(api_key=GROQ_API_KEY)
-    # Zamenjen model na intfloat/multilingual-e5-small (384 dimenzije)
-    embed_model = TextEmbedding(model_name="intfloat/multilingual-e5-small")
+    embed_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     
     reranker_model = None
     if HAS_RERANKER:
@@ -125,6 +124,7 @@ def ucitaj_sve_tekstove():
 
 # ----------------- ROBUSTNA PRETRAGA ČLANA (RELAXED MATCH) -----------------
 def pronadji_tacnan_clan(svi_odlomci, broj_str):
+    """Izuzetno fleksibilna pretraga koja traži bilo koji pomen reči član i broja u istom odlomku."""
     rezultati = []
     
     for idx, item in enumerate(svi_odlomci):
@@ -132,7 +132,9 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
         izvor = item["izvor"]
         txt_low = txt.lower()
         
+        # Provera da li tekst sadrži reč član/члан i traženi broj
         ima_rec = any(w in txt_low for w in ["član", "clan", "čl", "cl", "члан", "член", "чл"])
+        # Tražimo broj okružen razmacima, tačkom ili zagradom da ne bi pokupilo pogrešne brojeve
         ima_broj = (
             f" {broj_str} " in f" {txt_low} " or 
             f"{broj_str}." in txt_low or 
@@ -226,10 +228,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                     svi_vidjeni.add(dp["tekst"])
                     svi_kandidati.append(dp)
 
-    # AUTOMATSKO DODAVANJE "query: " PREFIKSA ZA E5 MODEL
-    query_text_for_embedding = f"query: {norm_upit}"
-    query_vector = list(embed_model.embed([query_text_for_embedding]))[0].tolist()
-    
+    query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
@@ -298,7 +297,7 @@ with st.sidebar:
     st.markdown("### 🛠️ Status sistema")
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
     st.caption("🟢 **LLM:** Llama-3.3 / Llama-3.1 (Auto-Fallback)")
-    st.caption("🟢 **Embeddings:** E5-Small (Multilingual)")
+    st.caption("🟢 **Embeddings:** FastEmbed")
     st.caption(f"{'🟢' if HAS_RERANKER else '🟡'} **Reranker:** {'Aktivan' if HAS_RERANKER else 'Fallback heuristika'}")
     
     st.divider()
