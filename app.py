@@ -2,7 +2,7 @@ import streamlit as st
 import re
 from qdrant_client import QdrantClient
 from groq import Groq
-from fastembed import TextEmbedding
+from fastembed import TextEmbedding, TextReRank
 
 # ----------------- UČITAVANJE KLJUČEVA -----------------
 QDRANT_URL = st.secrets["QDRANT_URL"]
@@ -42,15 +42,19 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ----------------- INICIJALIZACIJA KLIJENATA -----------------
+# ----------------- INICIJALIZACIJA KLIJENATA I RERANKERA -----------------
 @st.cache_resource
 def init_clients():
     qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, check_compatibility=False)
     groq = Groq(api_key=GROQ_API_KEY)
     embed_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    return qdrant, groq, embed_model
+    
+    # Višejezični Reranker model
+    reranker_model = TextReRank(model_name="BAAI/bge-reranker-large")
+    
+    return qdrant, groq, embed_model, reranker_model
 
-qdrant, groq, embed_model = init_clients()
+qdrant, groq, embed_model, reranker_model = init_clients()
 
 # ----------------- UNIVERZALNA NORMALIZACIJA TEKSTA -----------------
 def sredi_tekst(tekst):
@@ -89,11 +93,7 @@ def ucitaj_sve_tekstove():
         for r in records:
             if r.payload and "tekst" in r.payload:
                 norm_txt = sredi_tekst(r.payload["tekst"])
-                izvor = sredi_tekst(str(r.payload.get("izvor", r.payload.get("dokument", r.payload.get("source", "")))))
-                sve_tacke.append({
-                    "tekst": norm_txt,
-                    "izvor": izvor
-                })
+                sve_tacke.append(norm_txt)
         
         if next_offset is None or len(records) == 0:
             break
@@ -102,85 +102,52 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- INTELIGENTNO BODOVANJE ČLANOVA -----------------
-def oceni_pogodak_clana(tekst_obj, broj, je_ugovor_upit):
-    txt = tekst_obj["tekst"].lower()
-    izvor = tekst_obj["izvor"].lower()
-    br_str = str(broj)
-
-    # Pametna eliminacija irelevantnih dokumenata ako se traži ugovor
-    if je_ugovor_upit and ("dnevnice" in izvor or "karton" in izvor or "siera leone" in txt or "frituan" in txt):
-        return 0
-
-    # 1. NAJVIŠI PRIORITET (100b): Sam naslov člana (npr. "Član 114." ili "Član 5.")
-    naslov_pat = re.compile(rf'(?:^|\n|#|\*)\s*(clan|cl)\.?\s*{br_str}\b')
-    if naslov_pat.search(txt):
-        if je_ugovor_upit and ("kolektivn" in izvor or "kolektivn" in txt):
-            return 100
-        return 80
-
-    # 2. SREDNJI PRIORITET (60b): Spominjanje člana u tekstu ugovora
-    clan_pat = re.compile(rf'\b(clan|cl)\b[\s\.:\-\*#_]*{br_str}\b')
-    if clan_pat.search(txt):
-        if je_ugovor_upit and ("kolektivn" in izvor or "kolektivn" in txt):
-            return 60
-        return 30
-
-    return 0
-
-# ----------------- HIBRIDNA PRETRAGA SA BODOVANJEM -----------------
-def dobij_hibridni_kontekst(upit, max_karaktera=6000):
+# ----------------- PRETRAGA SA RERANKEROM -----------------
+def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     svi_odlomci = ucitaj_sve_tekstove()
+    svi_kandidati = set()
+    norm_upit = sredi_tekst(upit)
+
+    # 1. PRVI SLOD: Skeniranje ključnih reči/brojeva u kešu
     brojevi = re.findall(r'\b\d+\b', upit)
-    upit_low = upit.lower()
-    je_ugovor_upit = "kolektivn" in upit_low or "ugovor" in upit_low or "clan" in upit_low or "član" in upit_low
-
-    rangirani_odlomci = []
-    svi_vidjeni = set()
-
-    # 1. PRETRAGA PO TAČNOM BROJU ČLANA SA BODOVANJEM
     if brojevi:
         for br in brojevi:
-            for item in svi_odlomci:
-                skor = oceni_pogodak_clana(item, br, je_ugovor_upit)
-                if skor > 0 and item["tekst"] not in svi_vidjeni:
-                    rangirani_odlomci.append((skor, item["tekst"]))
-                    svi_vidjeni.add(item["tekst"])
+            pat = re.compile(rf'\b(clan|cl|\b)\.?\s*{br}\b', re.IGNORECASE)
+            for txt in svi_odlomci:
+                if pat.search(txt):
+                    svi_kandidati.add(txt)
 
-    # Sortiranje: Najbolji mečevi idu na sam vrh konteksta
-    rangirani_odlomci.sort(key=lambda x: x[0], reverse=True)
-    prioritetni_tekstovi = [t[1] for t in rangirani_odlomci]
-
-    # 2. VEKTORSKA PRETRAGA (DOPUNA)
-    norm_upit = sredi_tekst(upit)
+    # 2. DRUGI SLOJ: Vektorska pretraga (hvata širi izbor)
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
-        limit=15
+        limit=25
     )
-    
-    vektorski_tekstovi = []
     for hit in vector_response.points:
         raw_txt = hit.payload.get("tekst", "")
         if raw_txt:
-            txt = sredi_tekst(raw_txt)
-            izvor = sredi_tekst(str(hit.payload.get("izvor", hit.payload.get("dokument", hit.payload.get("source", ""))))).lower()
-            
-            if je_ugovor_upit and ("dnevnice" in izvor or "siera leone" in txt.lower() or "karton" in izvor):
-                continue
+            svi_kandidati.add(sredi_tekst(raw_txt))
 
-            if txt not in svi_vidjeni:
-                svi_vidjeni.add(txt)
-                vektorski_tekstovi.append(txt)
+    kandidati_lista = list(svi_kandidati)
+    
+    if not kandidati_lista:
+        return "", 0, len(svi_odlomci)
 
-    spojeni_rezultati = prioritetni_tekstovi + vektorski_tekstovi
-    spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(spojeni_rezultati)
+    # 3. TREĆI SLOJ: RERANKING (Ocenjivanje svih kandidata)
+    # Reranker rangira kandidate prema tome koliko dobro odgovaraju pitanju
+    reranked_results = list(reranker_model.rerank(query=norm_upit, documents=kandidati_lista))
+    
+    # Sortiramo po oceni (score) i uzimamo najbolje
+    reranked_results.sort(key=lambda x: x["score"], reverse=True)
+    top_odlomci = [res["document"] for res in reranked_results[:top_k_rezultata]]
+
+    spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(top_odlomci)
 
     if len(spojeni_tekst) > max_karaktera:
         spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
 
-    return spojeni_tekst, len(prioritetni_tekstovi), len(svi_odlomci)
+    return spojeni_tekst, len(kandidati_lista), len(svi_odlomci)
 
 # ----------------- BOČNI MENI (SIDEBAR) -----------------
 with st.sidebar:
@@ -192,7 +159,8 @@ with st.sidebar:
     st.markdown("### 🛠️ Status sistema")
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
     st.caption("🟢 **LLM:** Llama-3.3 (Groq)")
-    st.caption("🟢 **Embeddings:** FastEmbed (Local)")
+    st.caption("🟢 **Embeddings:** FastEmbed")
+    st.caption("🟢 **Reranker:** BGE-Reranker-Large")
     
     st.divider()
     
@@ -253,9 +221,9 @@ if prompt:
         st.markdown(prompt)
 
     with st.chat_message("assistant", avatar="🌲"):
-        with st.spinner("Pretražujem bazu podataka..."):
+        with st.spinner("Pretražujem i rangiram podatke..."):
             try:
-                kontekst, br_prioritetnih, ukupno_keširano = dobij_hibridni_kontekst(prompt)
+                kontekst, br_kandidata, ukupno_keširano = dobij_hibridni_kontekst(prompt)
 
                 system_prompt = (
                     "Ti si ljubazan i stručan asistent Biroa za planiranje (PD Srbijašume).\n"
@@ -264,8 +232,7 @@ if prompt:
                     "1. Odgovaraj na srpskom jeziku (latinica).\n"
                     "2. Formatiraj odgovor u jasne paragrafe sa praznim redovima između njih.\n"
                     "3. Kada objašnjavaš članove, pravila ili više tačaka, OBAVEZNO koristi tačke (bullet points `- `) i podebljaj (**bold**) ključne pojmove.\n"
-                    "4. Ako se u kontekstu nalazi više odlomaka, fokusiraj se ISKLJUČIVO na onaj koji direktno definira traženi član ili pojam.\n"
-                    "5. Ako u kontekstu postoji URL fotografije tražene osobe ili logoa, prikaži je koristeći Markdown sintaksu: ![Opis slike](URL_slike).\n\n"
+                    "4. Ako u kontekstu postoji URL fotografije tražene osobe ili logoa, prikaži je koristeći Markdown sintaksu: ![Opis slike](URL_slike).\n\n"
                     f"KONTEKST IZ BAZE PODATAKA:\n{kontekst}"
                 )
 
@@ -287,9 +254,9 @@ if prompt:
                 st.markdown(odgovor)
 
                 # DEBUG EXPANDER
-                with st.expander("🔍 Pregled preuzetog konteksta iz baze (Za debug)"):
-                    st.caption(f"Ukupno učitano odlomaka iz Qdrant baze u keš: **{ukupno_keširano}**")
-                    st.caption(f"Pronađeno rangiranih odlomaka sa traženim članom: **{br_prioritetnih}**")
+                with st.expander("🔍 Pregled rangiranog konteksta znatno poboljšanog Rerankerom"):
+                    st.caption(f"Razmotreno potencijalnih kandidata: **{br_kandidata}**")
+                    st.caption(f"Reranker je izabrao najboljih top 6 odlomaka.")
                     st.text_area("Sadržaj poslat Llami:", value=kontekst, height=220)
 
                 st.session_state.messages.append({"role": "user", "content": prompt})
