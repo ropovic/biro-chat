@@ -53,7 +53,30 @@ def init_clients():
 
 qdrant, groq, embed_model = init_clients()
 
-# ----------------- POMOĆNE FUNKCIJE ZA SRPSKI JEZIK -----------------
+# ----------------- POMOĆNE FUNKCIJE -----------------
+def cirilica_u_latinicu(tekst):
+    """Preslovljava srpsku ćirilicu u čistiju latinicu pre slanja LLM-u."""
+    digrafi = {
+        'Љ': 'Lj', 'љ': 'lj',
+        'Њ': 'Nj', 'њ': 'nj',
+        'Џ': 'Dž', 'џ': 'dž'
+    }
+    monografi = {
+        'А': 'A', 'а': 'a', 'Б': 'B', 'б': 'b', 'В': 'V', 'в': 'v',
+        'Г': 'G', 'г': 'g', 'Д': 'D', 'д': 'd', 'Ђ': 'Đ', 'ђ': 'đ',
+        'Е': 'E', 'е': 'e', 'Ж': 'Ž', 'ж': 'ž', 'З': 'Z', 'з': 'z',
+        'И': 'I', 'и': 'i', 'Ј': 'J', 'ј': 'j', 'К': 'K', 'к': 'k',
+        'Л': 'L', 'л': 'l', 'М': 'M', 'м': 'm', 'Н': 'N', 'н': 'n',
+        'О': 'O', 'о': 'o', 'П': 'P', 'п': 'p', 'Р': 'R', 'р': 'r',
+        'С': 'S', 'с': 's', 'Т': 'T', 'т': 't', 'Ћ': 'Ć', 'ћ': 'ć',
+        'У': 'U', 'у': 'u', 'Ф': 'F', 'ф': 'f', 'Х': 'H', 'х': 'h',
+        'Ц': 'C', 'ц': 'c', 'Ч': 'Č', 'ч': 'č', 'Ш': 'Š', 'ш': 'š'
+    }
+    for k, v in digrafi.items():
+        tekst = tekst.replace(k, v)
+    res = [monografi.get(ch, ch) for ch in tekst]
+    return "".join(res)
+
 def ukloni_dijakritike(tekst):
     sve = str.maketrans("čćšđžČĆŠĐŽ", "ccsdzCCSDZ")
     return tekst.translate(sve)
@@ -74,11 +97,11 @@ def generisi_korene(rec):
 
     return list(varijacije)
 
-# ----------------- OPTIMIZOVANA HIBRIDNA PRETRAGU -----------------
+# ----------------- HIBRIDNA PRETRAGA SA AUTOMATSKIM PRESLOVLJAVANJEM -----------------
 def dobij_hibridni_kontekst(upit, max_karaktera=4000):
     rezultujuci_tekstovi = []
     
-    # 1. Vektorska pretraga (Smanjeno sa 15 na 8 radi uštede tokena)
+    # 1. Vektorska pretraga
     query_vector = list(embed_model.embed([upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
@@ -120,7 +143,9 @@ def dobij_hibridni_kontekst(upit, max_karaktera=4000):
 
     spojeni_tekst = "\n\n".join(rezultujuci_tekstovi)
     
-    # Skraćivanje teksta na max_karaktera da ne prekorači Groq limit
+    # Automatsko preslovljavanje ćirilice u latinicu pre slanja LLM-u
+    spojeni_tekst = cirilica_u_latinicu(spojeni_tekst)
+
     if len(spojeni_tekst) > max_karaktera:
         spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
 
@@ -197,21 +222,16 @@ if prompt:
 
                 system_prompt = (
                     "Ti si ljubazan i stručan asistent Biroa za planiranje (PD Srbijašume).\n"
-                    "Odgovaraj tačno na osnovu datog konteksta iz baze podataka i dosadašnjeg razgovora.\n\n"
-                    "STROGO PRAVILO ZA PISMO:\n"
-                    "Pisac odgovora mora koristiti ISKLJUČIVO srpsku latinicu (Gajevicu).\n"
-                    "STROGO JE ZABRANJENO mešanje ćiriličnih i latiničnih slova unutar reči ili rečenice.\n"
-                    "Prevedi sve ćirilične pojmove iz konteksta u čistu latinicu.\n\n"
-                    "STROGO PRAVILO ZA SLIKE:\n"
-                    "Ako u kontekstu postoji URL fotografije tražene osobe ili logoa, UVEK je prikaži koristeći Markdown sintaksu za slike:\n"
-                    "![Opis slike](URL_slike)\n"
-                    "Nikada nemoj ostavljati samo link bez ![...](...).\n\n"
+                    "Odgovaraj tačno i direktno na osnovu datog konteksta iz baze podataka i dosadašnjeg razgovora.\n\n"
+                    "PRAVILA ODGOVARANJA:\n"
+                    "1. Odgovaraj na srpskom jeziku (latinica).\n"
+                    "2. NIKADA nemoj pisati uvodne fraze poput 'Na osnovu konteksta...', 'Evo odgovora...' ili objašnjavati proces prevođenja. Daj direktan i čist odgovor.\n"
+                    "3. Ako u kontekstu postoji URL fotografije tražene osobe ili logoa, prikaži je koristeći Markdown sintaksu: ![Opis slike](URL_slike).\n\n"
                     f"KONTEKST IZ BAZE PODATAKA:\n{kontekst}"
                 )
 
                 messages_for_groq = [{"role": "system", "content": system_prompt}]
                 
-                # UŠTEDA TOKENA: Šaljemo samo poslednjih 6 poruka (poslednja 3 kruga razgovora)
                 skracena_istorija = st.session_state.messages[-6:]
                 for msg in skracena_istorija:
                     messages_for_groq.append({"role": msg["role"], "content": msg["content"]})
