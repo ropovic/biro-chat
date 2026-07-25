@@ -1,7 +1,9 @@
 import streamlit as st
 import re
+import httpx
 from qdrant_client import QdrantClient
-from groq import Groq
+from google import genai
+from google.genai import types
 from fastembed import TextEmbedding
 
 # Siguran import za TextRerank
@@ -14,7 +16,7 @@ except ImportError:
 # ----------------- UČITAVANJE KLJUČEVA -----------------
 QDRANT_URL = st.secrets["QDRANT_URL"]
 QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
-GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 
 COLLECTION_NAME = "baza_cloud_v2"
 
@@ -53,7 +55,7 @@ st.markdown("""
 @st.cache_resource
 def init_clients():
     qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, check_compatibility=False)
-    groq = Groq(api_key=GROQ_API_KEY)
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     embed_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     
     reranker_model = None
@@ -63,9 +65,19 @@ def init_clients():
         except Exception:
             reranker_model = None
             
-    return qdrant, groq, embed_model, reranker_model
+    return qdrant, gemini_client, embed_model, reranker_model
 
-qdrant, groq, embed_model, reranker_model = init_clients()
+qdrant, gemini_client, embed_model, reranker_model = init_clients()
+
+# ----------------- POMOĆNA FUNKCIJA ZA PREUZIMANJE SLIKA -----------------
+def preuzmi_sliku(url):
+    try:
+        response = httpx.get(url)
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        print(f"Greška pri preuzimanju slike sa {url}: {e}")
+        return None
 
 # ----------------- UNIVERZALNA NORMALIZACIJA TEKSTA -----------------
 def sredi_tekst(tekst):
@@ -109,10 +121,14 @@ def ucitaj_sve_tekstove():
                          r.payload.get("izvor") or r.payload.get("dokument") or 
                          r.payload.get("source") or "")
                 
+                # Dodato izvlačenje slike ako postoji u payloadu
+                slika_url = r.payload.get("slika_url") or ""
+                
                 if raw_txt:
                     sve_tacke.append({
                         "tekst": sredi_tekst(raw_txt),
-                        "izvor": sredi_tekst(izvor)
+                        "izvor": sredi_tekst(izvor),
+                        "slika_url": slika_url
                     })
         
         if next_offset is None or len(records) == 0:
@@ -128,6 +144,7 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
     for idx, item in enumerate(svi_odlomci):
         txt = item["tekst"]
         izvor = item["izvor"]
+        slika_url = item.get("slika_url", "")
         txt_low = txt.lower()
         
         ima_rec = any(w in txt_low for w in ["član", "clan", "čl", "cl", "члан", "член", "чл"])
@@ -146,7 +163,7 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
                 if idx + step < len(svi_odlomci):
                     sledeci_item = svi_odlomci[idx + step]
                     prosirani_tekst += "\n" + sledeci_item["tekst"]
-            rezultati.append({"tekst": prosirani_tekst, "izvor": izvor})
+            rezultati.append({"tekst": prosirani_tekst, "izvor": izvor, "slika_url": slika_url})
             
     return rezultati
 
@@ -172,6 +189,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     for item in svi_kandidati:
         txt = item["tekst"]
         izvor = item["izvor"]
+        slika_url = item.get("slika_url", "")
         txt_low = txt.lower()
         izvor_low = izvor.lower()
         skor = 0
@@ -196,12 +214,12 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
             if rec in txt_low or rec in izvor_low:
                 skor += 50
 
-        skorovani_kandidati.append((skor, txt, izvor))
+        skorovani_kandidati.append((skor, txt, izvor, slika_url))
 
     skorovani_kandidati.sort(key=lambda x: x[0], reverse=True)
     return skorovani_kandidati[:15]
 
-# ----------------- HIBRIDNA PRETRAGA -----------------
+# ----------------- HIBRIDNA PRETRAGA SA SLIKAMA -----------------
 def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     svi_odlomci = ucitaj_sve_tekstove()
     svi_kandidati = []
@@ -209,6 +227,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     norm_upit = sredi_tekst(upit)
     upit_low = norm_upit.lower()
     brojevi = re.findall(r'\b\d+\b', upit)
+    pronadjene_slike_urls = set()
 
     # Pretraga specifičnog člana ako je naveden broj i reč član
     if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl", "члан", "чл"]):
@@ -222,7 +241,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     if je_dokument_pitanje := any(w in upit_low for w in ["dokument", "naziv", "fajl", "spisak", "koji dokumenti"]):
         jedinstveni_izvori = sorted(list(set(item["izvor"] for item in svi_odlomci if item["izvor"])))
         spisak_tekst = "Dostupni nazivi dokumenata u bazi:\n" + "\n".join([f"- {izv}" for izv in jedinstveni_izvori])
-        svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Svi dokumenti"})
+        svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Svi dokumenti", "slika_url": ""})
 
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     vector_response = qdrant.query_points(
@@ -237,19 +256,25 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
             izvor = (hit.payload.get("naziv_dokumenta") or hit.payload.get("file_name") or 
                      hit.payload.get("izvor") or hit.payload.get("dokument") or 
                      hit.payload.get("source") or "")
+            slika_url = hit.payload.get("slika_url") or ""
+            
             if raw_txt:
                 norm_txt = sredi_tekst(raw_txt)
                 if norm_txt not in svi_vidjeni:
                     svi_vidjeni.add(norm_txt)
                     svi_kandidati.append({
                         "tekst": norm_txt,
-                        "izvor": sredi_tekst(izvor)
+                        "izvor": sredi_tekst(izvor),
+                        "slika_url": slika_url
                     })
 
     if not svi_kandidati:
-        return "", 0, len(svi_odlomci)
+        return "", 0, len(svi_odlomci), []
 
     skorovani = filtriraj_i_skoruj_kandidate(svi_kandidati, upit)
+    
+    # Rečnik za brzo nalaženje URL slike za tekst
+    txt_to_url = {item[1]: item[3] for item in skorovani if item[3]}
 
     top_prioritetni = [item[1] for item in skorovani if item[0] >= 5000]
     ostali_kandidati = [item[1] for item in skorovani if item[0] < 5000]
@@ -275,13 +300,17 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
             kontekst_lista.append(txt)
         else:
             kontekst_lista.append(f"Odlomak iz baze:\n{txt}")
+            
+        # Ako je ovaj konačni odlomak povezan sa slikom, dodajemo sliku u set
+        if txt in txt_to_url:
+            pronadjene_slike_urls.add(txt_to_url[txt])
 
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(kontekst_lista)
 
     if len(spojeni_tekst) > max_karaktera:
         spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
 
-    return spojeni_tekst, len(skorovani), len(svi_odlomci)
+    return spojeni_tekst, len(skorovani), len(svi_odlomci), list(pronadjene_slike_urls)
 
 # ----------------- BOČNI MENI (SIDEBAR) -----------------
 with st.sidebar:
@@ -292,7 +321,7 @@ with st.sidebar:
     
     st.markdown("### 🛠️ Status sistema")
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
-    st.caption("🟢 **LLM:** Llama-3.3 / Llama-3.1 (Auto-Fallback)")
+    st.caption("🟢 **LLM:** Gemini 2.0 Flash (Multimodal)")
     st.caption("🟢 **Embeddings:** MiniLM-L12-v2")
     st.caption(f"{'🟢' if HAS_RERANKER else '🟡'} **Reranker:** {'Aktivan' if HAS_RERANKER else 'Fallback heuristika'}")
     
@@ -342,8 +371,11 @@ for msg in st.session_state.messages:
     avatar = "👤" if msg["role"] == "user" else "🌲"
     with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(msg["content"])
+        if "image_url" in msg and msg["image_url"]:
+            for img in msg["image_url"]:
+                st.image(img, width=300)
 
-# ----------------- OBRADA UNOSA KORISNIKA SA FALLBACK SVOJSTVOM -----------------
+# ----------------- OBRADA UNOSA KORISNIKA (GEMINI MULTIMODAL) -----------------
 prompt = st.chat_input("Postavite pitanje...")
 
 if "prompt_input" in st.session_state and st.session_state.prompt_input:
@@ -355,66 +387,80 @@ if prompt:
         st.markdown(prompt)
 
     with st.chat_message("assistant", avatar="🌲"):
-        with st.spinner("Pretražujem i rangiram podatke..."):
+        with st.spinner("Pretražujem i analiziram podatke (Tekst + Slike)..."):
             try:
-                kontekst, br_kandidata, ukupno_keširano = dobij_hibridni_kontekst(prompt)
+                # Modifikovan povrat tako da sad vraća i listu URL-ova slika
+                kontekst, br_kandidata, ukupno_keširano, slike_urls = dobij_hibridni_kontekst(prompt)
 
-                system_prompt = (
+                system_instruction = (
                     "Ti si asistent Biroa za planiranje (PD Srbijašume).\n"
-                    "Odgovaraj tačno i direktno na osnovu konteksta iz baze.\n\n"
-                    "VAŽNO PRAVILO ZA SLIKE:\n"
-                    "Ako se u kontekstu nalazi bilo koji URL slike (npr. http...jpg ili .png), "
-                    "MORAŠ ga prikazati u odgovoru kao Markdown sliku: ![Opis slike](URL).\n\n"
-                    "OSTALA PRAVILA:\n"
-                    "1. Odgovaraj na srpskom jeziku (latinica).\n"
-                    "2. Ako traženi član ili podatak NE POSTOJI u kontekstu, napiši tačno: "
-                    "'Traženi član/podatak se ne nalazi u dostupnim izvodima dokumenta u bazi.'\n"
-                    "3. Koristi podnaslove (`###`) i liste sa boldovanim rečima.\n\n"
-                    f"KONTEKST IZ BAZE:\n{kontekst}"
+                    "Odgovaraj tačno i direktno na osnovu prosleđenog konteksta (tekst) i vizuelnih podataka (slike) iz baze.\n"
+                    "Pisac odgovora mora koristiti ISKLJUČIVO srpsku latinicu (Gajevicu).\n"
+                    "NEMOJ generisati Markdown kod za slike (npr. ![slika](url)), jer ih aplikacija sama prikazuje ispod tvog teksta.\n"
+                    "Ako traženi član ili podatak NE POSTOJI u kontekstu, napiši tačno: 'Traženi član/podatak se ne nalazi u dostupnim izvodima dokumenta u bazi.'\n"
+                    "Koristi podnaslove (`###`) i liste sa boldovanim rečima gde je prikladno."
                 )
 
-                messages_for_groq = [{"role": "system", "content": system_prompt}]
-                
+                # Pakovanje prethodne istorije razgovora za bolji kontekst Geminiju
+                istorija_tekst = ""
                 skracena_istorija = st.session_state.messages[-4:]
-                for msg in skracena_istorija:
-                    messages_for_groq.append({"role": msg["role"], "content": msg["content"]})
+                if skracena_istorija:
+                    istorija_tekst = "PRETHODNI TOK RAZGOVORA:\n"
+                    for msg in skracena_istorija:
+                        uloga = "Korisnik" if msg["role"] == "user" else "Asistent"
+                        istorija_tekst += f"{uloga}: {msg['content']}\n"
+                    istorija_tekst += "\n"
+
+                # Glavni sadržaj (istorija + kontekst iz baze + novo pitanje)
+                sadrzaj_za_gemini = [
+                    f"{istorija_tekst}KONTEKST IZ BAZE:\n{kontekst}\n\nTrenutno korisničko pitanje: {prompt}"
+                ]
                 
-                messages_for_groq.append({"role": "user", "content": prompt})
+                validne_slike_za_prikaz = []
+                
+                # Učitavanje i prosleđivanje slika (do max 2 slike odjednom)
+                for url in slike_urls[:2]:
+                    slika_bajtovi = preuzmi_sliku(url)
+                    if slika_bajtovi:
+                         mime = 'image/png' if '.png' in url.lower() else 'image/jpeg'
+                         sadrzaj_za_gemini.append(
+                             types.Part.from_bytes(data=slika_bajtovi, mime_type=mime)
+                         )
+                         validne_slike_za_prikaz.append(url)
 
-                modeli = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-                odgovor = None
-                korisceni_model = ""
+                # Poziv ka Gemini 2.0 Flash
+                response = gemini_client.models.generate_content(
+                    model='gemini-2.0-flash',
+                    contents=sadrzaj_za_gemini,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.1, 
+                    )
+                )
 
-                for m in modeli:
-                    try:
-                        response = groq.chat.completions.create(
-                            model=m,
-                            messages=messages_for_groq,
-                            temperature=0.1
-                        )
-                        odgovor = response.choices[0].message.content
-                        korisceni_model = m
-                        break
-                    except Exception as err:
-                        if "rate_limit_exceeded" in str(err).lower() or "429" in str(err):
-                            continue
-                        else:
-                            raise err
-
-                if odgovor is None:
-                    odgovor = "Trenutno su svi AI modeli preopterećeni. Molimo vas pokušajte ponovo za nekoliko minuta."
-
+                odgovor = response.text
                 st.markdown(odgovor)
+                
+                # Renderovanje slika direktno u Streamlit interfejsu
+                for url in validne_slike_za_prikaz:
+                     st.image(url, width=300, caption="Pronađena referenca u bazi")
 
-                # DEBUG EXPANDER
-                with st.expander("🔍 Pregled pročišćenog konteksta poslatog Llami"):
+                # DEBUG EXPANDER prilagođen za Gemini
+                with st.expander("🔍 Pregled pročišćenog konteksta poslatog Gemini modelu"):
                     st.caption(f"Ukupno odlomaka u kešu: **{ukupno_keširano}**")
                     st.caption(f"Razmotreno rangiranih kandidata: **{br_kandidata}**")
-                    st.caption(f"Korišćeni AI Model: **{korisceni_model}**")
-                    st.text_area("Sadržaj poslat Llami:", value=kontekst, height=220)
+                    st.caption(f"Korišćeni AI Model: **Gemini 2.0 Flash**")
+                    if validne_slike_za_prikaz:
+                         st.caption(f"Učitane vizuelne reference: {', '.join(validne_slike_za_prikaz)}")
+                    st.text_area("Sadržaj poslat modelu (tekstualni deo):", value=sadrzaj_za_gemini[0], height=220)
 
+                # Čuvanje u istoriji (zajedno sa slikama kako bi ostale vidljive prilikom refresha)
                 st.session_state.messages.append({"role": "user", "content": prompt})
-                st.session_state.messages.append({"role": "assistant", "content": odgovor})
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": odgovor,
+                    "image_url": validne_slike_za_prikaz 
+                })
 
             except Exception as e:
                 st.error(f"Došlo je do greške: {e}")
