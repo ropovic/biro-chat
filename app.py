@@ -132,17 +132,17 @@ def pretvori_u_rimske(broj_str):
     return mapping.get(broj_str, "")
 
 def je_pogodak_za_clan(txt_low, broj_str):
-    """Proverava prisustvo reči član/čl uz traženi broj."""
+    """Proverava prisustvo latiničnih i ćiriličnih naziva članova uz traženi broj."""
     rimski = pretvori_u_rimske(broj_str)
     pats = [
-        rf'\b(član|clan|čl|cl)\.?\s*0?{broj_str}\b',
-        rf'\b0?{broj_str}\b\.\s*(član|clan)\b'
+        rf'\b(član|clan|čl|cl|члан|член|чл)\.?\s*0?{broj_str}\b',
+        rf'\b0?{broj_str}\b\.\s*(član|clan|члан|член)\b'
     ]
     if rimski:
-        pats.append(rf'\b(član|clan|čl|cl)\.?\s*{rimski}\b')
+        pats.append(rf'\b(član|clan|čl|cl|члан|член|чл)\.?\s*{rimski}\b')
         
     for pat in pats:
-        if re.search(pat, txt_low):
+        if re.search(pat, txt_low, re.IGNORECASE):
             return True
     return False
 
@@ -160,7 +160,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     brojevi = re.findall(r'\b\d+\b', upit)
     
     je_kolektivni = any(w in upit_low for w in ["kolektivn", "ugovor"])
-    je_clan = any(w in upit_low for w in ["clan", "član", "cl", "čl"])
+    je_clan = any(w in upit_low for w in ["clan", "član", "cl", "čl", "члан", "чл"])
     je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef"])
 
     skorovani_kandidati = []
@@ -186,9 +186,9 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
                 for br in brojevi:
                     if je_pogodak_za_clan(txt_low, br):
                         if "kolektivn" in izvor_low or "kolektivn" in txt_low:
-                            skor += 10000
+                            skor += 15000  # MAKSIMALAN PRIORITET ZA TAČAN ČLAN UGOVORA!
                         else:
-                            skor += 2000
+                            skor += 3000
                     elif f"{br}." in txt_low and "kolektivn" in izvor_low:
                         skor += 1500
 
@@ -217,8 +217,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     brojevi = re.findall(r'\b\d+\b', upit)
     upit_low = norm_upit.lower()
 
-    # Ako tražimo član, automatski spajamo i sledeće odlomke radi kompletnosti pojmova
-    if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl"]):
+    if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl", "члан", "чл"]):
         for br in brojevi:
             for idx, item in enumerate(svi_odlomci):
                 txt = item["tekst"]
@@ -231,7 +230,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
 
                 if je_pogodak_za_clan(txt_low, br) or (f"{br}." in txt_low and "kolektivn" in izvor_low):
                     if ("kolektivn" in upit_low and ("kolektivn" in izvor_low or "kolektivn" in txt_low)) or "kolektivn" not in upit_low:
-                        # Spajamo trenutni i naredna 2 odlomka iz ugovora da definicije ne bi ostale odsečene
                         prosirani_tekst = txt
                         for step in range(1, 3):
                             if idx + step < len(svi_odlomci):
