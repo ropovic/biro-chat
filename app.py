@@ -1,7 +1,6 @@
 import streamlit as st
 import re
 from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchText
 from groq import Groq
 from fastembed import TextEmbedding
 
@@ -59,7 +58,7 @@ def cirilica_u_latinicu(tekst):
     monografi = {
         'А': 'A', 'а': 'a', 'Б': 'B', 'б': 'b', 'В': 'V', 'в': 'v',
         'Г': 'G', 'г': 'g', 'Д': 'D', 'д': 'd', 'Ђ': 'Đ', 'ђ': 'đ',
-        'Е': 'E', 'е': 'e', 'Ж': 'Ž', 'ж': 'ž', 'З': 'Z', 'з': 'z',
+        'Е': 'E', 'е': 'e', 'Ж': 'Ž', 'ž': 'ž', 'З': 'Z', 'з': 'z',
         'И': 'I', 'и': 'i', 'Ј': 'J', 'ј': 'j', 'К': 'K', 'к': 'k',
         'Л': 'L', 'л': 'l', 'М': 'M', 'м': 'm', 'Н': 'N', 'н': 'n',
         'О': 'O', 'о': 'o', 'П': 'P', 'п': 'p', 'Р': 'R', 'р': 'r',
@@ -72,142 +71,73 @@ def cirilica_u_latinicu(tekst):
     res = [monografi.get(ch, ch) for ch in tekst]
     return "".join(res)
 
-def latinica_u_cirilicu(tekst):
-    digrafi = {'Lj': 'Љ', 'LJ': 'Љ', 'lj': 'љ', 'Nj': 'Њ', 'NJ': 'Њ', 'nj': 'њ', 'Dž': 'Џ', 'DŽ': 'Џ', 'dž': 'џ'}
-    monografi = {
-        'A': 'А', 'a': 'а', 'B': 'Б', 'b': 'б', 'V': 'В', 'v': 'в',
-        'G': 'Г', 'g': 'г', 'D': 'Д', 'd': 'д', 'Đ': 'Ђ', 'đ': 'ђ',
-        'E': 'Е', 'e': 'е', 'Ž': 'Ж', 'ž': 'ж', 'Z': 'З', 'z': 'з',
-        'I': 'И', 'i': 'и', 'J': 'Ј', 'j': 'ј', 'K': 'К', 'к': 'к',
-        'L': 'Л', 'l': 'л', 'M': 'М', 'm': 'м', 'N': 'Н', 'n': 'н',
-        'O': 'О', 'o': 'о', 'P': 'П', 'p': 'п', 'R': 'Р', 'r': 'р',
-        'S': 'С', 's': 'с', 'T': 'Т', 't': 'т', 'Ć': 'Ћ', 'ć': 'ћ',
-        'U': 'У', 'u': 'у', 'F': 'Ф', 'f': 'ф', 'H': 'Х', 'h': 'х',
-        'C': 'Ц', 'c': 'ц', 'Č': 'Ч', 'č': 'ч', 'Š': 'Ш', 'ш': 'ш'
-    }
-    for k, v in digrafi.items():
-        tekst = tekst.replace(k, v)
-    res = [monografi.get(ch, ch) for ch in tekst]
-    return "".join(res)
-
-def ukloni_dijakritike(tekst):
-    sve = str.maketrans("čćšđžČĆŠĐŽ", "ccsdzCCSDZ")
-    return tekst.translate(sve)
-
-def generisi_korene(rec):
-    r = rec.strip("?,.!\"':;()[]{}").lower()
-    if len(r) <= 3:
-        return []
-
-    varijacije = {r, ukloni_dijakritike(r)}
-    nastavci = ["ovima", "evima", "ama", "ima", "om", "em", "ov", "ev", "in", "og", "u", "a", "e", "i", "o"]
-
-    for nastavak in nastavci:
-        if r.endswith(nastavak) and len(r) - len(nastavak) >= 3:
-            koren = r[:-len(nastavak)]
-            varijacije.add(koren)
-            varijacije.add(ukloni_dijakritike(koren))
-
-    return list(varijacije)
-
-# ----------------- NAPREDNA HIBRIDNA PRETRAGA SA PRIORITIZACIJOM -----------------
-def dobij_hibridni_kontekst(upit, max_karaktera=4500):
-    prioritetni_tekstovi = []
-    ostali_tekstovi = []
+# ----------------- ROBUSTNA MULTI-QUERY PRETRAGA -----------------
+def dobij_hibridni_kontekst(upit, max_karaktera=6000):
+    kandidati_tekstovi = []
     svi_vidjeni = set()
 
-    # 1. CILJANA PRETRAGA ZA BROJEVE ČLANOVA (STAVLJA SE NA PRVO MESTO)
-    brojevi = re.findall(r'\b\d+\b', upit)
-    for br in brojevi:
-        varijacije_broja = [
-            f"Član {br}.", f"Član {br}", f"ČLAN {br}.", f"ČLAN {br}",
-            f"Члан {br}.", f"Члан {br}", f"ЧЛАН {br}.", f"ЧЛАН {br}",
-            f"član {br}", f"члан {br}", f"čl. {br}", f"чл. {br}"
-        ]
-        
-        # Regex obrazac za proveru tačnosti u dobijenom tekstu
-        pattern = re.compile(rf'(?i)\b(član|члан|čl|чл)\.?\s*{br}\b')
-
-        for var in varijacije_broja:
-            try:
-                num_hits, _ = qdrant.scroll(
-                    collection_name=COLLECTION_NAME,
-                    scroll_filter=Filter(
-                        must=[FieldCondition(key="tekst", match=MatchText(text=var))]
-                    ),
-                    limit=5
-                )
-                for hit in num_hits:
-                    txt = hit.payload["tekst"]
-                    if txt not in svi_vidjeni:
-                        svi_vidjeni.add(txt)
-                        # Ako tekst zaista sadrži traženi član, ide na TOP prioritet
-                        if pattern.search(txt):
-                            prioritetni_tekstovi.append(txt)
-                        else:
-                            ostali_tekstovi.append(txt)
-            except Exception:
-                pass
-
-    # 2. VEKTORSKA PRETRAGA
+    # 1. PRIMARNA VEKTORSKA PRETRAGA (Široki obuhvat: limit=25)
     query_vector = list(embed_model.embed([upit]))[0].tolist()
     vector_response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
-        limit=8
+        limit=25
     )
     for hit in vector_response.points:
-        txt = hit.payload["tekst"]
-        if txt not in svi_vidjeni:
+        txt = hit.payload.get("tekst", "")
+        if txt and txt not in svi_vidjeni:
             svi_vidjeni.add(txt)
-            ostali_tekstovi.append(txt)
+            kandidati_tekstovi.append(txt)
 
-    # 3. DVOSMERNA TEKSTUALNA PRETRAGA (LATINICA I ĆIRILICA)
-    upit_lat = cirilica_u_latinicu(upit)
-    reci = [w.strip("?,.!\"':;()[]{}") for w in upit_lat.split() if len(w) > 3 and not w.isdigit()]
-    stop_reci = {"bazi", "bazu", "neki", "neka", "neko", "postoji", "ima", "ovom", "znas", "kazi", "pise", "izvesni", "izvesnog", "clan", "clana", "ugovor", "ugovora"}
+    # 2. SEKUNDARNA PRETRAGA AKO POSTOJI BROJ ČLANA U UPITU
+    brojevi = re.findall(r'\b\d+\b', upit)
+    if brojevi:
+        for br in brojevi:
+            pomocni_upit = f"kolektivni ugovor ugovor o radu član {br} opšte odredbe"
+            pomocni_vector = list(embed_model.embed([pomocni_upit]))[0].tolist()
+            pom_resp = qdrant.query_points(
+                collection_name=COLLECTION_NAME,
+                query=pomocni_vector,
+                limit=15
+            )
+            for hit in pom_resp.points:
+                txt = hit.payload.get("tekst", "")
+                if txt and txt not in svi_vidjeni:
+                    svi_vidjeni.add(txt)
+                    kandidati_tekstovi.append(txt)
 
-    pretrazeni_koreni = set()
-    for rec in reci:
-        if rec.lower() in stop_reci:
-            continue
-        
-        koreni_lat = generisi_korene(rec)
-        for koren_lat in koreni_lat:
-            if koren_lat in pretrazeni_koreni or len(koren_lat) < 3:
-                continue
-            pretrazeni_koreni.add(koren_lat)
+    # 3. PYTHON REGEX RANGIRANJE I PRIORITIZACIJA
+    prioritetni = []
+    ostali = []
 
-            koren_cir = latinica_u_cirilicu(koren_lat)
+    if brojevi:
+        for txt in kandidati_tekstovi:
+            pogodjen = False
+            for br in brojevi:
+                # Regex koji hvata "Član 4", "Član 4.", "Члан 4", "čl. 4" itd.
+                pattern = re.compile(rf'(?i)\b(član|члан|čl|чл)\.?\s*{br}\b')
+                if pattern.search(txt):
+                    pogodjen = True
+                    break
+            
+            if pogodjen:
+                prioritetni.append(txt)
+            else:
+                ostali.append(txt)
+    else:
+        ostali = kandidati_tekstovi
 
-            for koren_search in {koren_lat, koren_cir}:
-                try:
-                    kw_hits, _ = qdrant.scroll(
-                        collection_name=COLLECTION_NAME,
-                        scroll_filter=Filter(
-                            must=[FieldCondition(key="tekst", match=MatchText(text=koren_search))]
-                        ),
-                        limit=3
-                    )
-                    for hit in kw_hits:
-                        txt = hit.payload["tekst"]
-                        if txt not in svi_vidjeni:
-                            svi_vidjeni.add(txt)
-                            ostali_tekstovi.append(txt)
-                except Exception:
-                    pass
-
-    # KOMBINOVANJE: Prioritetni tekstovi idu PRVI na listi
-    spojeni_rezultati = prioritetni_tekstovi + ostali_tekstovi
+    # Spajamo: Prioritetni odlomci (koji tačno sadrže traženi član) idu PRVI!
+    spojeni_rezultati = prioritetni + ostali
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(spojeni_rezultati)
     
-    # Preslovljavanje ćirilice u čistiju latinicu
+    # Konverzija u čistiju latinicu
     spojeni_tekst = cirilica_u_latinicu(spojeni_tekst)
 
     if len(spojeni_tekst) > max_karaktera:
         spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
 
-    return spojeni_tekst
+    return spojeni_tekst, len(prioritetni)
 
 # ----------------- BOČNI MENI (SIDEBAR) -----------------
 with st.sidebar:
@@ -278,7 +208,7 @@ if prompt:
     with st.chat_message("assistant", avatar="🌲"):
         with st.spinner("Pretražujem bazu podataka..."):
             try:
-                kontekst = dobij_hibridni_kontekst(prompt)
+                kontekst, br_prioritetnih = dobij_hibridni_kontekst(prompt)
 
                 system_prompt = (
                     "Ti si ljubazan i stručan asistent Biroa za planiranje (PD Srbijašume).\n"
@@ -306,6 +236,11 @@ if prompt:
 
                 odgovor = response.choices[0].message.content
                 st.markdown(odgovor)
+
+                # DEBUG EXPANDER - Prikaz onoga što je poslato modelu
+                with st.expander("🔍 Pregled preuzetog konteksta iz baze (Za debug)"):
+                    st.caption(f"Pronađeno prioritetnih odlomaka sa tačnim brojem člana: **{br_prioritetnih}**")
+                    st.text_area("Sadržaj poslat Llami:", value=kontekst, height=200)
 
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 st.session_state.messages.append({"role": "assistant", "content": odgovor})
