@@ -335,8 +335,8 @@ with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expand
         clicked_prompt = "Ko su zamenici direktora u Birou i prikaži njihove slike?"
     if col3.button("🌲 Crni vrh?", use_container_width=True):
         clicked_prompt = "Postoji li Crni vrh u bazi i šta piše o njemu?"
-    if col4.button("📜 Član 4. Kol. ugovora?", use_container_width=True):
-        clicked_prompt = "Navedi član 4. kolektivnog ugovora?"
+    if col4.button("📜 Član 114. Kol. ugovora?", use_container_width=True):
+        clicked_prompt = "Navedi član 114. kolektivnog ugovora?"
 
     if clicked_prompt:
         st.session_state.prompt_input = clicked_prompt
