@@ -156,7 +156,7 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- POBOLJŠANA PRETRAGA ČLANA -----------------
+# ----------------- FLEKSIBILNA PRETRAGA ČLANA (PODRŽAVA PADEŽE) -----------------
 def pronadji_tacnan_clan(svi_odlomci, broj_str):
     rezultati = []
     broj_str_clean = str(broj_str).strip()
@@ -167,12 +167,11 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
         slika_url = item.get("slika_url", "")
         txt_low = txt.lower()
         
-        # Fleksibilnija pretraga reči član i traženog broja
-        patron_clan = r'\b(član|clan|čl\.?|cl\.?)\s*(?:br\.?)?\s*' + re.escape(broj_str_clean) + r'(?:\.|\b|\))'
+        # Podržava član, člana, članu, čl. uz bilo koji oblik broja
+        patron_clan = r'\b(član[ua]?|clan[ua]?|čl\.?|cl\.?)\s*(?:br\.?)?\s*' + re.escape(broj_str_clean) + r'(?:\.|\b|\))'
         
         if re.search(patron_clan, txt_low):
             prosirani_tekst = txt
-            # Povuci i sledeća 2 odlomka da bi tekst člana bio kompletan
             for step in range(1, 3):
                 if idx + step < len(svi_odlomci):
                     sledeci_item = svi_odlomci[idx + step]
@@ -193,8 +192,6 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     je_dokument_pitanje = any(w in upit_low for w in ["dokument", "naziv", "fajl", "spisak", "koji dokumenti"])
     je_kyocera = "kyocera" in upit_low or "štampač" in upit_low or "stampac" in upit_low
     je_mrcajevac = "mrčajevac" in upit_low or "mrcajevac" in upit_low
-    je_direktor = any(w in upit_low for w in ["direktor", "ko je", "brano", "vamović"])
-    je_zamenik = any(w in upit_low for w in ["zamenik", "zamenici"])
 
     skorovani_kandidati = []
 
@@ -206,8 +203,10 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
         izvor_low = izvor.lower()
         skor = 10 
 
-        # Ako je eksplicitno pronađen tačan član preko regex-a, dajemo mu maksimalni prioritet
         if item.get("je_trazeni_clan"):
+            skor += 50000
+
+        if item.get("je_osoba_iz_upita"):
             skor += 50000
 
         if je_kyocera and ("kyocera" in txt_low or "štampač" in txt_low or "stampac" in txt_low):
@@ -215,18 +214,6 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
 
         if je_mrcajevac and "mrčajevac" in txt_low:
             skor += 50000
-
-        if je_direktor:
-            if "direktor" in txt_low or "brano" in txt_low or "vamović" in txt_low:
-                skor += 50000
-            if slika_url and "brano_vamovic" in slika_url:
-                skor += 40000
-
-        if je_zamenik:
-            if "zamenik" in txt_low or "svetlana" in txt_low or "goran" in txt_low or "ćaldović" in txt_low:
-                skor += 50000
-            if slika_url and ("svetlana_mihajlovic" in slika_url or "goran_caldovic" in slika_url):
-                skor += 40000
 
         if je_dokument_pitanje and izvor and izvor != "zaposleni_i_foto" and izvor != "osnovne_informacije":
             skor += 10000
@@ -241,7 +228,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     skorovani_kandidati.sort(key=lambda x: x[0], reverse=True)
     return skorovani_kandidati[:15]
 
-# ----------------- HIBRIDNA PRETRAGA SA PRECIZNIM MAPIRANJEM SLIKA -----------------
+# ----------------- HIBRIDNA PRETRAGA SA DINAMIČKIM MAPIRANJEM OSOBA I SLIKA -----------------
 def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     svi_odlomci = ucitaj_sve_tekstove()
     svi_kandidati = []
@@ -251,32 +238,38 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     
     brojevi = re.findall(r'\b\d+\b', upit)
     
-    # Provera da li korisnik uopšte pita za osobu/sliku ili ne
+    # Detekcija reči koje ukazuju da korisnik traži sliku ili osobu
     je_upit_za_sliku_ili_osovu = any(w in upit_low for w in [
-        "direktor", "brano", "vamović", "zamenik", "zamenici", "svetlana", "goran", 
-        "ćaldović", "caldovic", "mihajlović", "mihajlovic", "slika", "fotografija", "foto", "ko je", "rukovodstv"
-    ])
-
-    trazeni_fajlovi_slika = []
-    if any(w in upit_low for w in ["direktor", "brano", "vamović"]) and not any(w in upit_low for w in ["zamenik", "zamenici"]):
-        trazeni_fajlovi_slika.append("brano_vamovic.jpg")
-    elif any(w in upit_low for w in ["zamenik", "zamenici", "svetlana", "goran"]):
-        trazeni_fajlovi_slika.extend(["svetlana_mihajlovic.jpg", "goran_caldovic.jpg"])
+        "ko je", "slika", "fotografija", "foto", "zaposlen", "radnik", "kolega", "prikazi", "pokaži"
+    ]) or len([w for w in upit_low.split() if w not in ["ko", "je", "su", "i", "o", "u", "da", "li", "prikazi", "sliku", "član", "kolektivnog", "ugovora"]]) > 0
 
     pronadjene_slike_urls = set()
 
-    je_rukovodstvo = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef", "rukovodilac", "ko je", "brano", "vamović", "svetlana", "goran"])
+    # Dinamičko izvlačenje ključnih reči za pretragu osoba (npr. "nenad", "veres", "brano", itd.)
+    ignorisane_reci = {"ko", "je", "su", "prikazi", "pokaži", "sliku", "slika", "foto", "o", "u", "i", "da", "li", "clan", "član", "kolektivnog", "ugovora"}
+    upit_reci_osobe = [w for w in upit_low.split() if len(w) > 2 and w not in ignorisane_reci]
 
-    if je_rukovodstvo and svi_odlomci:
+    # Provera i ubacivanje odlomaka koji sadrže pomenute osobe (npr. Nenad Vereš)
+    if svi_odlomci and upit_reci_osobe:
         for item in svi_odlomci:
             txt_l = item["tekst"].lower()
             izv_l = item["izvor"].lower()
             s_url = item.get("slika_url", "")
             
-            if any(k in txt_l or k in izv_l or k in s_url for k in ["direktor", "zamenik", "brano", "vamović", "svetlana", "mihajlovic", "goran", "caldovic"]):
+            # Ako bilo koja reč iz upita (npr. "nenad" ili "veres") pogoditi tekst ili izvor
+            pogodak_osobe = any(rec in txt_l or rec in izv_l for rec in upit_reci_osobe)
+            
+            if pogodak_osobe:
                 if item["tekst"] not in svi_vidjeni:
                     svi_vidjeni.add(item["tekst"])
-                    svi_kandidati.insert(0, item)
+                    # Označavamo da je ovo direktno pronađena osoba
+                    kandidat_item = item.copy()
+                    kandidat_item["je_osoba_iz_upita"] = True
+                    svi_kandidati.insert(0, kandidat_item)
+                    
+                    # Ako odlomak ima sliku i korisnik pita za osobu/sliku, automatski je hvatamo
+                    if s_url and je_upit_za_sliku_ili_osovu:
+                        pronadjene_slike_urls.add(s_url)
 
     if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl"]):
         for br in brojevi:
@@ -292,7 +285,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
             if item["izvor"] and not ("_strana_" in item["izvor"] and item["izvor"].endswith(".csv"))
         )))
         spisak_tekst = "Dostupni glavni dokumenti u bazi:\n" + "\n".join([f"- {izv}" for izv in glavni_izvori])
-        svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Glavni dokumenti", "slika_url": "", "je_trazeni_clan": False})
+        svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Glavni dokumenti", "slika_url": "", "je_trazeni_clan": False, "je_osoba_iz_upita": False})
 
     try:
         query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
@@ -336,7 +329,8 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                             "tekst": norm_txt,
                             "izvor": sredi_tekst(izvor),
                             "slika_url": str(slika_url).strip(),
-                            "je_trazeni_clan": False
+                            "je_trazeni_clan": False,
+                            "je_osoba_iz_upita": False
                         })
     except Exception as e:
         st.warning(f"Greška pri vektorskom upitu prema Qdrant-u: {e}")
@@ -370,14 +364,11 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
 
     kontekst_lista = []
     for skor, txt, izvor, slika_url in izabrani:
-        # Slike se sakupljaju ISKLJUČIVO ako je korisnik eksplicitno postavio upit za osobu/sliku
         if slika_url and je_upit_za_sliku_ili_osovu:
-            if trazeni_fajlovi_slika:
-                if any(tf in slika_url for tf in trazeni_fajlovi_slika):
-                    pronadjene_slike_urls.add(slika_url)
-            else:
-                if not pronadjene_slike_urls:
-                    pronadjene_slike_urls.add(slika_url)
+            if any(rec in txt.lower() or rec in izvor.lower() for rec in upit_reci_osobe):
+                pronadjene_slike_urls.add(slika_url)
+            elif len(pronadjene_slike_urls) == 0:
+                pronadjene_slike_urls.add(slika_url)
             
         if txt.startswith("Izvor") or txt.startswith("Dostupni glavni"):
             kontekst_lista.append(txt)
@@ -504,7 +495,7 @@ if prompt:
                 
                 validne_slike_za_prikaz = slike_urls[:2] 
                 for url in validne_slike_za_prikaz:
-                     caption_text = "Zvanična fotografija"
+                     caption_text = "Zvanična fotografija zaposlenog"
                      if "brano_vamovic" in url:
                          caption_text = "Zvanična fotografija direktora — Brano Vamović"
                      elif "svetlana_mihajlovic" in url:
