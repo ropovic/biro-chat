@@ -169,14 +169,14 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
             
     return rezultati
 
-# ----------------- FILTRIRANJE I BODOVANJE KANDIDATA -----------------
+# ----------------- FILTRIRANJE I BODOVANJE KANDIDATA (AŽURIRANO) -----------------
 def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     upit_low = upit.lower()
     
     je_dokument_pitanje = any(w in upit_low for w in ["dokument", "naziv", "fajl", "spisak", "koji dokumenti"])
     je_kyocera = "kyocera" in upit_low or "štampač" in upit_low or "stampac" in upit_low
     je_mrcajevac = "mrčajevac" in upit_low or "mrcajevac" in upit_low
-    je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef"])
+    je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef", "rukovodilac", "ko je"])
 
     skorovani_kandidati = []
 
@@ -195,10 +195,12 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
             skor += 50000
 
         if je_direktor:
-            if "zamenik" in txt_low or "direktor" in txt_low:
-                skor += 5000
-            if "http" in txt_low:
-                skor += 5000
+            if any(w in txt_low for w in ["zamenik", "direktor", "rukovodilac", "šef", "rukovodstv"]):
+                skor += 25000
+            if slika_url:
+                skor += 30000
+            if any(w in izvor_low for w in ["zaposleni", "foto", "info", "osnovne", "biro"]):
+                skor += 20000
 
         if je_dokument_pitanje and izvor and izvor != "zaposleni_i_foto" and izvor != "osnovne_informacije":
             skor += 10000
@@ -272,7 +274,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                         "slika_url": slika_url
                     })
 
-    # Fallback ako vektorska pretraga ne vrati ništa, uzmi prve iz keša da sistem ne pukne
     if not svi_kandidati and svi_odlomci:
         svi_kandidati = svi_odlomci[:20]
 
