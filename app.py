@@ -186,7 +186,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
         slika_url = item.get("slika_url", "")
         txt_low = txt.lower()
         izvor_low = izvor.lower()
-        skor = 0
+        skor = 10 # Osnovni skor da nijedan kandidat ne bude potpuno ignorisan
 
         if je_kyocera and ("kyocera" in txt_low or "štampač" in txt_low or "stampac" in txt_low):
             skor += 50000
@@ -238,7 +238,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
 
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     
-    # Provera za kompatibilnost sa Qdrant bibliotekom
     if hasattr(qdrant, "query_points"):
         vector_response = qdrant.query_points(
             collection_name=COLLECTION_NAME,
@@ -273,8 +272,9 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                         "slika_url": slika_url
                     })
 
-    if not svi_kandidati:
-        return "", 0, len(svi_odlomci), []
+    # Fallback ako vektorska pretraga ne vrati ništa, uzmi prve iz keša da sistem ne pukne
+    if not svi_kandidati and svi_odlomci:
+        svi_kandidati = svi_odlomci[:20]
 
     skorovani = filtriraj_i_skoruj_kandidate(svi_kandidati, upit)
     txt_to_url = {item[1]: item[3] for item in skorovani if item[3]}
@@ -318,7 +318,7 @@ def strimuj_groq_odgovor(poruke):
     response_stream = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=poruke,
-        temperature=0.1,
+        temperature=0.2,
         max_tokens=1024,
         stream=True
     )
@@ -403,34 +403,28 @@ if prompt:
                 kontekst, br_kandidata, ukupno_keširano, slike_urls = dobij_hibridni_kontekst(prompt)
 
                 system_instruction = (
-                    "Ti si asistent Biroa za planiranje (PD Srbijašume).\n"
-                    "Odgovaraj tačno i direktno na osnovu prosleđenog tekstualnog konteksta iz baze.\n"
-                    "Pisac odgovora mora koristiti ISKLJUČIVO srpsku latinicu (Gajevicu).\n"
-                    "NEMOJ generisati Markdown kod za slike i nemoj pisati da ne vidiš slike. Aplikacija će ih automatski prikazati korisniku ukoliko postoje u bazi.\n"
-                    "Ako traženi član ili podatak NE POSTOJI u kontekstu, napiši tačno: 'Traženi član/podatak se ne nalazi u dostupnim izvodima dokumenta u bazi.'\n"
-                    "Koristi podnaslove (`###`) i liste sa boldovanim rečima gde je prikladno."
+                    "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
+                    "Odgovaraj na pitanja korisnika isključivo na osnovu dostavljenog konteksta iz baze podataka.\n"
+                    "Piši isključivo ispravnom srpskom latinicom (Gajevicom).\n"
+                    "Budi koristan, precizan i jasan. Koristi podnaslove (`###`) i uređene liste gde god je to prikladno.\n"
+                    "Ukoliko podatak zaista ne postoji u datom kontekstu, slobodno to naglasi korisniku sopstvenim rečima, ali uvek daj maksimum informacija koje jesu pronađene."
                 )
 
                 poruke_za_groq = [{"role": "system", "content": system_instruction}]
                 
-                # Pakovanje prethodne istorije razgovora za bolji kontekst
                 skracena_istorija = st.session_state.messages[-4:]
                 for msg in skracena_istorija:
                     poruke_za_groq.append({"role": msg["role"], "content": msg["content"]})
                 
-                # Dodavanje trenutnog pitanja sa kontekstom iz baze
                 upit_sa_kontekstom = f"KONTEKST IZ BAZE:\n{kontekst}\n\nTrenutno korisničko pitanje: {prompt}"
                 poruke_za_groq.append({"role": "user", "content": upit_sa_kontekstom})
                 
-                # Strimovanje teksta sa Groq-a (Llama 3.3)
                 odgovor = st.write_stream(strimuj_groq_odgovor(poruke_za_groq))
                 
-                # Ograničavanje na max 2 slike kako ne bi preplavili interfejs
                 validne_slike_za_prikaz = slike_urls[:2]
                 for url in validne_slike_za_prikaz:
                      st.image(url, width=300, caption="Pronađena referenca u bazi")
 
-                # DEBUG EXPANDER
                 with st.expander("🔍 Pregled metapodataka pretrage"):
                     st.caption(f"Ukupno odlomaka u kešu: **{ukupno_keširano}**")
                     st.caption(f"Razmotreno rangiranih kandidata: **{br_kandidata}**")
@@ -439,7 +433,6 @@ if prompt:
                          st.caption(f"Pronađene vizuelne reference (URL): {', '.join(validne_slike_za_prikaz)}")
                     st.text_area("Pročišćen tekstualni kontekst iz baze:", value=kontekst, height=220)
 
-                # Čuvanje u istoriji (zajedno sa slikama kako bi ostale vidljive prilikom refresha)
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 st.session_state.messages.append({
                     "role": "assistant", 
