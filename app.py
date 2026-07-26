@@ -156,7 +156,7 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- PRETRAGA ČLANA (SA PADEŽIMA) -----------------
+# ----------------- UNAPREĐENA PRETRAGA ČLANA -----------------
 def pronadji_tacnan_clan(svi_odlomci, broj_str):
     rezultati = []
     broj_str_clean = str(broj_str).strip()
@@ -167,6 +167,7 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
         slika_url = item.get("slika_url", "")
         txt_low = txt.lower()
         
+        # Hvatamo sve oblike: "Član 12", "člana 12", "članu 12", "čl. 12", "čl 12"
         patron_clan = r'\b(član[ua]?|clan[ua]?|čl\.?|cl\.?)\s*(?:br\.?)?\s*' + re.escape(broj_str_clean) + r'(?:\.|\b|\))'
         
         if re.search(patron_clan, txt_low):
@@ -211,7 +212,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
             if any(w in txt_low or w in izvor_low for w in ["zamenik", "svetlana", "goran", "ćaldović", "caldovic", "mihajlović"]):
                 skor += 60000
             if "brano" in txt_low or "vamović" in txt_low:
-                skor -= 20000 # Penalizujemo direktora kada se traže zamenici
+                skor -= 20000
 
         if je_direktor:
             if "direktor" in txt_low or "brano" in txt_low or "vamović" in txt_low:
@@ -227,8 +228,8 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     skorovani_kandidati.sort(key=lambda x: x[0], reverse=True)
     return skorovani_kandidati[:10]
 
-# ----------------- HIBRIDNA PRETRAGA SA TOKEN SAVER-OM -----------------
-def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2200):
+# ----------------- HIBRIDNA PRETRAGA SA PRECIZNIM FILTRIRANJEM -----------------
+def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2500):
     svi_odlomci = ucitaj_sve_tekstove()
     svi_kandidati = []
     svi_vidjeni = set()
@@ -236,13 +237,17 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2200):
     upit_low = norm_upit.lower()
     
     brojevi = re.findall(r'\b\d+\b', upit)
+    je_pretraga_clana = bool(brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl"]))
     
     je_zamenik = "zamenik" in upit_low or "zamenici" in upit_low
     je_direktor = ("direktor" in upit_low or "brano" in upit_low or "vamović" in upit_low) and not je_zamenik
 
     pronadjene_slike_urls = set()
 
-    ignorisane_reci = {"ko", "je", "su", "prikazi", "pokaži", "sliku", "slika", "foto", "o", "u", "i", "da", "li", "clan", "član", "kolektivnog", "ugovora", "zamenik", "zamenici", "direktor"}
+    # Striktne reči za zamenike
+    zamenici_keywords = ["svetlana", "goran", "caldovic", "ćaldović", "mihajlović", "mihajlovic"]
+
+    ignorisane_reci = {"ko", "je", "su", "prikazi", "pokaži", "sliku", "slika", "foto", "o", "u", "i", "da", "li", "clan", "član", "kolektivnog", "ugovora", "zamenik", "zamenici", "direktor", "ima", "bazi"}
     upit_reci_osobe = [w for w in upit_low.split() if len(w) > 2 and w not in ignorisane_reci]
 
     if svi_odlomci:
@@ -251,27 +256,29 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2200):
             izv_l = item["izvor"].lower()
             s_url = item.get("slika_url", "")
 
-            # Specijalna logika za zamenike
-            if je_zamenik and any(k in txt_l or k in izv_l or k in s_url.lower() for k in ["svetlana", "goran", "caldovic", "ćaldović", "mihajlović", "zamenik"]):
-                if item["tekst"] not in svi_vidjeni:
-                    svi_vidjeni.add(item["tekst"])
-                    kand = item.copy()
-                    kand["je_osoba_iz_upita"] = True
-                    svi_kandidati.insert(0, kand)
-                    if s_url and ("svetlana" in s_url or "goran" in s_url or "caldovic" in s_url):
-                        pronadjene_slike_urls.add(s_url)
+            # 1. Zamenici
+            if je_zamenik:
+                if any(k in txt_l or k in izv_l or k in s_url.lower() for k in zamenici_keywords + ["zamenik"]):
+                    if item["tekst"] not in svi_vidjeni:
+                        svi_vidjeni.add(item["tekst"])
+                        kand = item.copy()
+                        kand["je_osoba_iz_upita"] = True
+                        svi_kandidati.insert(0, kand)
+                        if s_url and any(k in s_url.lower() for k in zamenici_keywords):
+                            pronadjene_slike_urls.add(s_url)
 
-            # Specijalna logika za direktora
-            elif je_direktor and any(k in txt_l or k in izv_l or k in s_url.lower() for k in ["brano", "vamović", "vamovic"]):
-                if item["tekst"] not in svi_vidjeni:
-                    svi_vidjeni.add(item["tekst"])
-                    kand = item.copy()
-                    kand["je_osoba_iz_upita"] = True
-                    svi_kandidati.insert(0, kand)
-                    if s_url and "brano" in s_url:
-                        pronadjene_slike_urls.add(s_url)
+            # 2. Direktor
+            elif je_direktor:
+                if any(k in txt_l or k in izv_l or k in s_url.lower() for k in ["brano", "vamović", "vamovic"]):
+                    if item["tekst"] not in svi_vidjeni:
+                        svi_vidjeni.add(item["tekst"])
+                        kand = item.copy()
+                        kand["je_osoba_iz_upita"] = True
+                        svi_kandidati.insert(0, kand)
+                        if s_url and "brano" in s_url.lower():
+                            pronadjene_slike_urls.add(s_url)
 
-            # Opšta logika za zaposlene (npr. Nenad Vereš)
+            # 3. Ostali zaposleni (npr. Nenad)
             elif upit_reci_osobe and any(rec in txt_l or rec in izv_l for rec in upit_reci_osobe):
                 if item["tekst"] not in svi_vidjeni:
                     svi_vidjeni.add(item["tekst"])
@@ -281,14 +288,19 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2200):
                     if s_url:
                         pronadjene_slike_urls.add(s_url)
 
-    if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl"]):
+    # Direktna pretraga članova po broju
+    nasao_tacno_taj_clan = False
+    if je_pretraga_clana:
         for br in brojevi:
             direktni_pogodci = pronadji_tacnan_clan(svi_odlomci, br)
-            for dp in direktni_pogodci:
-                if dp["tekst"] not in svi_vidjeni:
-                    svi_vidjeni.add(dp["tekst"])
-                    svi_kandidati.insert(0, dp)
+            if direktni_pogodci:
+                nasao_tacno_taj_clan = True
+                for dp in direktni_pogodci:
+                    if dp["tekst"] not in svi_vidjeni:
+                        svi_vidjeni.add(dp["tekst"])
+                        svi_kandidati.insert(0, dp)
 
+    # Vektorska pretraga (ako je potrebno dopuniti)
     try:
         query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
         points = qdrant.search(
@@ -305,6 +317,16 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2200):
                 
                 if raw_txt:
                     norm_txt = sredi_tekst(raw_txt)
+                    
+                    # FILTRIRANJE: Ako korisnik traži član X, izbacujemo vektorske pogotke koji opisuju DRUGE članove!
+                    if je_pretraga_clana and not nasao_tacno_taj_clan:
+                        # Proveravamo da li ovaj vektorski pogodak pripada nekom drugom članu
+                        drugi_clan_match = re.search(r'\b(član[ua]?|clan[ua]?|čl\.?|cl\.?)\s*(?:br\.?)?\s*(\d+)', norm_txt.lower())
+                        if drugi_clan_match:
+                            pogodjeni_br = drugi_clan_match.group(2)
+                            if pogodjeni_br not in brojevi:
+                                continue # Preskačemo tuđe članove da ne zagađujemo kontekst
+
                     if norm_txt not in svi_vidjeni:
                         svi_vidjeni.add(norm_txt)
                         svi_kandidati.append({
@@ -338,11 +360,10 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2200):
 # ----------------- STRIMOVANJE GROQ ODGOVORA SA AUTOMATSKIM FALLBACK-OM -----------------
 def strimuj_groq_odgovor(poruke):
     try:
-        # Primarni model - najpametniji ali ima 100k TPD limit
         response_stream = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=poruke,
-            temperature=0.2,
+            temperature=0.1,
             max_tokens=800,
             stream=True
         )
@@ -350,13 +371,12 @@ def strimuj_groq_odgovor(poruke):
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
     except Exception as e:
-        # Ako pukne zbog limita (429 Rate Limit), automatski prelazimo na 8B model (500k TPD)
         if "429" in str(e) or "rate_limit" in str(e).lower():
-            st.toast("⚠️ Dostignut dnevni limit za 70B model. Automatski prebačeno na Llama-3.1-8B!", icon="🔄")
+            st.toast("⚠️ Dostignut limit za 70B model. Prebačeno na Llama-3.1-8B!", icon="🔄")
             response_stream = groq_client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=poruke,
-                temperature=0.2,
+                temperature=0.1,
                 max_tokens=800,
                 stream=True
             )
@@ -444,14 +464,13 @@ if prompt:
                     "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj na pitanja korisnika isključivo na osnovu dostavljenog konteksta iz baze podataka.\n"
                     "Piši isključivo ispravnom srpskom latinicom (Gajevicom).\n"
-                    "VAŽNO: Nikada nemoj tvrditi da si tekstualni asistent niti da ne možeš da prikazuješ slike! Aplikacija automatski prikazuje fotografiju ispod tvog odgovora.\n"
-                    "Ako je u kontekstu naveden link ka slici ili zaposleni, jasno navedi te podatke.\n"
-                    "Budi koristan, precizan i jasan. Koristi podnaslove (`###`) i liste gde je prikladno."
+                    "STRIKTNO PRAVILO O ČLANOVIMA: Ako korisnik pita za konkretan član ugovora koji se NE NALAZI u dostavljenom kontekstu, odgovori kratko i direktno da taj član nije pronađen u bazi. NIKADA nemoj navoditi druge članove koji nisu traženi niti izmišljati povezanost među članovima!\n"
+                    "VAŽNO O SLIKAMA: Nikada nemoj tvrditi da si tekstualni asistent ili da ne možeš prikazati slike. Aplikacija automatski prikazuje fotografije ispod tvog odgovora ako postoje u bazi.\n"
+                    "Budi koristan, precizan i lak za čitanje. Koristi podnaslove (`###`) i liste gde je to potrebno."
                 )
 
                 poruke_za_groq = [{"role": "system", "content": system_instruction}]
                 
-                # Zadržavamo samo poslednje 2 poruke radi uštede tokena
                 skracena_istorija = st.session_state.messages[-2:]
                 for msg in skracena_istorija:
                     poruke_za_groq.append({"role": msg["role"], "content": msg["content"]})
