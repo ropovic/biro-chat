@@ -1,7 +1,7 @@
 import streamlit as st
 import re
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import Filter, FieldCondition, MatchValue
 from groq import Groq
 from fastembed import TextEmbedding
 
@@ -54,7 +54,7 @@ st.markdown("""
 
 # ----------------- UČITAVANJE KLJUČEVA -----------------
 potrebne_tajne = ["QDRANT_URL", "QDRANT_API_KEY", "GROQ_API_KEY"]
-for tajna in potrebne_tajne:
+for tajna u potrebne_tajne:
     if tajna not in st.secrets:
         st.error(f"❌ Nedostaje ključ '{tajna}' u Streamlit Secrets-u!")
         st.stop()
@@ -68,18 +68,22 @@ COLLECTION_NAME = "baza_cloud_v2"
 # ----------------- INICIJALIZACIJA KLIJENATA -----------------
 @st.cache_resource
 def init_clients():
-    qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, check_compatibility=False)
-    groq_client = Groq(api_key=GROQ_API_KEY)
-    embed_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    
-    reranker_model = None
-    if HAS_RERANKER:
-        try:
-            reranker_model = TextRerank(model_name="BAAI/bge-reranker-base")
-        except Exception:
-            reranker_model = None
-            
-    return qdrant, groq_client, embed_model, reranker_model
+    try:
+        qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, check_compatibility=False)
+        groq_client = Groq(api_key=GROQ_API_KEY)
+        embed_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+        
+        reranker_model = None
+        if HAS_RERANKER:
+            try:
+                reranker_model = TextRerank(model_name="BAAI/bge-reranker-base")
+            except Exception:
+                reranker_model = None
+                
+        return qdrant, groq_client, embed_model, reranker_model
+    except Exception as e:
+        st.error(f"Greška prilikom inicijalizacije klijenata: {e}")
+        st.stop()
 
 qdrant, groq_client, embed_model, reranker_model = init_clients()
 
@@ -109,35 +113,38 @@ def sredi_tekst(tekst):
 def ucitaj_sve_tekstove():
     sve_tacke = []
     offset = None
-    while True:
-        records, next_offset = qdrant.scroll(
-            collection_name=COLLECTION_NAME,
-            limit=250,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False
-        )
-        for r in records:
-            if r.payload:
-                raw_txt = (r.payload.get("tekst") or r.payload.get("text") or 
-                           r.payload.get("content") or r.payload.get("page_content") or "")
-                izvor = (r.payload.get("naziv_dokumenta") or r.payload.get("file_name") or 
-                         r.payload.get("izvor") or r.payload.get("dokument") or 
-                         r.payload.get("source") or "")
-                
-                slika_url = r.payload.get("slika_url") or ""
-                
-                if raw_txt:
-                    sve_tacke.append({
-                        "tekst": sredi_tekst(raw_txt),
-                        "izvor": sredi_tekst(izvor),
-                        "slika_url": slika_url
-                    })
-        
-        if next_offset is None or len(records) == 0:
-            break
+    try:
+        while True:
+            records, next_offset = qdrant.scroll(
+                collection_name=COLLECTION_NAME,
+                limit=250,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False
+            )
+            for r in records:
+                if r.payload:
+                    raw_txt = (r.payload.get("tekst") or r.payload.get("text") or  
+                               r.payload.get("content") or r.payload.get("page_content") or "")
+                    izvor = (r.payload.get("naziv_dokumenta") or r.payload.get("file_name") or  
+                             r.payload.get("izvor") or r.payload.get("dokument") or  
+                             r.payload.get("source") or "")
+                    
+                    slika_url = r.payload.get("slika_url") or ""
+                    
+                    if raw_txt:
+                        sve_tacke.append({
+                            "tekst": sredi_tekst(raw_txt),
+                            "izvor": sredi_tekst(izvor),
+                            "slika_url": slika_url
+                        })
             
-        offset = next_offset
+            if next_offset is None or len(records) == 0:
+                break
+                
+            offset = next_offset
+    except Exception as e:
+        st.warning(f"Upozorenje pri učitavanju baze: {e}")
 
     return sve_tacke
 
@@ -150,21 +157,20 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
         slika_url = item.get("slika_url", "")
         txt_low = txt.lower()
         
-        ima_rec = any(w in txt_low for w in ["član", "clan", "čl", "cl", "члан", "член", "чл"])
+        ima_rec = any(w in txt_low for w in ["član", "clan", "čl", "cl"])
         ima_broj = (
-            f" {broj_str} " in f" {txt_low} " or 
-            f"{broj_str}." in txt_low or 
-            f"{broj_str})" in txt_low or 
+            f" {broj_str} " in f" {txt_low} " or  
+            f"{broj_str}." in txt_low or  
+            f"{broj_str})" in txt_low or  
             f"0{broj_str}" in txt_low or
-            f"član {broj_str}" in txt_low or
-            f"члан {broj_str}" in txt_low
+            f"član {broj_str}" in txt_low
         )
         
         if ima_rec and ima_broj:
             prosirani_tekst = txt
             for step in range(1, 3):
                 if idx + step < len(svi_odlomci):
-                    sledeci_item = svi_odlomci[idx + step]
+                    sledeci_item = svj_odlomci[idx + step] if 'svj_odlomci' in locals() else svi_odlomci[idx + step]
                     prosirani_tekst += "\n" + sledeci_item["tekst"]
             rezultati.append({"tekst": prosirani_tekst, "izvor": izvor, "slika_url": slika_url})
             
@@ -261,7 +267,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
         except Exception:
             pass
 
-    if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl", "члан", "чл"]):
+    if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl"]):
         for br in brojevi:
             direktni_pogodci = pronadji_tacnan_clan(svi_odlomci, br)
             for dp in direktni_pogodci:
@@ -277,41 +283,48 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
         spisak_tekst = "Dostupni glavni dokumenti u bazi:\n" + "\n".join([f"- {izv}" for izv in glavni_izvori])
         svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Glavni dokumenti", "slika_url": ""})
 
-    query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
-    
-    if hasattr(qdrant, "query_points"):
-        vector_response = qdrant.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_vector,
-            limit=25
-        )
-        points = vector_response.points
-    else:
-        vector_response = qdrant.search(
-            collection_name=COLLECTION_NAME,
-            query_vector=query_vector,
-            limit=25
-        )
-        points = vector_response
+    # Robustna vektorska pretraga sa sigurnim fallback mehanizmom
+    try:
+        query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
+        points = []
+        
+        try:
+            # Pokušaj sa qdrant.search (univerzalno najstabilniji metod)
+            points = qdrant.search(
+                collection_name=COLLECTION_NAME,
+                query_vector=query_vector,
+                limit=25
+            )
+        except Exception:
+            # Alternativni fallback ako klijent zahteva query_points
+            if hasattr(qdrant, "query_points"):
+                vector_response = qdrant.query_points(
+                    collection_name=COLLECTION_NAME,
+                    query=query_vector,
+                    limit=25
+                )
+                points = vector_response.points
 
-    for hit in points:
-        if hit.payload:
-            raw_txt = (hit.payload.get("tekst") or hit.payload.get("text") or 
-                       hit.payload.get("content") or hit.payload.get("page_content") or "")
-            izvor = (hit.payload.get("naziv_dokumenta") or hit.payload.get("file_name") or 
-                     hit.payload.get("izvor") or hit.payload.get("dokument") or 
-                     hit.payload.get("source") or "")
-            slika_url = hit.payload.get("slika_url") or ""
-            
-            if raw_txt:
-                norm_txt = sredi_tekst(raw_txt)
-                if norm_txt not in svi_vidjeni:
-                    svi_vidjeni.add(norm_txt)
-                    svi_kandidati.append({
-                        "tekst": norm_txt,
-                        "izvor": sredi_tekst(izvor),
-                        "slika_url": slika_url
-                    })
+        for hit in points:
+            if hit.payload:
+                raw_txt = (hit.payload.get("tekst") or hit.payload.get("text") or 
+                           hit.payload.get("content") or hit.payload.get("page_content") or "")
+                izvor = (hit.payload.get("naziv_dokumenta") or hit.payload.get("file_name") or 
+                           hit.payload.get("izvor") or hit.payload.get("dokument") or 
+                           hit.payload.get("source") or "")
+                slika_url = hit.payload.get("slika_url") or ""
+                
+                if raw_txt:
+                    norm_txt = sredi_tekst(raw_txt)
+                    if norm_txt not in svi_vidjeni:
+                        svi_vidjeni.add(norm_txt)
+                        svi_kandidati.append({
+                            "tekst": norm_txt,
+                            "izvor": sredi_tekst(izvor),
+                            "slika_url": slika_url
+                        })
+    except Exception as e:
+        st.warning(f"Greška pri vektorskom upitu prema Qdrant-u: {e}")
 
     if not svi_kandidati and svi_odlomci:
         svi_kandidati = svi_odlomci[:20]
