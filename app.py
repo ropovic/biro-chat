@@ -1,6 +1,7 @@
 import streamlit as st
 import re
 from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 from groq import Groq
 from fastembed import TextEmbedding
 
@@ -186,7 +187,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
         slika_url = item.get("slika_url", "")
         txt_low = txt.lower()
         izvor_low = izvor.lower()
-        skor = 10 # Osnovni skor da nijedan kandidat ne bude potpuno ignorisan
+        skor = 10 
 
         if je_kyocera and ("kyocera" in txt_low or "štampač" in txt_low or "stampac" in txt_low):
             skor += 50000
@@ -199,8 +200,8 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
                 skor += 25000
             if slika_url:
                 skor += 30000
-            if any(w in izvor_low for w in ["zaposleni", "foto", "info", "osnovne", "biro"]):
-                skor += 20000
+            if "fotobaza" in izvor_low:
+                skor += 50000
 
         if je_dokument_pitanje and izvor and izvor != "zaposleni_i_foto" and izvor != "osnovne_informacije":
             skor += 10000
@@ -225,6 +226,42 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     brojevi = re.findall(r'\b\d+\b', upit)
     pronadjene_slike_urls = set()
 
+    je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef", "rukovodilac", "ko je"])
+
+    # SPECIJALNA GARANCIJA: Ako se pita za rukovodstvo, direktno vučemo Fotobaza.csv iz Qdranta
+    if je_direktor:
+        try:
+            foto_records, _ = qdrant.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="izvor",
+                            match=MatchValue(value="Fotobaza.csv")
+                        )
+                    ]
+                ),
+                limit=50,
+                with_payload=True,
+                with_vectors=False
+            )
+            for r in foto_records:
+                if r.payload:
+                    raw_txt = r.payload.get("tekst", "")
+                    izvor = r.payload.get("izvor", "Fotobaza.csv")
+                    slika_url = r.payload.get("slika_url", "")
+                    if raw_txt:
+                        norm_txt = sredi_tekst(raw_txt)
+                        if norm_txt not in svi_vidjeni:
+                            svi_vidjeni.add(norm_txt)
+                            svi_kandidati.insert(0, {
+                                "tekst": norm_txt,
+                                "izvor": sredi_tekst(izvor),
+                                "slika_url": slika_url
+                            })
+        except Exception:
+            pass
+
     if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl", "члан", "чл"]):
         for br in brojevi:
             direktni_pogodci = pronadji_tacnan_clan(svi_odlomci, br)
@@ -234,9 +271,13 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                     svi_kandidati.append(dp)
 
     if any(w in upit_low for w in ["dokument", "naziv", "fajl", "spisak", "koji dokumenti"]):
-        jedinstveni_izvori = sorted(list(set(item["izvor"] for item in svi_odlomci if item["izvor"])))
-        spisak_tekst = "Dostupni nazivi dokumenata u bazi:\n" + "\n".join([f"- {izv}" for izv in jedinstveni_izvori])
-        svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Svi dokumenti", "slika_url": ""})
+        # Filtriramo spisak da ne prikazuje stotine sitnih Docling CSV tabela
+        glavni_izvori = sorted(list(set(
+            item["izvor"] for item in svi_odlomci 
+            if item["izvor"] and not ("_strana_" in item["izvor"] and item["izvor"].endswith(".csv"))
+        )))
+        spisak_tekst = "Dostupni glavni dokumenti u bazi:\n" + "\n".join([f"- {izv}" for izv in glavni_izvori])
+        svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Glavni dokumenti", "slika_url": ""})
 
     query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
     
@@ -299,7 +340,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
 
     kontekst_lista = []
     for txt in top_odlomci:
-        if txt.startswith("Izvor") or txt.startswith("Dostupni nazivi"):
+        if txt.startswith("Izvor") or txt.startswith("Dostupni glavni"):
             kontekst_lista.append(txt)
         else:
             kontekst_lista.append(f"Odlomak iz baze:\n{txt}")
