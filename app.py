@@ -167,17 +167,22 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
         slika_url = item.get("slika_url", "")
         txt_low = txt.lower()
         
-        # Fleksibilnija pretraga reči član i traženog broja (podržava tačku, zagradu, razmake)
+        # Fleksibilnija pretraga reči član i traženog broja
         patron_clan = r'\b(član|clan|čl\.?|cl\.?)\s*(?:br\.?)?\s*' + re.escape(broj_str_clean) + r'(?:\.|\b|\))'
         
         if re.search(patron_clan, txt_low):
             prosirani_tekst = txt
-            # Povuci i sledeća 2 odlomka da bi tekst člana bio kompletan ukoliko je prelazio u novi blok
+            # Povuci i sledeća 2 odlomka da bi tekst člana bio kompletan
             for step in range(1, 3):
                 if idx + step < len(svi_odlomci):
-                    sledeci_item = svI_odlomci = svi_odlomci[idx + step] if 'svi_odlomci' in locals() else svi_odlomci[idx + step]
+                    sledeci_item = svi_odlomci[idx + step]
                     prosirani_tekst += "\n" + sledeci_item["tekst"]
-            rezultati.append({"tekst": prosirani_tekst, "izvor": izvor, "slika_url": slika_url})
+            rezultati.append({
+                "tekst": prosirani_tekst, 
+                "izvor": izvor, 
+                "slika_url": slika_url,
+                "je_trazeni_clan": True
+            })
             
     return rezultati
 
@@ -200,6 +205,10 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
         txt_low = txt.lower()
         izvor_low = izvor.lower()
         skor = 10 
+
+        # Ako je eksplicitno pronađen tačan član preko regex-a, dajemo mu maksimalni prioritet
+        if item.get("je_trazeni_clan"):
+            skor += 50000
 
         if je_kyocera and ("kyocera" in txt_low or "štampač" in txt_low or "stampac" in txt_low):
             skor += 50000
@@ -240,14 +249,18 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     norm_upit = sredi_tekst(upit)
     upit_low = norm_upit.lower()
     
-    # Detekcija svih brojeva u upitu da bi se pronašli članovi ugovora (npr. član 15, član 114, član 5)
     brojevi = re.findall(r'\b\d+\b', upit)
     
-    # Određujemo koja tačno slika odgovara upitu
+    # Provera da li korisnik uopšte pita za osobu/sliku ili ne
+    je_upit_za_sliku_ili_osovu = any(w in upit_low for w in [
+        "direktor", "brano", "vamović", "zamenik", "zamenici", "svetlana", "goran", 
+        "ćaldović", "caldovic", "mihajlović", "mihajlovic", "slika", "fotografija", "foto", "ko je", "rukovodstv"
+    ])
+
     trazeni_fajlovi_slika = []
     if any(w in upit_low for w in ["direktor", "brano", "vamović"]) and not any(w in upit_low for w in ["zamenik", "zamenici"]):
         trazeni_fajlovi_slika.append("brano_vamovic.jpg")
-    elif any(w in upit_low for w in ["zamenik", "zamenici"]):
+    elif any(w in upit_low for w in ["zamenik", "zamenici", "svetlana", "goran"]):
         trazeni_fajlovi_slika.extend(["svetlana_mihajlovic.jpg", "goran_caldovic.jpg"])
 
     pronadjene_slike_urls = set()
@@ -271,7 +284,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
             for dp in direktni_pogodci:
                 if dp["tekst"] not in svi_vidjeni:
                     svi_vidjeni.add(dp["tekst"])
-                    svi_kandidati.insert(0, dp) # Forsiramo član na vrh da uvek bude nađen
+                    svi_kandidati.insert(0, dp)
 
     if any(w in upit_low for w in ["dokument", "naziv", "fajl", "spisak", "koji dokumenti"]):
         glavni_izvori = sorted(list(set(
@@ -279,7 +292,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
             if item["izvor"] and not ("_strana_" in item["izvor"] and item["izvor"].endswith(".csv"))
         )))
         spisak_tekst = "Dostupni glavni dokumenti u bazi:\n" + "\n".join([f"- {izv}" for izv in glavni_izvori])
-        svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Glavni dokumenti", "slika_url": ""})
+        svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Glavni dokumenti", "slika_url": "", "je_trazeni_clan": False})
 
     try:
         query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
@@ -322,7 +335,8 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                         svi_kandidati.append({
                             "tekst": norm_txt,
                             "izvor": sredi_tekst(izvor),
-                            "slika_url": str(slika_url).strip()
+                            "slika_url": str(slika_url).strip(),
+                            "je_trazeni_clan": False
                         })
     except Exception as e:
         st.warning(f"Greška pri vektorskom upitu prema Qdrant-u: {e}")
@@ -356,13 +370,12 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
 
     kontekst_lista = []
     for skor, txt, izvor, slika_url in izabrani:
-        if slika_url:
-            # Ako smo precizno definisali fajlove slika za ovu osobu/ulogu, uzmi samo te
+        # Slike se sakupljaju ISKLJUČIVO ako je korisnik eksplicitno postavio upit za osobu/sliku
+        if slika_url and je_upit_za_sliku_ili_osovu:
             if trazeni_fajlovi_slika:
                 if any(tf in slika_url for tf in trazeni_fajlovi_slika):
                     pronadjene_slike_urls.add(slika_url)
             else:
-                # Opšti slučaj
                 if not pronadjene_slike_urls:
                     pronadjene_slike_urls.add(slika_url)
             
@@ -370,8 +383,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
             kontekst_lista.append(txt)
         else:
             chunk_str = f"Odlomak iz baze (Izvor: {izvor}):\n{txt}"
-            if slika_url:
-                chunk_str += f"\n[Zvanična fotografija/slika za ovu osobu je dostupna na linku: {slika_url}]"
             kontekst_lista.append(chunk_str)
 
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(kontekst_lista)
@@ -475,7 +486,7 @@ if prompt:
                     "Odgovaraj na pitanja korisnika isključivo na osnovu dostavljenog konteksta iz baze podataka.\n"
                     "Piši isključivo ispravnom srpskom latinicom (Gajevicom).\n"
                     "VAŽNO: Nikada nemoj tvrditi da si tekstualni asistent niti da ne možeš da prikazuješ slike! Aplikacija u kojoj radiš automatski preuzima link i prikazuje fotografiju ispod tvog odgovora.\n"
-                    "Ako je u kontekstu naveden link ka slici (slika_url), jasno navedi te podatke i napiši da je zvanična fotografija uspešno prikazana ispod.\n"
+                    "Ako je u kontekstu naveden link ka slici, jasno navedi te podatke i napiši da je zvanična fotografija uspešno prikazana ispod.\n"
                     "Budi koristan, precizan i jasan. Koristi podnaslove (`###`) i uređene liste gde god je to prikladno.\n"
                     "Ukoliko podatak zaista ne postoji u datom kontekstu, slobodno to naglasi korisniku sopstvenim rečima, ali uvek daj maksimum informacija koje jesu pronađene."
                 )
@@ -491,7 +502,7 @@ if prompt:
                 
                 odgovor = st.write_stream(strimuj_groq_odgovor(poruke_za_groq))
                 
-                validne_slike_za_prikaz = slike_urls[:2] # Prikazujemo relevantne slike (do 2 za zamenike, 1 za direktora)
+                validne_slike_za_prikaz = slike_urls[:2] 
                 for url in validne_slike_za_prikaz:
                      caption_text = "Zvanična fotografija"
                      if "brano_vamovic" in url:
