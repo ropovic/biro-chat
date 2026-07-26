@@ -123,20 +123,23 @@ def ucitaj_sve_tekstove():
             )
             for r in records:
                 if r.payload:
-                    # Fleksibilno izvlačenje teksta
                     raw_txt = (r.payload.get("tekst") or r.payload.get("text") or  
                                r.payload.get("content") or r.payload.get("page_content") or 
                                r.payload.get("body") or "")
                     
-                    # Fleksibilno izvlačenje izvora/dokumenta
                     izvor = (r.payload.get("naziv_dokumenta") or r.payload.get("file_name") or  
                              r.payload.get("izvor") or r.payload.get("dokument") or  
                              r.payload.get("source") or "")
                     
-                    # Fleksibilno izvlačenje URL-a slike (pokriva sve varijacije naziva polja)
                     slika_url = (r.payload.get("slika_url") or r.payload.get("image_url") or 
                                  r.payload.get("slika") or r.payload.get("photo_url") or 
                                  r.payload.get("url") or "")
+                    
+                    # Automatski pronađi link ka slici u samom tekstu ako nije u meta-podacima
+                    if not slika_url and raw_txt:
+                        img_match = re.search(r'(https?://[^\s<>"]+?\.(?:jpg|jpeg|png|webp|gif))', raw_txt, re.IGNORECASE)
+                        if img_match:
+                            slika_url = img_match.group(1)
                     
                     if raw_txt:
                         sve_tacke.append({
@@ -240,7 +243,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
 
     je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef", "rukovodilac", "ko je", "brano", "vamović"])
 
-    # Pametna ekstrakcija direktora/slika direktno iz keširanih odlomaka (bez zavisnosti od baze)
     if je_direktor and svi_odlomci:
         for item in svi_odlomci:
             txt_l = item["tekst"].lower()
@@ -250,7 +252,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
             if "direktor" in txt_l or "brano" in txt_l or "vamović" in txt_l or "foto" in izv_l or s_url:
                 if item["tekst"] not in svi_vidjeni:
                     svi_vidjeni.add(item["tekst"])
-                    # Stavramo direktora na sam vrh
                     svi_kandidati.insert(0, item)
                     if s_url:
                         pronadjene_slike_urls.add(s_url)
@@ -271,7 +272,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
         spisak_tekst = "Dostupni glavni dokumenti u bazi:\n" + "\n".join([f"- {izv}" for izv in glavni_izvori])
         svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Glavni dokumenti", "slika_url": ""})
 
-    # Standardna vektorska pretraga
     try:
         query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
         points = []
@@ -300,6 +300,11 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                            hit.payload.get("source") or "")
                 slika_url = (hit.payload.get("slika_url") or hit.payload.get("image_url") or 
                              hit.payload.get("slika") or hit.payload.get("photo_url") or "")
+                
+                if not slika_url and raw_txt:
+                    img_match = re.search(r'(https?://[^\s<>"]+?\.(?:jpg|jpeg|png|webp|gif))', raw_txt, re.IGNORECASE)
+                    if img_match:
+                        slika_url = img_match.group(1)
                 
                 if raw_txt:
                     norm_txt = sredi_tekst(raw_txt)
@@ -456,7 +461,8 @@ if prompt:
                     "VAŽNO: Nikada nemoj tvrditi da si tekstualni asistent niti da ne možeš da prikazuješ slike! Aplikacija u kojoj radiš automatski preuzima link i prikazuje fotografiju ispod tvog odgovora.\n"
                     "Ako je u kontekstu naveden link ka slici (slika_url) ili podatak o direktoru Branu Vamoviću, jasno navedi te podatke i napiši da je zvanična fotografija uspešno prikazana ispod.\n"
                     "Budi koristan, precizan i jasan. Koristi podnaslove (`###`) i uređene liste gde god je to prikladno.\n"
-                    "Ukoliko podatak zaista ne postoji u datom kontekstu, slobodno to naglasi korisniku sopstvenim rečima, ali uvek daj maksimum informacija koje jesu pronađene."                )
+                    "Ukoliko podatak zaista ne postoji u datom kontekstu, slobodno to naglasi korisniku sopstvenim rečima, ali uvek daj maksimum informacija koje jesu pronađene."
+                )
 
                 poruke_za_groq = [{"role": "system", "content": system_instruction}]
                 
