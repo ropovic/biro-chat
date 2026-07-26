@@ -135,7 +135,6 @@ def ucitaj_sve_tekstove():
                                  r.payload.get("slika") or r.payload.get("photo_url") or 
                                  r.payload.get("url") or "")
                     
-                    # Automatski pronađi link ka slici u samom tekstu ako nije u meta-podacima
                     if not slika_url and raw_txt:
                         img_match = re.search(r'(https?://[^\s<>"]+?\.(?:jpg|jpeg|png|webp|gif))', raw_txt, re.IGNORECASE)
                         if img_match:
@@ -231,7 +230,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     skorovani_kandidati.sort(key=lambda x: x[0], reverse=True)
     return skorovani_kandidati[:15]
 
-# ----------------- HIBRIDNA PRETRAGA SA SLIKAMA -----------------
+# ----------------- HIBRIDNA PRETRAGA SA PAMETNIM SELEKTOVANJEM SLIKA -----------------
 def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     svi_odlomci = ucitaj_sve_tekstove()
     svi_kandidati = []
@@ -239,6 +238,16 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     norm_upit = sredi_tekst(upit)
     upit_low = norm_upit.lower()
     brojevi = re.findall(r'\b\d+\b', upit)
+    
+    # Detekcija specifičnih osoba u upitu da bismo izvukli tačno njihovu sliku
+    trazena_osoba_slika = None
+    if any(w in upit_low for w in ["direktor", "brano", "vamović"]):
+        trazena_osoba_slika = "brano_vamovic.jpg"
+    elif "svetlana" in upit_low:
+        trazena_osoba_slika = "svetlana_mihajlovic.jpg"
+    elif "goran" in upit_low:
+        trazena_osoba_slika = "goran_caldovic.jpg"
+
     pronadjene_slike_urls = set()
 
     je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef", "rukovodilac", "ko je", "brano", "vamović"])
@@ -253,8 +262,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                 if item["tekst"] not in svi_vidjeni:
                     svi_vidjeni.add(item["tekst"])
                     svi_kandidati.insert(0, item)
-                    if s_url:
-                        pronadjene_slike_urls.add(s_url)
 
     if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl"]):
         for br in brojevi:
@@ -348,7 +355,14 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     kontekst_lista = []
     for skor, txt, izvor, slika_url in izabrani:
         if slika_url:
-            pronadjene_slike_urls.add(slika_url)
+            # Ako smo definisali tačno traženu osobu, uzmi samo njenu sliku
+            if trazena_osoba_slika:
+                if trazena_osoba_slika in slika_url:
+                    pronadjene_slike_urls.add(slika_url)
+            else:
+                # Ako nije striktno naglašeno, uzmi prvu na koju naiđe
+                if not pronadjene_slike_urls:
+                    pronadjene_slike_urls.add(slika_url)
             
         if txt.startswith("Izvor") or txt.startswith("Dostupni glavni"):
             kontekst_lista.append(txt)
@@ -475,16 +489,16 @@ if prompt:
                 
                 odgovor = st.write_stream(strimuj_groq_odgovor(poruke_za_groq))
                 
-                validne_slike_za_prikaz = slike_urls[:2]
+                validne_slike_za_prikaz = slike_urls[:1] # Prikazujemo tačno 1 relevantnu sliku
                 for url in validne_slike_za_prikaz:
-                     st.image(url, width=300, caption="Pronađena referenca u bazi")
+                     st.image(url, width=300, caption="Zvanična fotografija direktora — Brano Vamović")
 
                 with st.expander("🔍 Pregled metapodataka pretrage"):
                     st.caption(f"Ukupno odlomaka u kešu: **{ukupno_keširano}**")
                     st.caption(f"Razmotreno rangiranih kandidata: **{br_kandidata}**")
                     st.caption(f"Korišćeni AI Model: **Groq Llama-3.3-70b**")
                     if validne_slike_za_prikaz:
-                         st.caption(f"Pronađene vizuelne reference (URL): {', '.join(validne_slike_za_prikaz)}")
+                         st.caption(f"Pronađena vizuelna referenca (URL): {', '.join(validne_slike_za_prikaz)}")
                     st.text_area("Pročišćen tekstualni kontekst iz baze:", value=kontekst, height=220)
 
                 st.session_state.messages.append({"role": "user", "content": prompt})
