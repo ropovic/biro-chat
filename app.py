@@ -156,7 +156,7 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- FLEKSIBILNA PRETRAGA ČLANA (PODRŽAVA PADEŽE) -----------------
+# ----------------- PRETRAGA ČLANA (SA PADEŽIMA) -----------------
 def pronadji_tacnan_clan(svi_odlomci, broj_str):
     rezultati = []
     broj_str_clean = str(broj_str).strip()
@@ -167,7 +167,6 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
         slika_url = item.get("slika_url", "")
         txt_low = txt.lower()
         
-        # Podržava član, člana, članu, čl. uz bilo koji oblik broja
         patron_clan = r'\b(član[ua]?|clan[ua]?|čl\.?|cl\.?)\s*(?:br\.?)?\s*' + re.escape(broj_str_clean) + r'(?:\.|\b|\))'
         
         if re.search(patron_clan, txt_low):
@@ -189,9 +188,8 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
 def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     upit_low = upit.lower()
     
-    je_dokument_pitanje = any(w in upit_low for w in ["dokument", "naziv", "fajl", "spisak", "koji dokumenti"])
-    je_kyocera = "kyocera" in upit_low or "štampač" in upit_low or "stampac" in upit_low
-    je_mrcajevac = "mrčajevac" in upit_low or "mrcajevac" in upit_low
+    je_zamenik = "zamenik" in upit_low or "zamenici" in upit_low
+    je_direktor = ("direktor" in upit_low or "brano" in upit_low or "vamović" in upit_low) and not je_zamenik
 
     skorovani_kandidati = []
 
@@ -209,14 +207,15 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
         if item.get("je_osoba_iz_upita"):
             skor += 50000
 
-        if je_kyocera and ("kyocera" in txt_low or "štampač" in txt_low or "stampac" in txt_low):
-            skor += 50000
+        if je_zamenik:
+            if any(w in txt_low or w in izvor_low for w in ["zamenik", "svetlana", "goran", "ćaldović", "caldovic", "mihajlović"]):
+                skor += 60000
+            if "brano" in txt_low or "vamović" in txt_low:
+                skor -= 20000 # Penalizujemo direktora kada se traže zamenici
 
-        if je_mrcajevac and "mrčajevac" in txt_low:
-            skor += 50000
-
-        if je_dokument_pitanje and izvor and izvor != "zaposleni_i_foto" and izvor != "osnovne_informacije":
-            skor += 10000
+        if je_direktor:
+            if "direktor" in txt_low or "brano" in txt_low or "vamović" in txt_low:
+                skor += 60000
 
         upit_reci = [r for r in upit_low.split() if len(r) > 3]
         for rec in upit_reci:
@@ -226,10 +225,10 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
         skorovani_kandidati.append((skor, txt, izvor, slika_url))
 
     skorovani_kandidati.sort(key=lambda x: x[0], reverse=True)
-    return skorovani_kandidati[:15]
+    return skorovani_kandidati[:10]
 
-# ----------------- HIBRIDNA PRETRAGA SA DINAMIČKIM MAPIRANJEM OSOBA I SLIKA -----------------
-def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
+# ----------------- HIBRIDNA PRETRAGA SA TOKEN SAVER-OM -----------------
+def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2200):
     svi_odlomci = ucitaj_sve_tekstove()
     svi_kandidati = []
     svi_vidjeni = set()
@@ -238,37 +237,48 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     
     brojevi = re.findall(r'\b\d+\b', upit)
     
-    # Detekcija reči koje ukazuju da korisnik traži sliku ili osobu
-    je_upit_za_sliku_ili_osovu = any(w in upit_low for w in [
-        "ko je", "slika", "fotografija", "foto", "zaposlen", "radnik", "kolega", "prikazi", "pokaži"
-    ]) or len([w for w in upit_low.split() if w not in ["ko", "je", "su", "i", "o", "u", "da", "li", "prikazi", "sliku", "član", "kolektivnog", "ugovora"]]) > 0
+    je_zamenik = "zamenik" in upit_low or "zamenici" in upit_low
+    je_direktor = ("direktor" in upit_low or "brano" in upit_low or "vamović" in upit_low) and not je_zamenik
 
     pronadjene_slike_urls = set()
 
-    # Dinamičko izvlačenje ključnih reči za pretragu osoba (npr. "nenad", "veres", "brano", itd.)
-    ignorisane_reci = {"ko", "je", "su", "prikazi", "pokaži", "sliku", "slika", "foto", "o", "u", "i", "da", "li", "clan", "član", "kolektivnog", "ugovora"}
+    ignorisane_reci = {"ko", "je", "su", "prikazi", "pokaži", "sliku", "slika", "foto", "o", "u", "i", "da", "li", "clan", "član", "kolektivnog", "ugovora", "zamenik", "zamenici", "direktor"}
     upit_reci_osobe = [w for w in upit_low.split() if len(w) > 2 and w not in ignorisane_reci]
 
-    # Provera i ubacivanje odlomaka koji sadrže pomenute osobe (npr. Nenad Vereš)
-    if svi_odlomci and upit_reci_osobe:
+    if svi_odlomci:
         for item in svi_odlomci:
             txt_l = item["tekst"].lower()
             izv_l = item["izvor"].lower()
             s_url = item.get("slika_url", "")
-            
-            # Ako bilo koja reč iz upita (npr. "nenad" ili "veres") pogoditi tekst ili izvor
-            pogodak_osobe = any(rec in txt_l or rec in izv_l for rec in upit_reci_osobe)
-            
-            if pogodak_osobe:
+
+            # Specijalna logika za zamenike
+            if je_zamenik and any(k in txt_l or k in izv_l or k in s_url.lower() for k in ["svetlana", "goran", "caldovic", "ćaldović", "mihajlović", "zamenik"]):
                 if item["tekst"] not in svi_vidjeni:
                     svi_vidjeni.add(item["tekst"])
-                    # Označavamo da je ovo direktno pronađena osoba
-                    kandidat_item = item.copy()
-                    kandidat_item["je_osoba_iz_upita"] = True
-                    svi_kandidati.insert(0, kandidat_item)
-                    
-                    # Ako odlomak ima sliku i korisnik pita za osobu/sliku, automatski je hvatamo
-                    if s_url and je_upit_za_sliku_ili_osovu:
+                    kand = item.copy()
+                    kand["je_osoba_iz_upita"] = True
+                    svi_kandidati.insert(0, kand)
+                    if s_url and ("svetlana" in s_url or "goran" in s_url or "caldovic" in s_url):
+                        pronadjene_slike_urls.add(s_url)
+
+            # Specijalna logika za direktora
+            elif je_direktor and any(k in txt_l or k in izv_l or k in s_url.lower() for k in ["brano", "vamović", "vamovic"]):
+                if item["tekst"] not in svi_vidjeni:
+                    svi_vidjeni.add(item["tekst"])
+                    kand = item.copy()
+                    kand["je_osoba_iz_upita"] = True
+                    svi_kandidati.insert(0, kand)
+                    if s_url and "brano" in s_url:
+                        pronadjene_slike_urls.add(s_url)
+
+            # Opšta logika za zaposlene (npr. Nenad Vereš)
+            elif upit_reci_osobe and any(rec in txt_l or rec in izv_l for rec in upit_reci_osobe):
+                if item["tekst"] not in svi_vidjeni:
+                    svi_vidjeni.add(item["tekst"])
+                    kand = item.copy()
+                    kand["je_osoba_iz_upita"] = True
+                    svi_kandidati.insert(0, kand)
+                    if s_url:
                         pronadjene_slike_urls.add(s_url)
 
     if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl"]):
@@ -279,47 +289,19 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                     svi_vidjeni.add(dp["tekst"])
                     svi_kandidati.insert(0, dp)
 
-    if any(w in upit_low for w in ["dokument", "naziv", "fajl", "spisak", "koji dokumenti"]):
-        glavni_izvori = sorted(list(set(
-            item["izvor"] for item in svi_odlomci 
-            if item["izvor"] and not ("_strana_" in item["izvor"] and item["izvor"].endswith(".csv"))
-        )))
-        spisak_tekst = "Dostupni glavni dokumenti u bazi:\n" + "\n".join([f"- {izv}" for izv in glavni_izvori])
-        svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Glavni dokumenti", "slika_url": "", "je_trazeni_clan": False, "je_osoba_iz_upita": False})
-
     try:
         query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
-        points = []
-        
-        try:
-            points = qdrant.search(
-                collection_name=COLLECTION_NAME,
-                query_vector=query_vector,
-                limit=25
-            )
-        except Exception:
-            if hasattr(qdrant, "query_points"):
-                vector_response = qdrant.query_points(
-                    collection_name=COLLECTION_NAME,
-                    query=query_vector,
-                    limit=25
-                )
-                points = vector_response.points
+        points = qdrant.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=query_vector,
+            limit=15
+        )
 
         for hit in points:
             if hit.payload:
-                raw_txt = (hit.payload.get("tekst") or hit.payload.get("text") or 
-                           hit.payload.get("content") or hit.payload.get("page_content") or "")
-                izvor = (hit.payload.get("naziv_dokumenta") or hit.payload.get("file_name") or 
-                           hit.payload.get("izvor") or hit.payload.get("dokument") or 
-                           hit.payload.get("source") or "")
-                slika_url = (hit.payload.get("slika_url") or hit.payload.get("image_url") or 
-                             hit.payload.get("slika") or hit.payload.get("photo_url") or "")
-                
-                if not slika_url and raw_txt:
-                    img_match = re.search(r'(https?://[^\s<>"]+?\.(?:jpg|jpeg|png|webp|gif))', raw_txt, re.IGNORECASE)
-                    if img_match:
-                        slika_url = img_match.group(1)
+                raw_txt = (hit.payload.get("tekst") or hit.payload.get("text") or hit.payload.get("content") or "")
+                izvor = (hit.payload.get("naziv_dokumenta") or hit.payload.get("file_name") or hit.payload.get("izvor") or "")
+                slika_url = (hit.payload.get("slika_url") or hit.payload.get("image_url") or hit.payload.get("slika") or "")
                 
                 if raw_txt:
                     norm_txt = sredi_tekst(raw_txt)
@@ -333,71 +315,58 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                             "je_osoba_iz_upita": False
                         })
     except Exception as e:
-        st.warning(f"Greška pri vektorskom upitu prema Qdrant-u: {e}")
+        pass
 
     if not svi_kandidati and svi_odlomci:
-        svi_kandidati = svi_odlomci[:20]
+        svi_kandidati = svi_odlomci[:10]
 
     skorovani = filtriraj_i_skoruj_kandidate(svi_kandidati, upit)
-    
-    top_prioritetni = [item for item in skorovani if item[0] >= 5000]
-    ostali_kandidati = [item for item in skorovani if item[0] < 5000]
-    
-    izabrani = list(top_prioritetni)
-    if reranker_model is not None and len(ostali_kandidati) > 0 and len(izabrani) < top_k_rezultata:
-        try:
-            potrebno = top_k_rezultata - len(izabrani)
-            dokumenti_za_rerank = [x[1] for x in ostali_kandidati]
-            reranked = list(reranker_model.rerank(query=norm_upit, documents=dokumenti_za_rerank))
-            reranked.sort(key=lambda x: x["score"], reverse=True)
-            
-            reranked_texts = {res["document"]: res for res in reranked[:potrebno]}
-            for item in ostali_kandidati:
-                if item[1] in reranked_texts and len(izabrani) < top_k_rezultata:
-                    izabrani.append(item)
-        except Exception:
-            pass
-
-    if len(izabrani) < top_k_rezultata:
-        potrebno = top_k_rezultata - len(izabrani)
-        izabrani.extend(ostali_kandidati[:potrebno])
+    izabrani = skorovani[:top_k_rezultata]
 
     kontekst_lista = []
     for skor, txt, izvor, slika_url in izabrani:
-        if slika_url and je_upit_za_sliku_ili_osovu:
-            if any(rec in txt.lower() or rec in izvor.lower() for rec in upit_reci_osobe):
-                pronadjene_slike_urls.add(slika_url)
-            elif len(pronadjene_slike_urls) == 0:
-                pronadjene_slike_urls.add(slika_url)
-            
-        if txt.startswith("Izvor") or txt.startswith("Dostupni glavni"):
-            kontekst_lista.append(txt)
-        else:
-            chunk_str = f"Odlomak iz baze (Izvor: {izvor}):\n{txt}"
-            kontekst_lista.append(chunk_str)
+        chunk_str = f"Odlomak (Izvor: {izvor}):\n{txt}"
+        kontekst_lista.append(chunk_str)
 
-    spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(kontekst_lista)
+    spojeni_tekst = "\n\n---\n\n".join(kontekst_lista)
 
     if len(spojeni_tekst) > max_karaktera:
-        spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Kontekst skraćen radi limita]..."
+        spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Skraćeno]"
 
     return spojeni_tekst, len(skorovani), len(svi_odlomci), list(pronadjene_slike_urls)
 
-# ----------------- STRIMOVANJE GROQ ODGOVORA -----------------
+# ----------------- STRIMOVANJE GROQ ODGOVORA SA AUTOMATSKIM FALLBACK-OM -----------------
 def strimuj_groq_odgovor(poruke):
-    response_stream = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=poruke,
-        temperature=0.2,
-        max_tokens=1024,
-        stream=True
-    )
-    
-    for chunk in response_stream:
-        if chunk.choices and chunk.choices[0].delta.content:
-            yield chunk.choices[0].delta.content
+    try:
+        # Primarni model - najpametniji ali ima 100k TPD limit
+        response_stream = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=poruke,
+            temperature=0.2,
+            max_tokens=800,
+            stream=True
+        )
+        for chunk in response_stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+    except Exception as e:
+        # Ako pukne zbog limita (429 Rate Limit), automatski prelazimo na 8B model (500k TPD)
+        if "429" in str(e) or "rate_limit" in str(e).lower():
+            st.toast("⚠️ Dostignut dnevni limit za 70B model. Automatski prebačeno na Llama-3.1-8B!", icon="🔄")
+            response_stream = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=poruke,
+                temperature=0.2,
+                max_tokens=800,
+                stream=True
+            )
+            for chunk in response_stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        else:
+            raise e
 
-# ----------------- BOČNI MENI (SIDEBAR) -----------------
+# ----------------- BOČNI MENI -----------------
 with st.sidebar:
     st.image("https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/biro_logo.jpg", use_container_width=True)
     st.title("🌲 Biro Chat")
@@ -406,9 +375,8 @@ with st.sidebar:
     
     st.markdown("### 🛠️ Status sistema")
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
-    st.caption("🟢 **LLM:** Groq Llama-3.3-70b")
+    st.caption("🟢 **LLM:** Groq Llama (Auto-fallback 70B ➔ 8B)")
     st.caption("🟢 **Embeddings:** MiniLM-L12-v2")
-    st.caption(f"{'🟢' if HAS_RERANKER else '🟡'} **Reranker:** {'Aktivan' if HAS_RERANKER else 'Fallback heuristika'}")
     
     st.divider()
     
@@ -431,7 +399,7 @@ st.markdown("""
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# ----------------- TRAJNA BRZA PITANJA (EXPANDER) -----------------
+# ----------------- TRAJNA BRZA PITANJA -----------------
 with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expanded=(len(st.session_state.messages) == 0)):
     col1, col2, col3, col4 = st.columns(4)
     clicked_prompt = None
@@ -476,15 +444,15 @@ if prompt:
                     "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj na pitanja korisnika isključivo na osnovu dostavljenog konteksta iz baze podataka.\n"
                     "Piši isključivo ispravnom srpskom latinicom (Gajevicom).\n"
-                    "VAŽNO: Nikada nemoj tvrditi da si tekstualni asistent niti da ne možeš da prikazuješ slike! Aplikacija u kojoj radiš automatski preuzima link i prikazuje fotografiju ispod tvog odgovora.\n"
-                    "Ako je u kontekstu naveden link ka slici, jasno navedi te podatke i napiši da je zvanična fotografija uspešno prikazana ispod.\n"
-                    "Budi koristan, precizan i jasan. Koristi podnaslove (`###`) i uređene liste gde god je to prikladno.\n"
-                    "Ukoliko podatak zaista ne postoji u datom kontekstu, slobodno to naglasi korisniku sopstvenim rečima, ali uvek daj maksimum informacija koje jesu pronađene."
+                    "VAŽNO: Nikada nemoj tvrditi da si tekstualni asistent niti da ne možeš da prikazuješ slike! Aplikacija automatski prikazuje fotografiju ispod tvog odgovora.\n"
+                    "Ako je u kontekstu naveden link ka slici ili zaposleni, jasno navedi te podatke.\n"
+                    "Budi koristan, precizan i jasan. Koristi podnaslove (`###`) i liste gde je prikladno."
                 )
 
                 poruke_za_groq = [{"role": "system", "content": system_instruction}]
                 
-                skracena_istorija = st.session_state.messages[-4:]
+                # Zadržavamo samo poslednje 2 poruke radi uštede tokena
+                skracena_istorija = st.session_state.messages[-2:]
                 for msg in skracena_istorija:
                     poruke_za_groq.append({"role": msg["role"], "content": msg["content"]})
                 
@@ -496,21 +464,20 @@ if prompt:
                 validne_slike_za_prikaz = slike_urls[:2] 
                 for url in validne_slike_za_prikaz:
                      caption_text = "Zvanična fotografija zaposlenog"
-                     if "brano_vamovic" in url:
+                     if "brano" in url.lower():
                          caption_text = "Zvanična fotografija direktora — Brano Vamović"
-                     elif "svetlana_mihajlovic" in url:
+                     elif "svetlana" in url.lower():
                          caption_text = "Zvanična fotografija zamenika — Svetlana Mihajlović"
-                     elif "goran_caldovic" in url:
+                     elif "goran" in url.lower() or "caldovic" in url.lower():
                          caption_text = "Zvanična fotografija zamenika — Goran Ćaldović"
                      st.image(url, width=300, caption=caption_text)
 
                 with st.expander("🔍 Pregled metapodataka pretrage"):
                     st.caption(f"Ukupno odlomaka u kešu: **{ukupno_keširano}**")
                     st.caption(f"Razmotreno rangiranih kandidata: **{br_kandidata}**")
-                    st.caption(f"Korišćeni AI Model: **Groq Llama-3.3-70b**")
                     if validne_slike_za_prikaz:
                          st.caption(f"Pronađena vizuelna referenca (URL): {', '.join(validne_slike_za_prikaz)}")
-                    st.text_area("Pročišćen tekstualni kontekst iz baze:", value=kontekst, height=220)
+                    st.text_area("Pročišćen tekstualni kontekst iz baze:", value=kontekst, height=200)
 
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 st.session_state.messages.append({
@@ -520,4 +487,4 @@ if prompt:
                 })
 
             except Exception as e:
-                st.error(f"Došlo je do greške u komunikaciji sa Groq-om ili bazom: {e}")
+                st.error(f"Došlo je do greške u komunikaciji: {e}")
