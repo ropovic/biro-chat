@@ -54,7 +54,7 @@ st.markdown("""
 
 # ----------------- UČITAVANJE KLJUČEVA -----------------
 potrebne_tajne = ["QDRANT_URL", "QDRANT_API_KEY", "GROQ_API_KEY"]
-for tajna u potrebne_tajne:
+for tajna in potrebne_tajne:
     if tajna not in st.secrets:
         st.error(f"❌ Nedostaje ključ '{tajna}' u Streamlit Secrets-u!")
         st.stop()
@@ -170,7 +170,7 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
             prosirani_tekst = txt
             for step in range(1, 3):
                 if idx + step < len(svi_odlomci):
-                    sledeci_item = svj_odlomci[idx + step] if 'svj_odlomci' in locals() else svi_odlomci[idx + step]
+                    sledeci_item = svi_odlomci[idx + step]
                     prosirani_tekst += "\n" + sledeci_item["tekst"]
             rezultati.append({"tekst": prosirani_tekst, "izvor": izvor, "slika_url": slika_url})
             
@@ -289,14 +289,12 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
         points = []
         
         try:
-            # Pokušaj sa qdrant.search (univerzalno najstabilniji metod)
             points = qdrant.search(
                 collection_name=COLLECTION_NAME,
                 query_vector=query_vector,
                 limit=25
             )
         except Exception:
-            # Alternativni fallback ako klijent zahteva query_points
             if hasattr(qdrant, "query_points"):
                 vector_response = qdrant.query_points(
                     collection_name=COLLECTION_NAME,
