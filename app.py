@@ -1,7 +1,6 @@
 import streamlit as st
 import re
 from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue
 from groq import Groq
 from fastembed import TextEmbedding
 
@@ -124,19 +123,26 @@ def ucitaj_sve_tekstove():
             )
             for r in records:
                 if r.payload:
+                    # Fleksibilno izvlačenje teksta
                     raw_txt = (r.payload.get("tekst") or r.payload.get("text") or  
-                               r.payload.get("content") or r.payload.get("page_content") or "")
+                               r.payload.get("content") or r.payload.get("page_content") or 
+                               r.payload.get("body") or "")
+                    
+                    # Fleksibilno izvlačenje izvora/dokumenta
                     izvor = (r.payload.get("naziv_dokumenta") or r.payload.get("file_name") or  
                              r.payload.get("izvor") or r.payload.get("dokument") or  
                              r.payload.get("source") or "")
                     
-                    slika_url = r.payload.get("slika_url") or ""
+                    # Fleksibilno izvlačenje URL-a slike (pokriva sve varijacije naziva polja)
+                    slika_url = (r.payload.get("slika_url") or r.payload.get("image_url") or 
+                                 r.payload.get("slika") or r.payload.get("photo_url") or 
+                                 r.payload.get("url") or "")
                     
                     if raw_txt:
                         sve_tacke.append({
                             "tekst": sredi_tekst(raw_txt),
                             "izvor": sredi_tekst(izvor),
-                            "slika_url": slika_url
+                            "slika_url": str(slika_url).strip()
                         })
             
             if next_offset is None or len(records) == 0:
@@ -183,7 +189,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     je_dokument_pitanje = any(w in upit_low for w in ["dokument", "naziv", "fajl", "spisak", "koji dokumenti"])
     je_kyocera = "kyocera" in upit_low or "štampač" in upit_low or "stampac" in upit_low
     je_mrcajevac = "mrčajevac" in upit_low or "mrcajevac" in upit_low
-    je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef", "rukovodilac", "ko je"])
+    je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef", "rukovodilac", "ko je", "brano", "vamović"])
 
     skorovani_kandidati = []
 
@@ -202,12 +208,12 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
             skor += 50000
 
         if je_direktor:
-            if any(w in txt_low for w in ["zamenik", "direktor", "rukovodilac", "šef", "rukovodstv"]):
-                skor += 25000
-            if slika_url:
-                skor += 30000
-            if "fotobaza" in izvor_low:
+            if any(w in txt_low for w in ["zamenik", "direktor", "rukovodilac", "šef", "rukovodstv", "brano", "vamović"]):
                 skor += 50000
+            if slika_url:
+                skor += 40000
+            if "foto" in izvor_low or "baza" in izvor_low or "zaposleni" in izvor_low:
+                skor += 30000
 
         if je_dokument_pitanje and izvor and izvor != "zaposleni_i_foto" and izvor != "osnovne_informacije":
             skor += 10000
@@ -232,40 +238,22 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
     brojevi = re.findall(r'\b\d+\b', upit)
     pronadjene_slike_urls = set()
 
-    je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef", "rukovodilac", "ko je"])
+    je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef", "rukovodilac", "ko je", "brano", "vamović"])
 
-    if je_direktor:
-        try:
-            foto_records, _ = qdrant.scroll(
-                collection_name=COLLECTION_NAME,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="izvor",
-                            match=MatchValue(value="Fotobaza.csv")
-                        )
-                    ]
-                ),
-                limit=50,
-                with_payload=True,
-                with_vectors=False
-            )
-            for r in foto_records:
-                if r.payload:
-                    raw_txt = r.payload.get("tekst", "")
-                    izvor = r.payload.get("izvor", "Fotobaza.csv")
-                    slika_url = r.payload.get("slika_url", "")
-                    if raw_txt:
-                        norm_txt = sredi_tekst(raw_txt)
-                        if norm_txt not in svi_vidjeni:
-                            svi_vidjeni.add(norm_txt)
-                            svi_kandidati.insert(0, {
-                                "tekst": norm_txt,
-                                "izvor": sredi_tekst(izvor),
-                                "slika_url": slika_url
-                            })
-        except Exception:
-            pass
+    # Pametna ekstrakcija direktora/slika direktno iz keširanih odlomaka (bez zavisnosti od baze)
+    if je_direktor and svi_odlomci:
+        for item in svi_odlomci:
+            txt_l = item["tekst"].lower()
+            izv_l = item["izvor"].lower()
+            s_url = item.get("slika_url", "")
+            
+            if "direktor" in txt_l or "brano" in txt_l or "vamović" in txt_l or "foto" in izv_l or s_url:
+                if item["tekst"] not in svi_vidjeni:
+                    svi_vidjeni.add(item["tekst"])
+                    # Stavramo direktora na sam vrh
+                    svi_kandidati.insert(0, item)
+                    if s_url:
+                        pronadjene_slike_urls.add(s_url)
 
     if brojevi and any(w in upit_low for w in ["clan", "član", "cl", "čl"]):
         for br in brojevi:
@@ -283,7 +271,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
         spisak_tekst = "Dostupni glavni dokumenti u bazi:\n" + "\n".join([f"- {izv}" for izv in glavni_izvori])
         svi_kandidati.append({"tekst": spisak_tekst, "izvor": "Glavni dokumenti", "slika_url": ""})
 
-    # Robustna vektorska pretraga sa sigurnim fallback mehanizmom
+    # Standardna vektorska pretraga
     try:
         query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
         points = []
@@ -310,7 +298,8 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                 izvor = (hit.payload.get("naziv_dokumenta") or hit.payload.get("file_name") or 
                            hit.payload.get("izvor") or hit.payload.get("dokument") or 
                            hit.payload.get("source") or "")
-                slika_url = hit.payload.get("slika_url") or ""
+                slika_url = (hit.payload.get("slika_url") or hit.payload.get("image_url") or 
+                             hit.payload.get("slika") or hit.payload.get("photo_url") or "")
                 
                 if raw_txt:
                     norm_txt = sredi_tekst(raw_txt)
@@ -319,7 +308,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                         svi_kandidati.append({
                             "tekst": norm_txt,
                             "izvor": sredi_tekst(izvor),
-                            "slika_url": slika_url
+                            "slika_url": str(slika_url).strip()
                         })
     except Exception as e:
         st.warning(f"Greška pri vektorskom upitu prema Qdrant-u: {e}")
@@ -353,13 +342,15 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
 
     kontekst_lista = []
     for skor, txt, izvor, slika_url in izabrani:
+        if slika_url:
+            pronadjene_slike_urls.add(slika_url)
+            
         if txt.startswith("Izvor") or txt.startswith("Dostupni glavni"):
             kontekst_lista.append(txt)
         else:
             chunk_str = f"Odlomak iz baze (Izvor: {izvor}):\n{txt}"
             if slika_url:
                 chunk_str += f"\n[Zvanična fotografija/slika za ovu osobu je dostupna na linku: {slika_url}]"
-                pronadjene_slike_urls.add(slika_url)
             kontekst_lista.append(chunk_str)
 
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(kontekst_lista)
@@ -462,7 +453,7 @@ if prompt:
                     "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj na pitanja korisnika isključivo na osnovu dostavljenog konteksta iz baze podataka.\n"
                     "Piši isključivo ispravnom srpskom latinicom (Gajevicom).\n"
-                    "Ako je u kontekstu za osobu naveden link ka slici (slika_url), obavezno pomeni u odgovoru da je fotografija uspešno pronađena i da je prikazana ispod!\n"
+                    "Ako je u kontekstu za osobu naveden link ka slici (slika_url) ili podatak o direktoru Branu Vamoviću, obavezno navedi te informacije i pomeni da je fotografija prikazana ispod!\n"
                     "Budi koristan, precizan i jasan. Koristi podnaslove (`###`) i uređene liste gde god je to prikladno.\n"
                     "Ukoliko podatak zaista ne postoji u datom kontekstu, slobodno to naglasi korisniku sopstvenim rečima, ali uvek daj maksimum informacija koje jesu pronađene."
                 )
