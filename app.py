@@ -170,7 +170,7 @@ def pronadji_tacnan_clan(svi_odlomci, broj_str):
             
     return rezultati
 
-# ----------------- FILTRIRANJE I BODOVANJE KANDIDATA (AŽURIRANO) -----------------
+# ----------------- FILTRIRANJE I BODOVANJE KANDIDATA -----------------
 def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     upit_low = upit.lower()
     
@@ -228,7 +228,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
 
     je_direktor = any(w in upit_low for w in ["direktor", "zamenik", "zamenici", "rukovodstv", "uprava", "sef", "šef", "rukovodilac", "ko je"])
 
-    # SPECIJALNA GARANCIJA: Ako se pita za rukovodstvo, direktno vučemo Fotobaza.csv iz Qdranta
     if je_direktor:
         try:
             foto_records, _ = qdrant.scroll(
@@ -271,7 +270,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
                     svi_kandidati.append(dp)
 
     if any(w in upit_low for w in ["dokument", "naziv", "fajl", "spisak", "koji dokumenti"]):
-        # Filtriramo spisak da ne prikazuje stotine sitnih Docling CSV tabela
         glavni_izvori = sorted(list(set(
             item["izvor"] for item in svi_odlomci 
             if item["izvor"] and not ("_strana_" in item["izvor"] and item["izvor"].endswith(".csv"))
@@ -319,34 +317,39 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=4000):
         svi_kandidati = svi_odlomci[:20]
 
     skorovani = filtriraj_i_skoruj_kandidate(svi_kandidati, upit)
-    txt_to_url = {item[1]: item[3] for item in skorovani if item[3]}
-
-    top_prioritetni = [item[1] for item in skorovani if item[0] >= 5000]
-    ostali_kandidati = [item[1] for item in skorovani if item[0] < 5000]
-    top_odlomci = list(top_prioritetni)
-
-    if reranker_model is not None and len(ostali_kandidati) > 0 and len(top_odlomci) < top_k_rezultata:
+    
+    top_prioritetni = [item for item in skorovani if item[0] >= 5000]
+    ostali_kandidati = [item for item in skorovani if item[0] < 5000]
+    
+    izabrani = list(top_prioritetni)
+    if reranker_model is not None and len(ostali_kandidati) > 0 and len(izabrani) < top_k_rezultata:
         try:
-            potrebno = top_k_rezultata - len(top_odlomci)
-            reranked = list(reranker_model.rerank(query=norm_upit, documents=ostali_kandidati))
+            potrebno = top_k_rezultata - len(izabrani)
+            dokumenti_za_rerank = [x[1] for x in ostali_kandidati]
+            reranked = list(reranker_model.rerank(query=norm_upit, documents=dokumenti_za_rerank))
             reranked.sort(key=lambda x: x["score"], reverse=True)
-            top_odlomci.extend([res["document"] for res in reranked[:potrebno]])
+            
+            reranked_texts = {res["document"]: res for res in reranked[:potrebno]}
+            for item in ostali_kandidati:
+                if item[1] in reranked_texts and len(izabrani) < top_k_rezultata:
+                    izabrani.append(item)
         except Exception:
             pass
 
-    if len(top_odlomci) < top_k_rezultata:
-        potrebno = top_k_rezultata - len(top_odlomci)
-        top_odlomci.extend(ostali_kandidati[:potrebno])
+    if len(izabrani) < top_k_rezultata:
+        potrebno = top_k_rezultata - len(izabrani)
+        izabrani.extend(ostali_kandidati[:potrebno])
 
     kontekst_lista = []
-    for txt in top_odlomci:
+    for skor, txt, izvor, slika_url in izabrani:
         if txt.startswith("Izvor") or txt.startswith("Dostupni glavni"):
             kontekst_lista.append(txt)
         else:
-            kontekst_lista.append(f"Odlomak iz baze:\n{txt}")
-            
-        if txt in txt_to_url:
-            pronadjene_slike_urls.add(txt_to_url[txt])
+            chunk_str = f"Odlomak iz baze (Izvor: {izvor}):\n{txt}"
+            if slika_url:
+                chunk_str += f"\n[Zvanična fotografija/slika za ovu osobu je dostupna na linku: {slika_url}]"
+                pronadjene_slike_urls.add(slika_url)
+            kontekst_lista.append(chunk_str)
 
     spojeni_tekst = "\n\n--- ODLOMAK IZ BAZE ---\n\n".join(kontekst_lista)
 
@@ -448,6 +451,7 @@ if prompt:
                     "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj na pitanja korisnika isključivo na osnovu dostavljenog konteksta iz baze podataka.\n"
                     "Piši isključivo ispravnom srpskom latinicom (Gajevicom).\n"
+                    "Ako je u kontekstu za osobu naveden link ka slici (slika_url), obavezno pomeni u odgovoru da je fotografija uspešno pronađena i da je prikazana ispod!\n"
                     "Budi koristan, precizan i jasan. Koristi podnaslove (`###`) i uređene liste gde god je to prikladno.\n"
                     "Ukoliko podatak zaista ne postoji u datom kontekstu, slobodno to naglasi korisniku sopstvenim rečima, ali uvek daj maksimum informacija koje jesu pronađene."
                 )
