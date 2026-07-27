@@ -162,22 +162,21 @@ def pronadji_tacne_clanove(svi_odlomci, brojevi):
         for idx, item in enumerate(svi_odlomci):
             txt_low = item["tekst"].lower()
             izv_low = item["izvor"].lower()
-            # Fleksibilna provera da li odlomak sadrži tačan broj člana i reč član/clan/čl ili kolektivni
             ima_broj = re.search(r'\b' + re.escape(br_str) + r'\b', txt_low)
             ima_rec_clan = any(w in txt_low for w in ["clan", "član", "čl.", "cl."]) or any(w in izv_low for w in ["kolektivn", "ugovor", "ku"])
             
             if ima_broj and ima_rec_clan:
                 if idx not in svi_pogodjeni_idx:
                     svi_pogodjeni_idx.add(idx)
+                    # Širi prozor: uzmi 1 prethodni, trenutni i 2 naredna odlomka radi potpunog konteksta člana
                     spojeni_txt = ""
-                    if idx > 0:
-                        spojeni_txt += svi_odlomci[idx - 1]["tekst"] + "\n\n"
-                    spojeni_txt += item["tekst"]
-                    if idx + 1 < len(svi_odlomci):
-                        spojeni_txt += "\n\n" + svi_odlomci[idx + 1]["tekst"]
+                    start_idx = max(0, idx - 1)
+                    end_idx = min(len(svi_odlomci), idx + 3)
+                    for i in range(start_idx, end_idx):
+                        spojeni_txt += svi_odlomci[i]["tekst"] + "\n\n"
                         
                     rezultati.append({
-                        "tekst": spojeni_txt,
+                        "tekst": spojeni_txt.strip(),
                         "izvor": item["izvor"],
                         "slika_url": item.get("slika_url", ""),
                         "je_trazeni_clan": True
@@ -188,9 +187,10 @@ def pronadji_tacne_clanove(svi_odlomci, brojevi):
 def dobij_slike_za_upit(upit_low, svi_odlomci, izabrani_kandidati):
     je_zamenik = "zamenik" in upit_low or "zamenici" in upit_low
     je_direktor = ("direktor" in upit_low or "rukovodilac" in upit_low) and not je_zamenik
+    je_osoba = any(w in upit_low for w in ["nenad", "brana", "biljana", "aleksandra", "arsenije", "bojana", "boško", "bosko", "darko", "dragana", "zaposlen", "kooga", "ko je"])
     trazi_sliku = any(w in upit_low for w in ["slika", "slike", "sliku", "foto", "fotografij", "izgleda", "pokaži", "prikazi"])
     
-    if not (je_zamenik or je_direktor or trazi_sliku):
+    if not (je_zamenik or je_direktor or je_osoba or trazi_sliku):
         return []
 
     pronadjene_slike = []
@@ -224,6 +224,14 @@ def dobij_slike_za_upit(upit_low, svi_odlomci, izabrani_kandidati):
                 if "direktor" in txt_l or "rukovodilac" in txt_l:
                     dodaj_sliku(url, f"Zvanična fotografija direktora/rukovodioca Biroa. Detalji u bazi: {item['tekst'][:400]}")
                     break
+    elif je_osoba:
+        # Pretraga za bilo koje ime iz upita
+        for item in svi_odlomci:
+            txt_l = item["tekst"].lower()
+            url = item.get("slika_url", "").strip()
+            if url and url.startswith("http"):
+                if any(name in upit_low and name in txt_l for name in ["nenad", "brana", "biljana", "aleksandra", "arsenije", "bojana", "boško", "bosko", "darko", "dragana"]):
+                    dodaj_sliku(url, f"Zvanična fotografija / dokument vezan za osobu. Detalji: {item['tekst'][:300]}")
     else:
         for item in izabrani_kandidati:
             url = item[3]
@@ -231,7 +239,7 @@ def dobij_slike_za_upit(upit_low, svi_odlomci, izabrani_kandidati):
                 dodaj_sliku(url, f"Povezana fotografija iz baze. Detalji: {item[1][:300]}")
                 if len(pronadjene_slike) >= 2: break
             
-    return pronadjene_slike[:2]
+    return pronadjene_slike[:3]
 
 # ----------------- FILTRIRANJE I RANGIRANJE KANDIDATA -----------------
 def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
@@ -239,6 +247,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
     
     je_direktor = ("direktor" in upit_low or "rukovodilac" in upit_low) and not ("zamenik" in upit_low or "zamenici" in upit_low)
     je_zamenik = "zamenik" in upit_low or "zamenici" in upit_low
+    je_osoba = any(w in upit_low for w in ["nenad", "brana", "biljana", "aleksandra", "arsenije", "bojana", "boško", "bosko", "darko", "dragana", "zaposlen"])
     trazi_kolektivni = any(w in upit_low for w in ["kolektivn", "ugovor", "ugovora", "kol."])
     trazi_crni_vrh = "crni" in upit_low and "vrh" in upit_low
     brojevi = re.findall(r'\b\d+\b', upit)
@@ -272,7 +281,7 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
         if je_direktor:
             if any(w in txt_low or w in izvor_low for w in ["direktor", "rukovodilac", "rukovodenje", "biro"]):
                 skor += 3000000
-            if any(w in txt_low or w in izvor_low for w in ["gj", "vranjača", "vranjaca", "osnova gazdovanja", "etat", "sastojina"]):
+            if any(w in txt_low or w in izvor_low for w in ["gj", "vranjača", "vranjaca", "osnova gazdovanja"]):
                 skor -= 2000000  
 
         if je_zamenik:
@@ -281,11 +290,15 @@ def filtriraj_i_skoruj_kandidate(svi_kandidati, upit):
             if any(w in txt_low or w in izvor_low for w in ["gj", "vranjača", "osnova gazdovanja"]):
                 skor -= 2000000
 
+        if je_osoba:
+            if any(name in upit_low and name in txt_low for name in ["nenad", "brana", "biljana", "aleksandra", "arsenije", "bojana", "boško", "bosko", "darko", "dragana"]):
+                skor += 4000000
+
         if trazi_crni_vrh:
             if "crni" in txt_low and "vrh" in txt_low:
-                skor += 3000000
+                skor += 4000000
             if any(w in txt_low or w in izvor_low for w in ["gj", "vranjača", "vranjaca", "osnova gazdovanja"]):
-                skor -= 2000000
+                skor -= 1000000
 
         if brojevi:
             for br in brojevi:
@@ -320,22 +333,12 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=10, max_karaktera=5000):
     
     je_zamenik = "zamenik" in upit_low or "zamenici" in upit_low
     je_direktor = ("direktor" in upit_low or "rukovodilac" in upit_low) and not je_zamenik
+    je_osoba = any(w in upit_low for w in ["nenad", "brana", "biljana", "aleksandra", "arsenije", "bojana", "boško", "bosko", "darko", "dragana", "zaposlen"])
     trazi_crni_vrh = "crni" in upit_low and "vrh" in upit_low
     
     zamenici_keywords = ["svetlana", "goran", "caldovic", "ćaldović", "mihajlović", "mihajlovic", "zamenik"]
     direktor_keywords = ["direktor", "rukovodilac", "rukovodenje"]
-
-    STOP_WORDS = {
-        "ko", "je", "su", "prikazi", "prikazuj", "pokaži", "sliku", "slika", "foto", 
-        "o", "u", "i", "da", "li", "clan", "član", "kolektivnog", "kolektivni", "ugovora", 
-        "ugovor", "zamenik", "zamenici", "direktor", "ima", "bazi", "postoji", "šta", 
-        "sta", "piše", "pise", "njemu", "njoj", "imama", "na", "sa", "za", "od", "do", 
-        "iz", "se", "ne", "bi", "gde", "kad", "kako", "zašto", "zasto", "koji", "koja", 
-        "koje", "koju", "kojim", "kojih", "radi", "daje", "daju", "navedi", "daj", "nadji",
-        "pronadji", "nađi", "traži", "trazi", "opis", "opisi", "podatak", "podataka", "bazu"
-    }
-    
-    vazne_reci = [w for w in re.findall(r'\b\w+\b', upit_low) if len(w) > 2 and w not in STOP_WORDS and not w.isdigit()]
+    imena_keywords = ["nenad", "brana", "biljana", "aleksandra", "arsenije", "bojana", "boško", "bosko", "darko", "dragana"]
 
     # 1. FORCE-INJECTION (Garantovano ubacivanje ključnih odlomaka na vrh)
     if je_pretraga_clana or brojevi:
@@ -364,6 +367,20 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=10, max_karaktera=5000):
             txt_l = item["tekst"].lower()
             izv_l = item["izvor"].lower()
             if any(k in txt_l or k in izv_l for k in zamenici_keywords):
+                if item["tekst"] not in svi_vidjeni:
+                    svi_vidjeni.add(item["tekst"])
+                    svi_kandidati.insert(0, {
+                        "tekst": item["tekst"],
+                        "izvor": item["izvor"],
+                        "slika_url": item.get("slika_url", ""),
+                        "je_osoba_iz_upita": True
+                    })
+
+    if je_osoba:
+        for item in svi_odlomci:
+            txt_l = item["tekst"].lower()
+            izv_l = item["izvor"].lower()
+            if any(name in upit_low and (name in txt_l or name in izv_l) for name in imena_keywords):
                 if item["tekst"] not in svi_vidjeni:
                     svi_vidjeni.add(item["tekst"])
                     svi_kandidati.insert(0, {
@@ -424,7 +441,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=10, max_karaktera=5000):
 
     kontekst_lista = []
     
-    # 3. KLJUČNO: Ubaci metapodatke i opise slika DIREKTNO U TEKSTUALNI KONTEKST ZA MODEL
+    # 3. Ubaci metapodatke i opise slika DIREKTNO U TEKSTUALNI KONTEKST ZA MODEL
     for url, cap in slike_podaci:
         kontekst_lista.append(f"Zvanična vizuelna i tekstualna referenca u bazi za ovaj upit:\n{cap}")
 
@@ -511,8 +528,8 @@ with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expand
         clicked_prompt = "Ko su zamenici direktora u Birou i prikaži njihove slike?"
     if col3.button("🌲 Crni vrh?", use_container_width=True):
         clicked_prompt = "Postoji li Crni vrh u bazi i šta piše o njemu?"
-    if col4.button("📜 Član 114. Kol. ugovora?", use_container_width=True):
-        clicked_prompt = "Navedi član 114. kolektivnog ugovora?"
+    if col4.button("👤 Ima li Nenad u bazi?", use_container_width=True):
+        clicked_prompt = "Ima li Nenad u bazi i pokaži njegovu sliku?"
 
     if clicked_prompt:
         st.session_state.prompt_input = clicked_prompt
@@ -553,7 +570,7 @@ if prompt:
                     "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj na pitanja ISKLJUČIVO na osnovu dostavljenog KONTEKSTA.\n"
                     "VAŽNO UPUTSTVO:\n"
-                    "- Ako se u dostavljenom kontekstu nalaze podaci o direktoru, zamenicima, traženom članu ugovora (npr. član 114 ili 115) ili lokaciji (npr. Crni vrh), TI MORAŠ DA IH NAVEDEŠ I DETALJNO OPIŠEŠ.\n"
+                    "- Ako se u dostavljenom kontekstu nalaze podaci o osobi (npr. Nenad, Brana, Biljana itd.), zamenicima, traženom članu ugovora (npr. član 114 ili 115) ili lokaciji (npr. Crni vrh), TI MORAŠ DA IH NAVEDEŠ I DETALJNO OPIŠEŠ.\n"
                     "- Nikada nemoj tvrditi da informacija ne postoji u kontekstu ako je ona prisutna u priloženom tekstu ili vizuelnim referencama iz baze.\n"
                     "STRIKTNA PRAVILA:\n"
                     "1. ZABRANJENO JE ispisivati URL linkove (http...) ili formatirati slike preko Markdown koda (![slika](...)). Aplikacija će sama prikazati fotografiju ispod teksta.\n"
