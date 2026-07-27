@@ -67,7 +67,7 @@ STOP_RECI = {
     "ko", "je", "su", "sta", "pise", "bazi", "postoji", "navedi", "prikazi", "pokazi", 
     "slika", "slike", "sliku", "foto", "fotografij", "u", "i", "na", "sa", "za", "o", 
     "da", "li", "ima", "njegovu", "njihove", "njena", "mesto", "radno", "biro", "biroa",
-    "planiranje", "projektovanje", "pd", "srbijasume", "sumarstvu"
+    "planiranje", "projektovanje", "pd", "srbijasume", "sumarstvu", "detalje", "detaljnije"
 }
 
 # ----------------- INICIJALIZACIJA KLIJENATA -----------------
@@ -84,7 +84,7 @@ def init_clients():
 
 qdrant, groq_client, embed_model = init_clients()
 
-# ----------------- NORMALIZACIJA TEKSTA -----------------
+# ----------------- NORMALIZACIJA I KORENI (STEMOVANJE) -----------------
 def sredi_tekst(tekst):
     if not tekst:
         return ""
@@ -112,8 +112,22 @@ def ukloni_dijakritike(tekst):
     txt = sredi_tekst(tekst).lower()
     return "".join([zamene.get(ch, ch) for ch in txt])
 
+# Izvlači osnovne reči
 def izvuci_kljucne_reci(upit_ascii):
     return [w for w in re.findall(r'\b\w+\b', upit_ascii) if len(w) > 2 and w not in STOP_RECI]
+
+# Skraćuje reči kako bi zanemario padeže (Mrčajevcu -> mrcajev, Bojane -> bojan)
+def izvuci_korene(upit_ascii):
+    reci = izvuci_kljucne_reci(upit_ascii)
+    koreni = []
+    for w in reci:
+        if len(w) >= 7:
+            koreni.append(w[:-2])
+        elif len(w) >= 5:
+            koreni.append(w[:-1])
+        else:
+            koreni.append(w)
+    return koreni
 
 # ----------------- KEŠIRANJE SVIH ODLOMAKA IZ BAZE -----------------
 @st.cache_data(ttl=1800)
@@ -168,13 +182,12 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- STROGI FILTER ZA PRIKAZ SLIKA -----------------
+# ----------------- STROGI FILTER ZA PRIKAZ SLIKA (SA KORENIMA) -----------------
 def filtriraj_slike_za_prikaz(upit_ascii, rangirani_kandidati):
     prikazi_slike = []
     vidjene = set()
 
-    kljucne_reci = izvuci_kljucne_reci(upit_ascii)
-
+    koreni = izvuci_korene(upit_ascii)
     je_zamenik = "zamenik" in upit_ascii or "zamenici" in upit_ascii
     je_direktor = ("direktor" in upit_ascii or "rukovodilac" in upit_ascii) and not je_zamenik
 
@@ -197,20 +210,21 @@ def filtriraj_slike_za_prikaz(upit_ascii, rangirani_kandidati):
                 prikazi_slike.append((url, f"Fotografija zamenika direktora. Izvor: {item['izvor']}"))
                 vidjene.add(url)
         else:
-            if kljucne_reci and any(kw in txt_a or kw in izv_a for kw in kljucne_reci):
+            # Traži koren (Bojan) umesto pune reči (Bojane), da bi se uspešno uparilo sa Bojana
+            if koreni and any(k in txt_a or k in izv_a for k in koreni):
                 prikazi_slike.append((url, f"Fotografija. Izvor: {item['izvor']}"))
                 vidjene.add(url)
 
     return prikazi_slike[:3]
 
 # ----------------- OPTIMIZOVANI HIBRIDNI PRETRAŽIVAČ -----------------
-def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2800):
+def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=3500):
     svi_odlomci = ucitaj_sve_tekstove()
     upit_ascii = ukloni_dijakritike(upit)
     norm_upit = sredi_tekst(upit)
     
     candidates_map = {}
-    kljucne_reci = izvuci_kljucne_reci(upit_ascii)
+    koreni = izvuci_korene(upit_ascii)
 
     brojevi = re.findall(r'\b\d+\b', upit)
     je_clan_upit = any(w in upit_ascii for w in ["clan", "cl", "ugovor", "kolektivni", "ku"])
@@ -228,17 +242,14 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2800):
         key = item["tekst"]
         score = 0.0
 
-        # 1. Članovi ugovora
         if clan_res:
             for cre in clan_res:
                 if cre.search(txt_a):
                     score += 200000.0
 
-        # 2. Crni vrh
         if has_crni_vrh and CRNI_VRH_RE.search(txt_a):
             score += 200000.0
 
-        # 3. Uloge (Direktor / Zamenici)
         if je_direktor:
             if "zamenik" not in txt_a and ("direktor" in txt_a or "direktor" in izv_a):
                 score += 150000.0
@@ -246,16 +257,16 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2800):
             if any(w in txt_a for w in ["zamenik", "zamenici", "svetlana", "mihajlovic", "goran", "caldovic"]):
                 score += 150000.0
 
-        # 4. Dinamički Match ključnih reči
-        if kljucne_reci:
-            pogodaka = sum(1 for kw in kljucne_reci if kw in txt_a or kw in izv_a)
+        # Dinamički Match ključnih KORENA (Rešava padeže: Mrčajevcu -> mrcajev in mrcajevac)
+        if koreni:
+            pogodaka = sum(1 for k in koreni if k in txt_a or k in izv_a)
             if pogodaka > 0:
-                score += pogodaka * 30000.0
+                score += pogodaka * 40000.0
 
         if score > 0:
             candidates_map[key] = {"item": item, "score": score}
 
-    # 5. VEKTORSKA PRETRAGA (QDRANT)
+    # VEKTORSKA PRETRAGA (QDRANT)
     try:
         query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
         points = qdrant.search(
@@ -312,7 +323,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=4, max_karaktera=2800):
 
     return spojeni_tekst, len(rangirani), len(svi_odlomci), slike_za_prikaz
 
-# ----------------- STRIMOVANJE GROQ ODGOVORA SA RATE-LIMIT BEZBEDNOŠĆU -----------------
+# ----------------- STRIMOVANJE GROQ ODGOVORA -----------------
 def strimuj_groq_odgovor(poruke):
     try:
         response_stream = groq_client.chat.completions.create(
@@ -328,7 +339,7 @@ def strimuj_groq_odgovor(poruke):
     except Exception as e:
         err_str = str(e).lower()
         if "429" in err_str or "rate_limit" in err_str:
-            st.toast("⚠️ Dostignut kratkotrajni TPM limit. Pravim pauzu od 3 sekunde...", icon="⏳")
+            st.toast("⚠️ Kratkotrajni limit aktiviran. Pravim pauzu od 3 sekunde...", icon="⏳")
             time.sleep(3)
             try:
                 response_stream = groq_client.chat.completions.create(
@@ -342,7 +353,7 @@ def strimuj_groq_odgovor(poruke):
                     if chunk.choices and chunk.choices[0].delta.content:
                         yield chunk.choices[0].delta.content
             except Exception as e2:
-                yield "\n\n⚠️ **Sistem je trenutno opterećen (dostignut minutni limit na Groq servisu). Molimo sačekajte 10 sekundi pa ponovite upit.**"
+                yield "\n\n⚠️ **Server je trenutno opterećen zahtevima. Molimo sačekajte 10-ak sekundi pa ponovite pitanje.**"
         else:
             raise e
 
@@ -355,8 +366,8 @@ with st.sidebar:
     
     st.markdown("### 🛠️ Status sistema")
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
-    st.caption("🟢 **LLM:** Groq Llama (Auto-fallback 70B ➔ 8B)")
-    st.caption("🟢 **Token Optimization:** Low-TPM Mode v7")
+    st.caption("🟢 **LLM:** Groq Llama (Auto-fallback)")
+    st.caption("🟢 **Token & Stemming:** Srpski Padeži v8")
     
     st.divider()
     
@@ -422,20 +433,20 @@ if prompt:
 
                 system_instruction = (
                     "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
-                    "Odgovaraj na pitanja ISKLJUČIVO na osnovu dostavljenog KONTEKSTA.\n\n"
+                    "Odgovaraj ISKLJUČIVO na osnovu dostavljenog KONTEKSTA.\n\n"
                     "STROGA PRAVILA ZA ODGOVARANJE:\n"
-                    "1. Odgovaraj SAMO na tekstualno pitanje (ko je osoba, koja je funkcija, šta piše u članu ili o lokaciji).\n"
-                    "2. KORISNIK U PITANJU MOŽE TRAŽITI SLIKU/FOTOGRAFIJU — TI SE U ODGOVORU UOPŠTE NE BAVI PRIKAZOM SLIKA I NE SPOMINJI DA LI U TEKSTU IMA ILI NEMA SLIKA/LINKOVA! Prikaz slika vrši sama aplikacija automatski ispod tvog teksta.\n"
-                    "3. Ako se tražena osoba ili podatak NE NALAZI u dostavljenom kontekstu, kratko kaži da podatak nije pronađen u bazi.\n"
-                    "4. ZABRANJENO JE nuditi ili spominjati druge osobe iz konteksta kao zamenu ako tražena osoba nije nađena.\n"
-                    "5. STROGO JE ZABRANJENO ispisivanje URL linkova ili Markdown slika (![...](...)).\n"
-                    "Odgovaraj isključivo na srpskom jeziku, latinicom."
+                    "1. Uvek pruži ŠTO DETALJNIJI I OPŠIRNIJI odgovor. Ako korisnik traži podatke o nekoj lokaciji, gazdinskoj jedinici, osobi ili ugovoru, MORAŠ izvući apsolutno sve relevantne detalje iz dostavljenih odlomaka.\n"
+                    "2. KORISNIK MOŽE TRAŽITI SLIKU — TI SE U ODGOVORU UOPŠTE NE BAVI PRIKAZOM SLIKA (aplikacija to sama radi) I NE SPOMINJI DA LI U TEKSTU IMA SLIKA ILI LINKOVA!\n"
+                    "3. Ako se tražena osoba ili podatak NE NALAZI u dostavljenom kontekstu, kratko kaži da podatak nije pronađen.\n"
+                    "4. ZABRANJENO JE nuditi druge osobe iz konteksta kao zamenu.\n"
+                    "5. STROGO JE ZABRANJENO ispisivanje URL linkova ili slika u formatu Markdown.\n"
+                    "Odgovaraj isključivo na srpskom jeziku."
                 )
 
                 poruke_za_groq = [{"role": "system", "content": system_instruction}]
                 
-                # Slanje samo poslednjeg odgovora radi štednje tokena
-                skracena_istorija = st.session_state.messages[-1:]
+                # Zadržavamo poslednje 4 poruke za adekvatan kontekst i razumevanje potpitanja ("Daj detalje o tome")
+                skracena_istorija = st.session_state.messages[-4:]
                 for msg in skracena_istorija:
                     poruke_za_groq.append({"role": msg["role"], "content": msg["content"]})
                 
