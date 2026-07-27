@@ -57,6 +57,17 @@ GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 
 COLLECTION_NAME = "baza_cloud_v2"
 
+# ----------------- UNAPRED KOMPAJLIRANI REGEX IZRAZI -----------------
+RE_URL = re.compile(r'(https?://[^\s<>"]+?\.(?:jpg|jpeg|png|webp|gif))', re.IGNORECASE)
+RE_CLEAN_URL = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F])+)')
+CRNI_VRH_RE = re.compile(r'\bcrn[a-z]*\s+(?:[a-z]+\s+)?vrh[a-z]*\b')
+
+STOP_RECI = {
+    "ko", "je", "su", "sta", "pise", "bazi", "postoji", "navedi", "prikazi", "pokazi", 
+    "slika", "slike", "sliku", "foto", "fotografij", "u", "i", "na", "sa", "za", "o", 
+    "da", "li", "ima", "ima li", "pokazi sliku"
+}
+
 # ----------------- INICIJALIZACIJA KLIJENATA -----------------
 @st.cache_resource
 def init_clients():
@@ -99,6 +110,9 @@ def ukloni_dijakritike(tekst):
     txt = sredi_tekst(tekst).lower()
     return "".join([zamene.get(ch, ch) for ch in txt])
 
+def izvuci_kljucne_reci(upit_ascii):
+    return [w for w in re.findall(r'\b\w+\b', upit_ascii) if len(w) > 2 and w not in STOP_RECI]
+
 # ----------------- KEŠIRANJE SVIH ODLOMAKA IZ BAZE -----------------
 @st.cache_data(ttl=1800)
 def ucitaj_sve_tekstove():
@@ -128,7 +142,7 @@ def ucitaj_sve_tekstove():
                                  r.payload.get("url") or "")
                     
                     if not slika_url and raw_txt:
-                        img_match = re.search(r'(https?://[^\s<>"]+?\.(?:jpg|jpeg|png|webp|gif))', raw_txt, re.IGNORECASE)
+                        img_match = RE_URL.search(raw_txt)
                         if img_match:
                             slika_url = img_match.group(1)
                     
@@ -152,10 +166,12 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- STROGI FILTER ZA SLIKE DIREKTORA/ZAMENIKA -----------------
+# ----------------- STROGI DINAMIČKI FILTER ZA SLIKE -----------------
 def filtriraj_slike_za_prikaz(upit_ascii, rangirani_kandidati):
     prikazi_slike = []
     vidjene = set()
+
+    kljucne_reci = izvuci_kljucne_reci(upit_ascii)
 
     je_zamenik = "zamenik" in upit_ascii or "zamenici" in upit_ascii
     je_direktor = ("direktor" in upit_ascii or "rukovodilac" in upit_ascii) and not je_zamenik
@@ -170,87 +186,81 @@ def filtriraj_slike_za_prikaz(upit_ascii, rangirani_kandidati):
             continue
 
         if je_direktor:
-            # Slike zamenika su striktno zabranjene ako tražimo samo direktora
-            if "zamenik" not in txt_a and any(k in txt_a or k in izv_a for k in ["direktor", "darko", "zivanovic"]):
+            if "zamenik" not in txt_a and ("direktor" in txt_a or "direktor" in izv_a):
                 prikazi_slike.append((url, f"Fotografija direktora. Izvor: {item['izvor']}"))
                 vidjene.add(url)
+                break
         elif je_zamenik:
             if any(k in txt_a or k in izv_a for k in ["zamenik", "zamenici", "svetlana", "goran", "mihajlovic", "caldovic"]):
                 prikazi_slike.append((url, f"Fotografija zamenika direktora. Izvor: {item['izvor']}"))
                 vidjene.add(url)
         else:
-            imena_mapa = ["nenad", "veres", "biljana", "mirkovic", "brana", "vamovic", "aleksandra", "katic"]
-            if any(ime in upit_ascii and ime in txt_a for ime in imena_mapa):
+            # DINAMIČKA PROVERA: Slika se prikazuje SAMO ako se bar jedna reč iz upita (npr. 'bojana') nalazi u tekstu/izvoru!
+            if kljucne_reci and any(kw in txt_a or kw in izv_a for kw in kljucne_reci):
                 prikazi_slike.append((url, f"Fotografija. Izvor: {item['izvor']}"))
                 vidjene.add(url)
 
     return prikazi_slike[:3]
 
-# ----------------- DETERMINISTIČKI HIBRIDNI PRETRAŽIVAČ -----------------
+# ----------------- DINAMIČKI SINGLE-PASS HIBRIDNI PRETRAŽIVAČ -----------------
 def dobij_hibridni_kontekst(upit, top_k_rezultata=8, max_karaktera=7000):
     svi_odlomci = ucitaj_sve_tekstove()
     upit_ascii = ukloni_dijakritike(upit)
     norm_upit = sredi_tekst(upit)
     
     candidates_map = {}
+    kljucne_reci = izvuci_kljucne_reci(upit_ascii)
 
-    # 1. DETEKCIJA ČLANOVA (Član 14, Član 18)
     brojevi = re.findall(r'\b\d+\b', upit)
     je_clan_upit = any(w in upit_ascii for w in ["clan", "cl", "ugovor", "kolektivni", "ku"])
+    clan_res = [re.compile(r'\b(?:clan|cl)[a-z]*\.?\s*' + re.escape(str(br)) + r'\b') for br in brojevi] if (brojevi and je_clan_upit) else []
+
+    has_crni_vrh = "crn" in upit_ascii and "vrh" in upit_ascii
     
-    if brojevi and je_clan_upit:
-        for br in brojevi:
-            pattern = r'\b(?:clan|cl)[a-z]*\.?\s*' + re.escape(str(br)) + r'\b'
-            for item in svi_odlomci:
-                if re.search(pattern, item["tekst_ascii"]):
-                    key = item["tekst"]
-                    if key not in candidates_map:
-                        candidates_map[key] = {"item": item, "score": 200000.0}
-                    else:
-                        candidates_map[key]["score"] += 100000.0
-
-    # 2. PROXIMITY REGEX ZA FRAZU "Crni vrh" (Crni vrh, Crnog vrha, Crnom vrhu)
-    if "crn" in upit_ascii and "vrh" in upit_ascii:
-        crni_vrh_pattern = r'\bcrn[a-z]*\s+(?:[a-z]+\s+)?vrh[a-z]*\b'
-        for item in svi_odlomci:
-            if re.search(crni_vrh_pattern, item["tekst_ascii"]):
-                key = item["tekst"]
-                if key not in candidates_map:
-                    candidates_map[key] = {"item": item, "score": 200000.0}
-                else:
-                    candidates_map[key]["score"] += 100000.0
-
-    # 3. DETEKCIJA ULOGA (Direktor vs Zamenik)
     je_zamenik = "zamenik" in upit_ascii or "zamenici" in upit_ascii
     je_direktor = ("direktor" in upit_ascii or "rukovodilac" in upit_ascii) and not je_zamenik
 
-    if je_direktor:
-        for item in svi_odlomci:
-            txt_a = item["tekst_ascii"]
-            if "zamenik" not in txt_a and any(w in txt_a for w in ["direktor", "darko", "zivanovic"]):
-                key = item["tekst"]
-                if key not in candidates_map:
-                    candidates_map[key] = {"item": item, "score": 150000.0}
-                else:
-                    candidates_map[key]["score"] += 50000.0
+    # SINGLE-PASS SCANNER
+    for item in svi_odlomci:
+        txt_a = item["tekst_ascii"]
+        izv_a = item["izvor_ascii"]
+        key = item["tekst"]
+        score = 0.0
 
-    elif je_zamenik:
-        for item in svi_odlomci:
-            txt_a = item["tekst_ascii"]
+        # 1. Članovi ugovora
+        if clan_res:
+            for cre in clan_res:
+                if cre.search(txt_a):
+                    score += 200000.0
+
+        # 2. Crni vrh
+        if has_crni_vrh and CRNI_VRH_RE.search(txt_a):
+            score += 200000.0
+
+        # 3. Uloge (Direktor / Zamenici)
+        if je_direktor:
+            if "zamenik" not in txt_a and ("direktor" in txt_a or "direktor" in izv_a):
+                score += 150000.0
+        elif je_zamenik:
             if any(w in txt_a for w in ["zamenik", "zamenici", "svetlana", "mihajlovic", "goran", "caldovic"]):
-                key = item["tekst"]
-                if key not in candidates_map:
-                    candidates_map[key] = {"item": item, "score": 150000.0}
-                else:
-                    candidates_map[key]["score"] += 50000.0
+                score += 150000.0
 
-    # 4. VEKTORSKA PRETRAGA (QDRANT)
+        # 4. Dinamički Match ključnih reči (Ime/Prezime/Bilo šta)
+        if kljucne_reci:
+            pogodaka = sum(1 for kw in kljucne_reci if kw in txt_a or kw in izv_a)
+            if pogodaka > 0:
+                score += pogodaka * 50000.0
+
+        if score > 0:
+            candidates_map[key] = {"item": item, "score": score}
+
+    # 5. VEKTORSKA PRETRAGA (QDRANT)
     try:
         query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
         points = qdrant.search(
             collection_name=COLLECTION_NAME,
             query_vector=query_vector,
-            limit=25
+            limit=20
         )
         for rank, hit in enumerate(points):
             if hit.payload:
@@ -260,7 +270,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=8, max_karaktera=7000):
                 
                 if raw_txt:
                     norm_txt = sredi_tekst(raw_txt)
-                    vec_score = (25 - rank) * 100.0
+                    vec_score = (20 - rank) * 100.0
                     
                     if norm_txt in candidates_map:
                         candidates_map[norm_txt]["score"] += vec_score
@@ -282,27 +292,17 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=8, max_karaktera=7000):
         for item in svi_odlomci[:10]:
             candidates_map[item["tekst"]] = {"item": item, "score": 10.0}
 
-    # 5. DODATNI KEYWORD MATCHING
-    stop_reci = {"ko", "je", "su", "sta", "pise", "bazi", "postoji", "navedi", "prikazi", "pokazi", "u", "i", "na", "sa", "za", "o"}
-    reci_upita = [w for w in re.findall(r'\b\w+\b', upit_ascii) if len(w) > 2 and w not in stop_reci]
-    
-    for key, data in candidates_map.items():
-        txt_a = data["item"]["tekst_ascii"]
-        izv_a = data["item"]["izvor_ascii"]
-        match_count = sum(1 for w in reci_upita if w in txt_a or w in izv_a)
-        data["score"] += match_count * 150.0
-
     # RANGIRANJE
     rangirani = sorted(candidates_map.values(), key=lambda x: x["score"], reverse=True)
     top_k = [entry["item"] for entry in rangirani[:top_k_rezultata]]
 
-    # DOBIJANJE TAČNIH SLIKA
+    # SLIKE
     slike_za_prikaz = filtriraj_slike_za_prikaz(upit_ascii, rangirani)
 
-    # FORMIRANJE KONTEKSTA ZA LLM
+    # FORMIRANJE KONTEKSTA
     kontekst_delovi = []
     for item in top_k:
-        cist_txt = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', item["tekst"])
+        cist_txt = RE_CLEAN_URL.sub('', item["tekst"])
         kontekst_delovi.append(f"Odlomak iz dokumenta [{item['izvor']}]:\n{cist_txt.strip()}")
 
     spojeni_tekst = "\n\n---\n\n".join(kontekst_delovi)
@@ -350,7 +350,7 @@ with st.sidebar:
     st.markdown("### 🛠️ Status sistema")
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
     st.caption("🟢 **LLM:** Groq Llama (Auto-fallback 70B ➔ 8B)")
-    st.caption("🟢 **Reranker:** Hybrid Proximity Engine v4")
+    st.caption("🟢 **Reranker:** Dynamic Dynamic Matching v6")
     
     st.divider()
     
@@ -416,11 +416,12 @@ if prompt:
 
                 system_instruction = (
                     "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
-                    "Odgovaraj na pitanja na osnovu dostavljenog KONTEKSTA.\n\n"
-                    "SMERNICE ZA ODGOVARANJE:\n"
-                    "1. Kada korisnik traži članove ugovora (npr. Član 14 ili Član 18) ili informacije o lokaciji (npr. Crni vrh), precizno i detaljno prenesi ono što piše u dostavljenim odlomcima.\n"
-                    "2. Ako se podatak ili član zaista NE NALAZI u dostavljenom kontekstu, pošteno saopšti da podatak nije dostupan u bazi. NEMOJ izmišljati teksta članova!\n"
-                    "3. STROGO JE ZABRANJENO ispisivanje URL linkova za slike u tekstu odgovora ili formatiranje slika preko Markdown koda (![slika](...)). Aplikacija će sama prikazati fotografiju ispod odgovora.\n"
+                    "Odgovaraj na pitanja ISKLJUČIVO na osnovu dostavljenog KONTEKSTA.\n\n"
+                    "STROGA PRAVILA ZA ODGOVARANJE:\n"
+                    "1. Kada korisnik traži informacije o osobi ili slici (npr. Bojana), proveri da li se ta osoba nalazi u poslatom kontekstu.\n"
+                    "2. Ako se tražena osoba ili njena slika NE NALAZI u dostavljenom kontekstu, kratko i jasno kaži da slika ili podatak nije pronađen u bazi.\n"
+                    "3. ZABRANJENO JE nuditi ili spominjati druge osobe iz konteksta kao zamenu (npr. ako se traži Bojana, STROGO JE ZABRANJENO pominjati Biljanu ili reći 'Nema Bojane ali evo Biljane').\n"
+                    "4. STROGO JE ZABRANJENO ispisivanje URL linkova za slike u tekstu odgovora ili formatiranje slika preko Markdown koda (![slika](...)). Aplikacija sama prikazuje fotografiju ispod odgovora.\n"
                     "Odgovaraj isključivo na srpskom jeziku, latinicom."
                 )
 
