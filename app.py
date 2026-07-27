@@ -73,7 +73,6 @@ qdrant, groq_client, embed_model = init_clients()
 
 # ----------------- NORMALIZACIJA TEKSTA -----------------
 def sredi_tekst(tekst):
-    """Prevara ćirilicu u latinicu sa sačuvanim kvačicama za lep prikaz modela."""
     if not tekst:
         return ""
     tekst = str(tekst)
@@ -91,7 +90,6 @@ def sredi_tekst(tekst):
     return "".join([zamene.get(ch, ch) for ch in tekst])
 
 def ukloni_dijakritike(tekst):
-    """Prevara tekst u čisti ASCII lowercase za 100% tačno poređenje i regex."""
     if not tekst:
         return ""
     zamene = {
@@ -154,29 +152,13 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- PRECIZAN FILTER ZA PRIKAZ SLIKA -----------------
+# ----------------- STROGI FILTER ZA SLIKE DIREKTORA/ZAMENIKA -----------------
 def filtriraj_slike_za_prikaz(upit_ascii, rangirani_kandidati):
     prikazi_slike = []
     vidjene = set()
 
-    trazi_sliku_ili_osobu = any(w in upit_ascii for w in [
-        "slika", "slike", "sliku", "foto", "fotografij", "prikazi", "pokazi", 
-        "direktor", "zamenik", "zamenici", "nenad", "darko", "svetlana", "goran", "biljana"
-    ])
-
-    if not trazi_sliku_ili_osobu:
-        return []
-
-    trazeni_kljucevi = []
-    if "direktor" in upit_ascii and "zamenik" not in upit_ascii:
-        trazeni_kljucevi.extend(["direktor", "darko", "zivanovic"])
-    elif "zamenik" in upit_ascii or "zamenici" in upit_ascii:
-        trazeni_kljucevi.extend(["zamenik", "zamenici", "svetlana", "goran", "mihajlovic", "caldovic"])
-    
-    imena_mapa = ["nenad", "veres", "biljana", "mirkovic", "brana", "vamovic", "aleksandra", "katic"]
-    for ime in imena_mapa:
-        if ime in upit_ascii:
-            trazeni_kljucevi.append(ime)
+    je_zamenik = "zamenik" in upit_ascii or "zamenici" in upit_ascii
+    je_direktor = ("direktor" in upit_ascii or "rukovodilac" in upit_ascii) and not je_zamenik
 
     for entry in rangirani_kandidati:
         item = entry["item"]
@@ -184,20 +166,27 @@ def filtriraj_slike_za_prikaz(upit_ascii, rangirani_kandidati):
         txt_a = item["tekst_ascii"]
         izv_a = item["izvor_ascii"]
 
-        if url and url.startswith("http") and url not in vidjene:
-            # Slika se prikazuje SAMO ako odlomak fizički sadrži traženu ulogu ili ime
-            if trazeni_kljucevi:
-                if any(k in txt_a or k in izv_a for k in trazeni_kljucevi):
-                    prikazi_slike.append((url, f"Zvanična fotografija. Izvor: {item['izvor']}"))
-                    vidjene.add(url)
-            else:
-                if any(k in txt_a for k in ["direktor", "zamenik", "rukovodilac"]):
-                    prikazi_slike.append((url, f"Zvanična fotografija. Izvor: {item['izvor']}"))
-                    vidjene.add(url)
+        if not url or not url.startswith("http") or url in vidjene:
+            continue
+
+        if je_direktor:
+            # Slike zamenika su striktno zabranjene ako tražimo samo direktora
+            if "zamenik" not in txt_a and any(k in txt_a or k in izv_a for k in ["direktor", "darko", "zivanovic"]):
+                prikazi_slike.append((url, f"Fotografija direktora. Izvor: {item['izvor']}"))
+                vidjene.add(url)
+        elif je_zamenik:
+            if any(k in txt_a or k in izv_a for k in ["zamenik", "zamenici", "svetlana", "goran", "mihajlovic", "caldovic"]):
+                prikazi_slike.append((url, f"Fotografija zamenika direktora. Izvor: {item['izvor']}"))
+                vidjene.add(url)
+        else:
+            imena_mapa = ["nenad", "veres", "biljana", "mirkovic", "brana", "vamovic", "aleksandra", "katic"]
+            if any(ime in upit_ascii and ime in txt_a for ime in imena_mapa):
+                prikazi_slike.append((url, f"Fotografija. Izvor: {item['izvor']}"))
+                vidjene.add(url)
 
     return prikazi_slike[:3]
 
-# ----------------- HIBRIDNI PRETRAŽIVAČ I DETERMINISTIČKI RERANKER -----------------
+# ----------------- DETERMINISTIČKI HIBRIDNI PRETRAŽIVAČ -----------------
 def dobij_hibridni_kontekst(upit, top_k_rezultata=8, max_karaktera=7000):
     svi_odlomci = ucitaj_sve_tekstove()
     upit_ascii = ukloni_dijakritike(upit)
@@ -205,7 +194,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=8, max_karaktera=7000):
     
     candidates_map = {}
 
-    # 1. DETEKCIJA ČLANOVA (Ugovor / Zakon) - Exact Regex Boost
+    # 1. DETEKCIJA ČLANOVA (Član 14, Član 18)
     brojevi = re.findall(r'\b\d+\b', upit)
     je_clan_upit = any(w in upit_ascii for w in ["clan", "cl", "ugovor", "kolektivni", "ku"])
     
@@ -216,45 +205,44 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=8, max_karaktera=7000):
                 if re.search(pattern, item["tekst_ascii"]):
                     key = item["tekst"]
                     if key not in candidates_map:
-                        candidates_map[key] = {"item": item, "score": 100000.0}
+                        candidates_map[key] = {"item": item, "score": 200000.0}
                     else:
-                        candidates_map[key]["score"] += 50000.0
+                        candidates_map[key]["score"] += 100000.0
 
-    # 2. DETEKCIJA LOKACIJE (Crni vrh) - Exact Match Boost
+    # 2. PROXIMITY REGEX ZA FRAZU "Crni vrh" (Crni vrh, Crnog vrha, Crnom vrhu)
     if "crn" in upit_ascii and "vrh" in upit_ascii:
+        crni_vrh_pattern = r'\bcrn[a-z]*\s+(?:[a-z]+\s+)?vrh[a-z]*\b'
         for item in svi_odlomci:
-            txt_a = item["tekst_ascii"]
-            izv_a = item["izvor_ascii"]
-            if ("crn" in txt_a or "crn" in izv_a) and ("vrh" in txt_a or "vrh" in izv_a):
+            if re.search(crni_vrh_pattern, item["tekst_ascii"]):
                 key = item["tekst"]
                 if key not in candidates_map:
-                    candidates_map[key] = {"item": item, "score": 80000.0}
+                    candidates_map[key] = {"item": item, "score": 200000.0}
                 else:
-                    candidates_map[key]["score"] += 40000.0
+                    candidates_map[key]["score"] += 100000.0
 
-    # 3. DETEKCIJA ULOGA (Direktor / Zamenik)
+    # 3. DETEKCIJA ULOGA (Direktor vs Zamenik)
     je_zamenik = "zamenik" in upit_ascii or "zamenici" in upit_ascii
     je_direktor = ("direktor" in upit_ascii or "rukovodilac" in upit_ascii) and not je_zamenik
 
-    if je_zamenik:
+    if je_direktor:
+        for item in svi_odlomci:
+            txt_a = item["tekst_ascii"]
+            if "zamenik" not in txt_a and any(w in txt_a for w in ["direktor", "darko", "zivanovic"]):
+                key = item["tekst"]
+                if key not in candidates_map:
+                    candidates_map[key] = {"item": item, "score": 150000.0}
+                else:
+                    candidates_map[key]["score"] += 50000.0
+
+    elif je_zamenik:
         for item in svi_odlomci:
             txt_a = item["tekst_ascii"]
             if any(w in txt_a for w in ["zamenik", "zamenici", "svetlana", "mihajlovic", "goran", "caldovic"]):
                 key = item["tekst"]
                 if key not in candidates_map:
-                    candidates_map[key] = {"item": item, "score": 60000.0}
+                    candidates_map[key] = {"item": item, "score": 150000.0}
                 else:
-                    candidates_map[key]["score"] += 30000.0
-
-    elif je_direktor:
-        for item in svi_odlomci:
-            txt_a = item["tekst_ascii"]
-            if any(w in txt_a for w in ["direktor", "darko", "zivanovic"]):
-                key = item["tekst"]
-                if key not in candidates_map:
-                    candidates_map[key] = {"item": item, "score": 60000.0}
-                else:
-                    candidates_map[key]["score"] += 30000.0
+                    candidates_map[key]["score"] += 50000.0
 
     # 4. VEKTORSKA PRETRAGA (QDRANT)
     try:
@@ -290,7 +278,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=8, max_karaktera=7000):
     except Exception:
         pass
 
-    # Ako sve ostalo otkaže, učitaj početne odlomke
     if not candidates_map and svi_odlomci:
         for item in svi_odlomci[:10]:
             candidates_map[item["tekst"]] = {"item": item, "score": 10.0}
@@ -363,7 +350,7 @@ with st.sidebar:
     st.markdown("### 🛠️ Status sistema")
     st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
     st.caption("🟢 **LLM:** Groq Llama (Auto-fallback 70B ➔ 8B)")
-    st.caption("🟢 **Reranker:** Hybrid Deterministic Engine v3")
+    st.caption("🟢 **Reranker:** Hybrid Proximity Engine v4")
     
     st.divider()
     
