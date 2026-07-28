@@ -112,21 +112,33 @@ def ukloni_dijakritike(tekst):
     txt = sredi_tekst(tekst).lower()
     return "".join([zamene.get(ch, ch) for ch in txt])
 
-# Izvlači osnovne reči
-def izvuci_kljucne_reci(upit_ascii):
-    return [w for w in re.findall(r'\b\w+\b', upit_ascii) if len(w) > 2 and w not in STOP_RECI]
+# Zajednička f-ja za skraćivanje reči na koren — koristi se i za reči iz upita
+# i za STOP_RECI (ispod), da bi filter radio i na padežima ("Birou", "Biroa"),
+# ne samo na osnovnom obliku ("biro") koji je bio jedini hardkodovan u STOP_RECI.
+def _stemuj_rec(w):
+    if len(w) >= 7:
+        return w[:-2]
+    elif len(w) >= 5:
+        return w[:-1]
+    return w
 
-# Skraćuje reči kako bi zanemario padeže (Mrčajevcu -> mrcajev, Bojane -> bojan)
+STOP_KORENI = {_stemuj_rec(w) for w in STOP_RECI}
+
+# Izvlači osnovne reči (BEZ filtriranja stop-reči ovde — to se sad radi
+# tek posle skraćivanja na koren, u izvuci_korene, da bi filter hvatao i padeže)
+def izvuci_kljucne_reci(upit_ascii):
+    return [w for w in re.findall(r'\b\w+\b', upit_ascii) if len(w) > 2]
+
+# Skraćuje reči kako bi zanemario padeže (Mrčajevcu -> mrcajev, Bojane -> bojan),
+# pa TEK ONDA filtrira stop-reči poređenjem korena sa korenom (ne pune reči) —
+# tako npr. "Birou" -> koren "biro" ispravno upada u STOP_KORENI i ne prolazi.
 def izvuci_korene(upit_ascii):
     reci = izvuci_kljucne_reci(upit_ascii)
     koreni = []
     for w in reci:
-        if len(w) >= 7:
-            koreni.append(w[:-2])
-        elif len(w) >= 5:
-            koreni.append(w[:-1])
-        else:
-            koreni.append(w)
+        koren = _stemuj_rec(w)
+        if koren not in STOP_KORENI:
+            koreni.append(koren)
     return koreni
 
 # ----------------- KEŠIRANJE SVIH ODLOMAKA IZ BAZE -----------------
