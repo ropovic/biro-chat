@@ -132,12 +132,21 @@ def izvuci_kljucne_reci(upit_ascii):
 # Skraćuje reči kako bi zanemario padeže (Mrčajevcu -> mrcajev, Bojane -> bojan),
 # pa TEK ONDA filtrira stop-reči poređenjem korena sa korenom (ne pune reči) —
 # tako npr. "Birou" -> koren "biro" ispravno upada u STOP_KORENI i ne prolazi.
+#
+# Koreni kraći od 5 slova (npr. "sve", "clan", "gora") se odbacuju u potpunosti —
+# prekratki su i preopšti da bi bili pouzdan znak da upit pominje baš tu reč, pa
+# lako slučajno upadaju kao podniz unutar neke sasvim druge reči (npr. "sve"
+# unutar "Svetlana"), što je izazivalo lažne prikaze fotografija zaposlenih.
+# Brojevi članova imaju sopstvenu, pouzdaniju regex proveru (clan_res) iznad,
+# pa im ovaj prag ne treba.
+MIN_DUZINA_KORENA = 5
+
 def izvuci_korene(upit_ascii):
     reci = izvuci_kljucne_reci(upit_ascii)
     koreni = []
     for w in reci:
         koren = _stemuj_rec(w)
-        if koren not in STOP_KORENI:
+        if len(koren) >= MIN_DUZINA_KORENA and koren not in STOP_KORENI:
             koreni.append(koren)
     return koreni
 
