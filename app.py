@@ -133,20 +133,27 @@ def izvuci_kljucne_reci(upit_ascii):
 # pa TEK ONDA filtrira stop-reči poređenjem korena sa korenom (ne pune reči) —
 # tako npr. "Birou" -> koren "biro" ispravno upada u STOP_KORENI i ne prolazi.
 #
-# Koreni kraći od 5 slova (npr. "sve", "clan", "gora") se odbacuju u potpunosti —
-# prekratki su i preopšti da bi bili pouzdan znak da upit pominje baš tu reč, pa
+# Reči kraće od 5 slova (npr. "sve", "clan", "gora") se odbacuju u potpunosti —
+# prekratke su i preopšte da bi bile pouzdan znak da upit pominje baš tu reč, pa
 # lako slučajno upadaju kao podniz unutar neke sasvim druge reči (npr. "sve"
 # unutar "Svetlana"), što je izazivalo lažne prikaze fotografija zaposlenih.
 # Brojevi članova imaju sopstvenu, pouzdaniju regex proveru (clan_res) iznad,
 # pa im ovaj prag ne treba.
-MIN_DUZINA_KORENA = 5
+#
+# VAŽNO: prag se proverava na ORIGINALNOJ reči, PRE skraćivanja na koren — ne
+# na već skraćenom korenu. Prethodna verzija je proveravala dužinu KORENA, pa
+# je npr. "kamen" (5 slova) skraćeno na "kame" (4 slova) samo sebe izbacivalo
+# pragom, iako "kamen" nije nimalo kratka/opšta reč poput "sve".
+MIN_DUZINA_RECI = 5
 
 def izvuci_korene(upit_ascii):
     reci = izvuci_kljucne_reci(upit_ascii)
     koreni = []
     for w in reci:
+        if len(w) < MIN_DUZINA_RECI:
+            continue
         koren = _stemuj_rec(w)
-        if len(koren) >= MIN_DUZINA_KORENA and koren not in STOP_KORENI:
+        if koren not in STOP_KORENI:
             koreni.append(koren)
     return koreni
 
@@ -236,7 +243,7 @@ def filtriraj_slike_za_prikaz(top_k_stavke, max_slika=3):
     return prikazi_slike
 
 # ----------------- OPTIMIZOVANI HIBRIDNI PRETRAŽIVAČ -----------------
-def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=3500):
+def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     svi_odlomci = ucitaj_sve_tekstove()
     upit_ascii = ukloni_dijakritike(upit)
     norm_upit = sredi_tekst(upit)
@@ -333,10 +340,16 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=3500):
     slike_za_prikaz = filtriraj_slike_za_prikaz(top_k)
 
     # FORMIRANJE KONTEKSTA
+    # Ograničavamo SVAKI odlomak posebno PRE spajanja - inače jedan dugačak
+    # odlomak (npr. dijagram sa punim OCR tekstom) može sam da potroši ceo
+    # budžet i odseče ostale, čak i relevantnije, odlomke koji dolaze posle njega.
+    MAX_PO_ODLOMKU = 900
     kontekst_delovi = []
     for item in top_k:
-        cist_txt = RE_CLEAN_URL.sub('', item["tekst"])
-        kontekst_delovi.append(f"Odlomak iz dokumenta [{item['izvor']}]:\n{cist_txt.strip()}")
+        cist_txt = RE_CLEAN_URL.sub('', item["tekst"]).strip()
+        if len(cist_txt) > MAX_PO_ODLOMKU:
+            cist_txt = cist_txt[:MAX_PO_ODLOMKU] + "...[odlomak skraćen]"
+        kontekst_delovi.append(f"Odlomak iz dokumenta [{item['izvor']}]:\n{cist_txt}")
 
     spojeni_tekst = "\n\n---\n\n".join(kontekst_delovi)
     if len(spojeni_tekst) > max_karaktera:
@@ -457,10 +470,11 @@ if prompt:
                     "Odgovaraj ISKLJUČIVO na osnovu dostavljenog KONTEKSTA.\n\n"
                     "STROGA PRAVILA ZA ODGOVARANJE:\n"
                     "1. Uvek pruži ŠTO DETALJNIJI I OPŠIRNIJI odgovor. Ako korisnik traži podatke o nekoj lokaciji, gazdinskoj jedinici, osobi ili ugovoru, MORAŠ izvući apsolutno sve relevantne detalje iz dostavljenih odlomaka.\n"
-                    "2. KORISNIK MOŽE TRAŽITI SLIKU — TI SE U ODGOVORU UOPŠTE NE BAVI PRIKAZOM SLIKA (aplikacija to sama radi) I NE SPOMINJI DA LI U TEKSTU IMA SLIKA ILI LINKOVA!\n"
+                    "2. KORISNIK MOŽE TRAŽITI SLIKU — TI SE U ODGOVORU UOPŠTE NE BAVI PRIKAZOM SLIKA (aplikacija to sama radi). NIKAD ne pominji, ne komentariši i ne izvinjavaj se za (ne)mogućnost prikazivanja slika kao digitalni asistent — jednostavno opiši sadržaj kao da je slika već prikazana pored tvog odgovora.\n"
                     "3. Ako se tražena osoba ili podatak NE NALAZI u dostavljenom kontekstu, kratko kaži da podatak nije pronađen.\n"
                     "4. ZABRANJENO JE nuditi druge osobe iz konteksta kao zamenu.\n"
                     "5. STROGO JE ZABRANJENO ispisivanje URL linkova ili slika u formatu Markdown.\n"
+                    "6. Prethodne poruke u razgovoru su TU SAMO da bi razumeo potpitanja (npr. 'daj mi više detalja o tome'). Ako NOVO pitanje nije jasan nastavak prethodne teme, odgovaraj ISKLJUČIVO na osnovu KONTEKSTA dostavljenog uz 'Trenutno korisničko pitanje' ispod — nikad ne odgovaraj na temu iz ranije poruke umesto na novo, drugačije pitanje.\n"
                     "Odgovaraj isključivo na srpskom jeziku."
                 )
 
