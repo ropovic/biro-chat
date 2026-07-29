@@ -174,9 +174,13 @@ def ucitaj_sve_tekstove():
                              r.payload.get("izvor") or r.payload.get("dokument") or  
                              r.payload.get("source") or "")
                     
-                    slika_url = (r.payload.get("slika_url") or r.payload.get("image_url") or 
-                                 r.payload.get("slika") or r.payload.get("photo_url") or 
-                                 r.payload.get("url") or "")
+                    tip = r.payload.get("tip", "")
+                    
+                    # Link je ispravno, strukturirano polje za URL slike (slika_url je
+                    # legacy polje i uvek prazno - ostaje kao fallback radi sigurnosti)
+                    slika_url = (r.payload.get("Link") or r.payload.get("slika_url") or 
+                                 r.payload.get("image_url") or r.payload.get("slika") or 
+                                 r.payload.get("photo_url") or r.payload.get("url") or "")
                     
                     if not slika_url and raw_txt:
                         img_match = RE_URL.search(raw_txt)
@@ -191,7 +195,8 @@ def ucitaj_sve_tekstove():
                             "tekst_ascii": ukloni_dijakritike(norm_txt),
                             "izvor": norm_izv,
                             "izvor_ascii": ukloni_dijakritike(norm_izv),
-                            "slika_url": str(slika_url).strip()
+                            "slika_url": str(slika_url).strip(),
+                            "tip": tip
                         })
             
             if next_offset is None or len(records) == 0:
@@ -203,40 +208,32 @@ def ucitaj_sve_tekstove():
 
     return sve_tacke
 
-# ----------------- STROGI FILTER ZA PRIKAZ SLIKA (SA KORENIMA) -----------------
-def filtriraj_slike_za_prikaz(upit_ascii, rangirani_kandidati):
+# ----------------- PRIKAZ SLIKA - generalizovano preko 'tip' polja -----------------
+# Umesto hardkodovanih imena i korenova, oslanjamo se na ISTI hibridni skor koji već
+# rangira tekst (vektorska pretraga + koren-poklapanje) - ako je zapis o zaposlenom
+# ili dijagramu dovoljno dobro rangiran da uđe u top_k kontekst za LLM, prikazujemo
+# i njegovu sliku. Ovo eliminiše celu klasu bagova gde bi kratka, opšta reč u upitu
+# slučajno pogodila nečije ime (npr. "sve" unutar "Svetlana", "biro" unutar "Birou").
+def filtriraj_slike_za_prikaz(top_k_stavke, max_slika=3):
     prikazi_slike = []
     vidjene = set()
 
-    koreni = izvuci_korene(upit_ascii)
-    je_zamenik = "zamenik" in upit_ascii or "zamenici" in upit_ascii
-    je_direktor = ("direktor" in upit_ascii or "rukovodilac" in upit_ascii) and not je_zamenik
+    for item in top_k_stavke:
+        if item.get("tip") not in ("fotografija_profil", "dijagram"):
+            continue
 
-    for entry in rangirani_kandidati:
-        item = entry["item"]
         url = item.get("slika_url", "").strip()
-        txt_a = item["tekst_ascii"]
-        izv_a = item["izvor_ascii"]
-
         if not url or not url.startswith("http") or url in vidjene:
             continue
 
-        if je_direktor:
-            if "zamenik" not in txt_a and ("direktor" in txt_a or "direktor" in izv_a):
-                prikazi_slike.append((url, f"Fotografija direktora. Izvor: {item['izvor']}"))
-                vidjene.add(url)
-                break
-        elif je_zamenik:
-            if any(k in txt_a or k in izv_a for k in ["zamenik", "zamenici", "svetlana", "goran", "mihajlovic", "caldovic"]):
-                prikazi_slike.append((url, f"Fotografija zamenika direktora. Izvor: {item['izvor']}"))
-                vidjene.add(url)
-        else:
-            # Traži koren (Bojan) umesto pune reči (Bojane), da bi se uspešno uparilo sa Bojana
-            if koreni and any(k in txt_a or k in izv_a for k in koreni):
-                prikazi_slike.append((url, f"Fotografija. Izvor: {item['izvor']}"))
-                vidjene.add(url)
+        oznaka = "Fotografija" if item["tip"] == "fotografija_profil" else "Dijagram"
+        prikazi_slike.append((url, f"{oznaka}. Izvor: {item['izvor']}"))
+        vidjene.add(url)
 
-    return prikazi_slike[:3]
+        if len(prikazi_slike) >= max_slika:
+            break
+
+    return prikazi_slike
 
 # ----------------- OPTIMIZOVANI HIBRIDNI PRETRAŽIVAČ -----------------
 def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=3500):
@@ -299,7 +296,9 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=3500):
             if hit.payload:
                 raw_txt = (hit.payload.get("tekst") or hit.payload.get("text") or hit.payload.get("content") or "")
                 izvor = (hit.payload.get("naziv_dokumenta") or hit.payload.get("file_name") or hit.payload.get("izvor") or "")
-                slika_url = (hit.payload.get("slika_url") or hit.payload.get("image_url") or hit.payload.get("slika") or "")
+                tip = hit.payload.get("tip", "")
+                slika_url = (hit.payload.get("Link") or hit.payload.get("slika_url") or 
+                             hit.payload.get("image_url") or hit.payload.get("slika") or "")
                 
                 if raw_txt:
                     norm_txt = sredi_tekst(raw_txt)
@@ -314,7 +313,8 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=3500):
                                 "tekst_ascii": ukloni_dijakritike(norm_txt),
                                 "izvor": sredi_tekst(izvor),
                                 "izvor_ascii": ukloni_dijakritike(izvor),
-                                "slika_url": str(slika_url).strip()
+                                "slika_url": str(slika_url).strip(),
+                                "tip": tip
                             },
                             "score": vec_score
                         }
@@ -330,7 +330,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=3500):
     top_k = [entry["item"] for entry in rangirani[:top_k_rezultata]]
 
     # SLIKE
-    slike_za_prikaz = filtriraj_slike_za_prikaz(upit_ascii, rangirani)
+    slike_za_prikaz = filtriraj_slike_za_prikaz(top_k)
 
     # FORMIRANJE KONTEKSTA
     kontekst_delovi = []
