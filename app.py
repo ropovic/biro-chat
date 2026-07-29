@@ -61,7 +61,6 @@ COLLECTION_NAME = "baza_cloud_v2"
 # ----------------- UNAPRED KOMPAJLIRANI REGEX IZRAZI I STOP REČI -----------------
 RE_URL = re.compile(r'(https?://[^\s<>"]+?\.(?:jpg|jpeg|png|webp|gif))', re.IGNORECASE)
 RE_CLEAN_URL = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F])+)')
-CRNI_VRH_RE = re.compile(r'\bcrn[a-z]*\s+(?:[a-z]+\s+)?vrh[a-z]*\b')
 
 STOP_RECI = {
     "ko", "je", "su", "sta", "pise", "bazi", "postoji", "navedi", "prikazi", "pokazi", 
@@ -133,29 +132,30 @@ def izvuci_kljucne_reci(upit_ascii):
 # pa TEK ONDA filtrira stop-reči poređenjem korena sa korenom (ne pune reči) —
 # tako npr. "Birou" -> koren "biro" ispravno upada u STOP_KORENI i ne prolazi.
 #
-# Reči kraće od 5 slova (npr. "sve", "clan", "gora") se odbacuju u potpunosti —
-# prekratke su i preopšte da bi bile pouzdan znak da upit pominje baš tu reč, pa
-# lako slučajno upadaju kao podniz unutar neke sasvim druge reči (npr. "sve"
-# unutar "Svetlana"), što je izazivalo lažne prikaze fotografija zaposlenih.
-# Brojevi članova imaju sopstvenu, pouzdaniju regex proveru (clan_res) iznad,
-# pa im ovaj prag ne treba.
-#
-# VAŽNO: prag se proverava na ORIGINALNOJ reči, PRE skraćivanja na koren — ne
-# na već skraćenom korenu. Prethodna verzija je proveravala dužinu KORENA, pa
-# je npr. "kamen" (5 slova) skraćeno na "kame" (4 slova) samo sebe izbacivalo
-# pragom, iako "kamen" nije nimalo kratka/opšta reč poput "sve".
-MIN_DUZINA_RECI = 5
-
+# Reči kraće od 5 slova (npr. "vrh", "sve", "cer") se NE skraćuju dalje, ali
+# se i drugačije poklapaju sa tekstom (vidi koren_prisutan ispod) - moraju biti
+# CELA reč, ne deo neke duže reči. Ovo sprečava i lažna poklapanja (npr. "sve"
+# unutar "Svetlana") I omogućava kratkim, specifičnim imenima mesta (npr. "vrh",
+# "Pek", "Cer") da i dalje učestvuju u pretrazi, umesto da budu potpuno odbačena.
 def izvuci_korene(upit_ascii):
     reci = izvuci_kljucne_reci(upit_ascii)
-    koreni = []
+    rezultat = []
     for w in reci:
-        if len(w) < MIN_DUZINA_RECI:
-            continue
         koren = _stemuj_rec(w)
-        if koren not in STOP_KORENI:
-            koreni.append(koren)
-    return koreni
+        if koren in STOP_KORENI:
+            continue
+        skracen = len(koren) < len(w)
+        rezultat.append((koren, skracen))
+    return rezultat
+
+
+def koren_prisutan(koren, skracen, tekst):
+    if skracen:
+        # koren je skraćen (npr. "toner" od "toneri") - sme da nastavi istim
+        # slovima udesno (da uhvati padeže), ali MORA da počne novu reč
+        return re.search(r'\b' + re.escape(koren), tekst) is not None
+    # kratka, neskraćena reč (npr. "vrh") - mora biti CELA reč
+    return re.search(r'\b' + re.escape(koren) + r'\b', tekst) is not None
 
 # ----------------- KEŠIRANJE SVIH ODLOMAKA IZ BAZE -----------------
 @st.cache_data(ttl=1800)
@@ -255,8 +255,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     je_clan_upit = any(w in upit_ascii for w in ["clan", "cl", "ugovor", "kolektivni", "ku"])
     clan_res = [re.compile(r'\b(?:clan|cl)[a-z]*\.?\s*' + re.escape(str(br)) + r'\b') for br in brojevi] if (brojevi and je_clan_upit) else []
 
-    has_crni_vrh = "crn" in upit_ascii and "vrh" in upit_ascii
-    
     je_zamenik = "zamenik" in upit_ascii or "zamenici" in upit_ascii
     je_direktor = ("direktor" in upit_ascii or "rukovodilac" in upit_ascii) and not je_zamenik
 
@@ -272,9 +270,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
                 if cre.search(txt_a):
                     score += 200000.0
 
-        if has_crni_vrh and CRNI_VRH_RE.search(txt_a):
-            score += 200000.0
-
         if je_direktor:
             if "zamenik" not in txt_a and ("direktor" in txt_a or "direktor" in izv_a):
                 score += 150000.0
@@ -282,9 +277,11 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
             if any(w in txt_a for w in ["zamenik", "zamenici", "svetlana", "mihajlovic", "goran", "caldovic"]):
                 score += 150000.0
 
-        # Dinamički Match ključnih KORENA (Rešava padeže: Mrčajevcu -> mrcajev in mrcajevac)
+        # Dinamički Match ključnih KORENA, uz granicu reči (rešava padeže:
+        # Mrčajevcu -> mrcajev in mrcajevac, ALI i kratka imena kao "vrh" bez
+        # rizika od lažnog poklapanja usred neke druge reči)
         if koreni:
-            pogodaka = sum(1 for k in koreni if k in txt_a or k in izv_a)
+            pogodaka = sum(1 for k, skracen in koreni if koren_prisutan(k, skracen, txt_a) or koren_prisutan(k, skracen, izv_a))
             if pogodaka > 0:
                 score += pogodaka * 40000.0
 
@@ -475,6 +472,7 @@ if prompt:
                     "4. ZABRANJENO JE nuditi druge osobe iz konteksta kao zamenu.\n"
                     "5. STROGO JE ZABRANJENO ispisivanje URL linkova ili slika u formatu Markdown.\n"
                     "6. Prethodne poruke u razgovoru su TU SAMO da bi razumeo potpitanja (npr. 'daj mi više detalja o tome'). Ako NOVO pitanje nije jasan nastavak prethodne teme, odgovaraj ISKLJUČIVO na osnovu KONTEKSTA dostavljenog uz 'Trenutno korisničko pitanje' ispod — nikad ne odgovaraj na temu iz ranije poruke umesto na novo, drugačije pitanje.\n"
+                    "7. TI NEMAŠ UVID U SAMU SLIKU/FOTOGRAFIJU, samo u tekstualni opis iz baze. NIKAD ne izmišljaj i ne pretpostavljaj kako slika izgleda (boje, izraz lica, odeća, kompozicija, 'verovatno prikazuje...') — prenesi SAMO činjenice koje stvarno piše u tekstu konteksta (ime, funkcija, naslov dokumenta), ništa vizuelno mimo toga.\n"
                     "Odgovaraj isključivo na srpskom jeziku."
                 )
 
