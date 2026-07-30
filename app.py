@@ -265,12 +265,31 @@ def detektuj_kategoriju(upit):
     """
     Na osnovu ključnih reči u upitu vraća listu vrednosti za 'tip' polje
     koje treba koristiti u Qdrant filteru. Vraća None ako nema detekcije.
+
+    VAŽNO: "vizuel" kategorija se primenjuje SAMO kad korisnik EKSPLICITNO
+    traži da mu se nešto prikaže ("prikaži", "pokaži"). Za informaciona pitanja
+    tipa "Pominje li se X?" vizuel filter se NE primenjuje — jer tekst koji
+    pominje X može biti u zapisu koji nema tip=dijagram, pa bi filter
+    izbacio relevantan kontekst.
     """
     upit_lower = upit.lower()
+
+    # Da li korisnik eksplicitno traži da mu se nešto vizuelno prikaže?
+    eksplicitno_vizuel = any(r in upit_lower for r in [
+        "prikaži", "prikazi", "pokaži", "pokazi",
+        "daj mi sliku", "daj sliku", "prikaži sliku",
+        "prikaži fotografiju", "prikaži dijagram",
+        "prikaži šemu", "prikaži mapu", "prikaži crtež",
+        "prikazati", "pokazati",
+    ])
+
     matches = set()
     for kategorija, info in KATEGORIJA_MAPPING.items():
         for kw in info["keywords"]:
             if kw in upit_lower:
+                # "vizuel" filter važi SAMO uz eksplicitnu nameru prikaza
+                if kategorija == "vizuel" and not eksplicitno_vizuel:
+                    break
                 matches.update(info["tip_values"])
                 break
     return list(matches) if matches else None
