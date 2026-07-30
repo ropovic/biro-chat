@@ -261,6 +261,18 @@ def embed_upit(tekst):
 # ============================================================
 # DETEKCIJA KATEGORIJE IZ UPITA + QDRANT FILTER
 # ============================================================
+def je_eksplicitno_vizuelni_upit(upit):
+    """Da li korisnik eksplicitno traži da mu se nešto vizuelno prikaže?"""
+    upit_lower = (upit or "").lower()
+    return any(r in upit_lower for r in [
+        "prikaži", "prikazi", "pokaži", "pokazi",
+        "daj mi sliku", "daj sliku", "prikaži sliku",
+        "prikaži fotografiju", "prikaži dijagram",
+        "prikaži šemu", "prikaži mapu", "prikaži crtež",
+        "prikazati", "pokazati",
+    ])
+
+
 def detektuj_kategoriju(upit):
     """
     Na osnovu ključnih reči u upitu vraća listu vrednosti za 'tip' polje
@@ -273,15 +285,7 @@ def detektuj_kategoriju(upit):
     izbacio relevantan kontekst.
     """
     upit_lower = upit.lower()
-
-    # Da li korisnik eksplicitno traži da mu se nešto vizuelno prikaže?
-    eksplicitno_vizuel = any(r in upit_lower for r in [
-        "prikaži", "prikazi", "pokaži", "pokazi",
-        "daj mi sliku", "daj sliku", "prikaži sliku",
-        "prikaži fotografiju", "prikaži dijagram",
-        "prikaži šemu", "prikaži mapu", "prikaži crtež",
-        "prikazati", "pokazati",
-    ])
+    eksplicitno_vizuel = je_eksplicitno_vizuelni_upit(upit)
 
     matches = set()
     for kategorija, info in KATEGORIJA_MAPPING.items():
@@ -306,6 +310,37 @@ def napravi_qdrant_filter(tip_vrednosti):
             )
         ]
     )
+
+# ============================================================
+# KOJE TIPOVE SLIKA SMEMO DA PRIKAŽEMO ZA KOJI FILTER
+# ------------------------------------------------------------
+# Ovo sprečava da se uz tekstualni odgovor o nečemu (npr. "GJ Mrčajevac")
+# prikažu fotografije zaposlenih koje su slučajno u top-K jer je dokument
+# pomenuo neke osobe. Pravilo: slike se prikazuju SAMO kad su kontekstualno
+# relevantne za dati filter/upit.
+# ============================================================
+KAT_SLIKA = {
+    "vizuel":     {"dijagram", "mapa", "karta", "grafikon", "tabela"},
+    "osoba":      {"fotografija_profil", "biografija"},
+    "kadrovski":  {"fotografija_profil", "biografija"},
+    "projektna":  {"mapa", "karta", "dijagram", "tabela"},
+    "oprema":     set(),   # Oprema nema tipičan vizuelni sadržaj
+    "pravni":     set(),   # Pravni akti nemaju vizuelni sadržaj
+}
+
+def dozvoljeni_tipovi_za_filter(aktivan_filter, eksplicitno_vizuel=False):
+    """Za dati filter i eksplicitnost namere, vrati dozvoljene tipove slika."""
+    if eksplicitno_vizuel:
+        return {"fotografija_profil", "biografija", "dijagram", "mapa", "karta", "tabela", "grafikon"}
+
+    if not aktivan_filter:
+        return {"fotografija_profil", "dijagram", "mapa", "karta"}
+
+    dozvoljeni = set()
+    for kategorija, info in KATEGORIJA_MAPPING.items():
+        if any(tv in aktivan_filter for tv in info["tip_values"]):
+            dozvoljeni |= KAT_SLIKA.get(kategorija, set())
+    return dozvoljeni
 
 # ============================================================
 # KEŠIRANJE SVIH ODLOMAKA IZ BAZE
@@ -368,28 +403,18 @@ def ucitaj_sve_tekstove():
 # ============================================================
 # PRIKAZ SLIKA
 # ============================================================
-def filtriraj_slike_za_prikaz(top_k_stavke, aktivan_filter=None, max_slika=3):
+def filtriraj_slike_za_prikaz(top_k_stavke, upit, aktivan_filter=None, max_slika=3):
     """
-    Bira koje slike/dijagrame da prikaže. Poštuje AKTIVNI FILTER kad postoji:
-    - Ako je filter "vizuel" → prikazuj samo dijagrame/mape/karte/grafikone
-    - Ako je filter "osoba"  → prikazuj samo fotografije profila
-    - Ako nema filtera       → standard (dijagram ili fotografija profila)
-    Ovo sprečava da se uz tekstualni odgovor o štampačima "u prolazu"
-    prikaže dijagram iz nekog drugog dokumenta koji je slučajno u top-K.
+    Bira koje slike/dijagrame da prikaže. Koristi KAT_SLIKA mapu kategorija
+    → dozvoljeni tipovi slika da bi se izbacio "slučajni" vizuel iz drugog
+    dokumenta u top-K. Korisnik može eksplicitno zatražiti sliku/dijagram
+    rečima "prikaži", "pokaži" — tad se dozvoljavaju svi tipovi.
     """
+    eksplicitno_vizuel = je_eksplicitno_vizuelni_upit(upit)
+    dozvoljeni_tipovi = dozvoljeni_tipovi_za_filter(aktivan_filter, eksplicitno_vizuel)
+
     prikazi_slike = []
     vidjene = set()
-
-    # Odredi koje tipove slika smemo da prikažemo
-    if aktivan_filter:
-        if "vizuel" in aktivan_filter:
-            dozvoljeni_tipovi = {"dijagram", "mapa", "karta", "grafikon", "tabela"}
-        elif "osoba" in aktivan_filter:
-            dozvoljeni_tipovi = {"fotografija_profil", "biografija"}
-        else:
-            dozvoljeni_tipovi = {"fotografija_profil", "dijagram", "mapa", "karta"}
-    else:
-        dozvoljeni_tipovi = {"fotografija_profil", "dijagram", "mapa", "karta"}
 
     for item in top_k_stavke:
         tip = item.get("tip", "")
@@ -541,8 +566,8 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000, min_rez
     rangirani = sorted(candidates_map.values(), key=lambda x: x["score"], reverse=True)
     top_k = [entry["item"] for entry in rangirani[:top_k_rezultata]]
 
-    # SLIKE — poštuju aktivni filter da ne prikazuju nebitne vizuale
-    slike_za_prikaz = filtriraj_slike_za_prikaz(top_k, aktivan_filter=tip_vrednosti)
+    # SLIKE — poštuju aktivni filter i eksplicitnost namere korisnika
+    slike_za_prikaz = filtriraj_slike_za_prikaz(top_k, upit, aktivan_filter=tip_vrednosti)
 
     MAX_PO_ODLOMKU = 900
     kontekst_delovi = []
@@ -599,7 +624,7 @@ def strimuj_groq_odgovor(poruke):
 # BOČNI MENI
 # ============================================================
 with st.sidebar:
-    st.image("https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/biro_logo.jpg", use_container_width=True)
+    st.image("https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/srbijasume_logo.jpg", use_container_width=True)
     st.title("🌲 Биро Чат")
     st.markdown("**Дигитални асистент Бироа за планирање**\n\n*ПД „Србијашуме”*")
     st.divider()
@@ -626,7 +651,7 @@ with st.sidebar:
 # ============================================================
 st.markdown("""
 <div class="main-header">
-    <img src="https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/dijagrami/1614_GJ Crni vrh_2025-2034_strana_74_img_1227.png" style="height:70px;margin-bottom:8px;">
+    <img src="https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/srbijasume_logo.jpg" style="height:90px;margin-bottom:12px;">
     <h1>🌲 Биро за планирање</h1>
     <p>ПД „Србијашуме” — Дигитални асистент</p>
 </div>
