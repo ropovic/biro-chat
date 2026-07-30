@@ -282,11 +282,16 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
 
         # Dinamički Match ključnih KORENA, uz granicu reči (rešava padeže:
         # Mrčajevcu -> mrcajev in mrcajevac, ALI i kratka imena kao "vrh" bez
-        # rizika od lažnog poklapanja usred neke druge reči)
+        # rizika od lažnog poklapanja usred neke druge reči).
+        # VAŽNO: match u tekstu vredi 5x više od match-a u izvoru (imenu fajla) —
+        # sprečava da fajlovi sa slučajnom ključnom reči u NAZIVU (npr. "Biro
+        # (stampa 2X)") guraju stvarno relevantne dokumente iz top_k.
         if koreni:
-            pogodaka = sum(1 for k, skracen in koreni if koren_prisutan(k, skracen, txt_a) or koren_prisutan(k, skracen, izv_a))
-            if pogodaka > 0:
-                score += pogodaka * 40000.0
+            tekst_pogodaka = sum(1 for k, skracen in koreni if koren_prisutan(k, skracen, txt_a))
+            izvor_pogodaka = sum(1 for k, skracen in koreni if koren_prisutan(k, skracen, izv_a))
+            ukupno = tekst_pogodaka * 5 + izvor_pogodaka
+            if ukupno > 0:
+                score += ukupno * 10000.0
 
         if score > 0:
             candidates_map[key] = {"item": item, "score": score}
@@ -470,12 +475,12 @@ if prompt:
                     "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj ISKLJUČIVO na osnovu dostavljenog KONTEKSTA.\n\n"
                     "STROGA PRAVILA ZA ODGOVARANJE:\n"
-                    "1. Uvek pruži ŠTO DETALJNIJI I OPŠIRNIJI odgovor. Ako korisnik traži podatke o nekoj lokaciji, gazdinskoj jedinici, osobi ili ugovoru, MORAŠ izvući apsolutno sve relevantne detalje iz dostavljenih odlomaka.\n"
+                    "1. Daj jasan, sažet odgovor koji sadrži SVE relevantne činjenice iz konteksta. Izbegavaj nepotrebno ponavljanje i proširivanje — ne prepričavaj kontekst rečenicu po rečenicu, nego sintetiši ključne informacije. Za upit o osobi: ime, funkcija, dokument. Za upit o dokumentu: naslov, tema, ključni podaci. Za upit o opremi: model, namena, broj komada ako postoji.\n"
                     "2. KORISNIK MOŽE TRAŽITI SLIKU — TI SE U ODGOVORU UOPŠTE NE BAVI PRIKAZOM SLIKA (aplikacija to sama radi). NIKAD ne pominji, ne komentariši i ne izvinjavaj se za (ne)mogućnost prikazivanja slika kao digitalni asistent — jednostavno opiši sadržaj kao da je slika već prikazana pored tvog odgovora.\n"
                     "3. Ako se tražena osoba ili podatak NE NALAZI u dostavljenom kontekstu, kratko kaži da podatak nije pronađen.\n"
                     "4. ZABRANJENO JE nuditi druge osobe iz konteksta kao zamenu.\n"
                     "5. STROGO JE ZABRANJENO ispisivanje URL linkova ili slika u formatu Markdown.\n"
-                    "6. Prethodne poruke u razgovoru su TU SAMO da bi razumeo potpitanja (npr. 'daj mi više detalja o tome'). Ako NOVO pitanje nije jasan nastavak prethodne teme, odgovaraj ISKLJUČIVO na osnovu KONTEKSTA dostavljenog uz 'Trenutno korisničko pitanje' ispod — nikad ne odgovaraj na temu iz ranije poruke umesto na novo, drugačije pitanje.\n"
+                    "6. SVAKO NOVO PITANJE dobija NOVI, SVEŽI KONTEKST iz baze (nalazi se uz 'Trenutno korisničko pitanje' ispod). UVEK odgovaraj na osnovu TOG novog konteksta — nikad ne prenosi informacije iz prethodnih odgovora u ovom razgovoru na novo, drugačije pitanje. Prethodne poruke koristi SAMO za razumevanje kratkih potpitanja tipa 'daj više detalja' ili 'a šta piše o tome' — u svim ostalim slučajevima ignorišti prethodnu temu.\n"
                     "7. TI NEMAŠ UVID U SAMU SLIKU/FOTOGRAFIJU, samo u tekstualni opis iz baze. NIKAD ne izmišljaj i ne pretpostavljaj kako slika izgleda (boje, izraz lica, odeća, kompozicija, 'verovatno prikazuje...') — prenesi SAMO činjenice koje stvarno piše u tekstu konteksta (ime, funkcija, naslov dokumenta), ništa vizuelno mimo toga.\n"
                     "Odgovaraj isključivo na srpskom jeziku."
                 )
@@ -483,7 +488,7 @@ if prompt:
                 poruke_za_groq = [{"role": "system", "content": system_instruction}]
                 
                 # Zadržavamo poslednje 4 poruke za adekvatan kontekst i razumevanje potpitanja ("Daj detalje o tome")
-                skracena_istorija = st.session_state.messages[-4:]
+                skracena_istorija = st.session_state.messages[-2:]
                 for msg in skracena_istorija:
                     poruke_za_groq.append({"role": msg["role"], "content": msg["content"]})
                 
