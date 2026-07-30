@@ -152,6 +152,23 @@ KATEGORIJA_MAPPING = {
             "gospodarska_jedinica", "mapa", "karta",
         ],
     },
+    "vizuel": {
+        "keywords": [
+            "dijagram", "grafikon", "šema", "shema", "mapa", "karta",
+            "ruža vetrova", "ruza vetrova", "vetrova", "ruža",
+            "crtež", "ilustracija", "skica", "prikaz", "tabela", "shema",
+        ],
+        "tip_values": [
+            "dijagram", "mapa", "karta", "tabela", "grafikon", "vizuel",
+        ],
+    },
+    "osoba": {
+        "keywords": [
+            "fotografija", "profil", "lica", "lice",
+            "izgled", "portret", "slika zaposlenog", "slika osobe",
+        ],
+        "tip_values": ["fotografija_profil", "biografija"],
+    },
 }
 
 # ============================================================
@@ -332,19 +349,39 @@ def ucitaj_sve_tekstove():
 # ============================================================
 # PRIKAZ SLIKA
 # ============================================================
-def filtriraj_slike_za_prikaz(top_k_stavke, max_slika=3):
+def filtriraj_slike_za_prikaz(top_k_stavke, aktivan_filter=None, max_slika=3):
+    """
+    Bira koje slike/dijagrame da prikaže. Poštuje AKTIVNI FILTER kad postoji:
+    - Ako je filter "vizuel" → prikazuj samo dijagrame/mape/karte/grafikone
+    - Ako je filter "osoba"  → prikazuj samo fotografije profila
+    - Ako nema filtera       → standard (dijagram ili fotografija profila)
+    Ovo sprečava da se uz tekstualni odgovor o štampačima "u prolazu"
+    prikaže dijagram iz nekog drugog dokumenta koji je slučajno u top-K.
+    """
     prikazi_slike = []
     vidjene = set()
 
+    # Odredi koje tipove slika smemo da prikažemo
+    if aktivan_filter:
+        if "vizuel" in aktivan_filter:
+            dozvoljeni_tipovi = {"dijagram", "mapa", "karta", "grafikon", "tabela"}
+        elif "osoba" in aktivan_filter:
+            dozvoljeni_tipovi = {"fotografija_profil", "biografija"}
+        else:
+            dozvoljeni_tipovi = {"fotografija_profil", "dijagram", "mapa", "karta"}
+    else:
+        dozvoljeni_tipovi = {"fotografija_profil", "dijagram", "mapa", "karta"}
+
     for item in top_k_stavke:
-        if item.get("tip") not in ("fotografija_profil", "dijagram"):
+        tip = item.get("tip", "")
+        if tip not in dozvoljeni_tipovi:
             continue
 
         url = item.get("slika_url", "").strip()
         if not url or not url.startswith("http") or url in vidjene:
             continue
 
-        oznaka = "Fotografija" if item["tip"] == "fotografija_profil" else "Dijagram"
+        oznaka = "Fotografija" if tip == "fotografija_profil" else "Dijagram"
         prikazi_slike.append((url, f"{oznaka}. Izvor: {item['izvor']}"))
         vidjene.add(url)
 
@@ -485,7 +522,8 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000, min_rez
     rangirani = sorted(candidates_map.values(), key=lambda x: x["score"], reverse=True)
     top_k = [entry["item"] for entry in rangirani[:top_k_rezultata]]
 
-    slike_za_prikaz = filtriraj_slike_za_prikaz(top_k)
+    # SLIKE — poštuju aktivni filter da ne prikazuju nebitne vizuale
+    slike_za_prikaz = filtriraj_slike_za_prikaz(top_k, aktivan_filter=tip_vrednosti)
 
     MAX_PO_ODLOMKU = 900
     kontekst_delovi = []
@@ -634,6 +672,7 @@ if prompt:
                     "5. STROGO JE ZABRANJENO ispisivanje URL linkova ili slika u formatu Markdown.\n"
                     "6. SVAKO NOVO PITANJE dobija NOVI, SVEŽI KONTEKST iz baze (nalazi se uz 'Trenutno korisničko pitanje' ispod). UVEK odgovaraj na osnovu TOG novog konteksta — nikad ne prenosi informacije iz prethodnih odgovora u ovom razgovoru na novo, drugačije pitanje. Prethodne poruke koristi SAMO za razumevanje kratkih potpitanja tipa 'daj više detalja' ili 'a šta piše o tome' — u svim ostalim slučajevima ignorišti prethodnu temu.\n"
                     "7. TI NEMAŠ UVID U SAMU SLIKU/FOTOGRAFIJU, samo u tekstualni opis iz baze. NIKAD ne izmišljaj i ne pretpostavljaj kako slika izgleda (boje, izraz lica, odeća, kompozicija, 'verovatno prikazuje...') — prenesi SAMO činjenice koje stvarno piše u tekstu konteksta (ime, funkcija, naslov dokumenta), ništa vizuelno mimo toga.\n"
+                    "8. AKO KORISNIK TRAŽI DIJAGRAM/SLIKU/ŠEMU, a u kontekstu NE POSTOJI vizuelni zapis sa odgovarajućim 'tip' poljem, eksplicitno reci da traženi vizuel NIJE pronađen. NIKAD nemoj pominjati druge dijagrame/slike/fotografije iz konteksta kao zamenu (čak i ako postoje). Aplikacija sama upravlja prikazom slika — tvoj posao je SAMO da preneseš šta STVARNO piše u kontekstu za dati upit.\n"
                     "Odgovaraj isključivo na srpskom jeziku."
                 )
 
