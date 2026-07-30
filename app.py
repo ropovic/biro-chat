@@ -1,18 +1,38 @@
 import streamlit as st
 import re
 import time
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 from groq import Groq
 from fastembed import TextEmbedding
 
-# ----------------- KONFIGURACIJA STRANICE -----------------
+# ============================================================
+# KONFIGURACIJA STRANICE
+# ============================================================
 st.set_page_config(
     page_title="Биро Чат Асистент",
     page_icon="🌲",
     layout="centered"
 )
 
-# ----------------- CUSTOM CSS DIZAJN -----------------
+# ============================================================
+# EMBEDDING KONFIGURACIJA — STAGE 2
+# ============================================================
+# Stari model (Stage 1):  sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2  (384 dim)
+# Novi model (Stage 2):  sentence-transformers/paraphrase-multilingual-mpnet-base-v2  (768 dim)
+#
+# VAŽNO: Stara kolekcija "baza_cloud_v2" ima 384-dim vektore. Ona je NEKOMPATIBILNA
+# sa novim modelom. Pokreni reindex.py jednom da napravi "baza_cloud_v2_e5" sa 768-dim
+# vektorima, pa postavi COLLECTION_NAME = "baza_cloud_v2_e5" u Streamlit secrets.
+#
+# Alternativa (bolji kvalitet, ali ~2x RAM):
+#   EMBEDDING_MODEL = "intfloat/multilingual-e5-large"   # 1024 dim, 2.24 GB
+#   Za e5-large treba dodati "query: " / "passage: " prefikse u embed_upit() i reindex.py
+EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+EMBEDDING_DIM = 768
+
+# ============================================================
+# CUSTOM CSS DIZAJN
+# ============================================================
 st.markdown("""
     <style>
     .main-header {
@@ -45,7 +65,9 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ----------------- UČITAVANJE KLJUČEVA -----------------
+# ============================================================
+# UČITAVANJE KLJUČEVA
+# ============================================================
 potrebne_tajne = ["QDRANT_URL", "QDRANT_API_KEY", "GROQ_API_KEY"]
 for tajna in potrebne_tajne:
     if tajna not in st.secrets:
@@ -56,15 +78,18 @@ QDRANT_URL = st.secrets["QDRANT_URL"]
 QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 
-COLLECTION_NAME = "baza_cloud_v2"
+# Ime kolekcije se može override-ovati preko secrets; default je nova e5 kolekcija
+COLLECTION_NAME = st.secrets.get("COLLECTION_NAME", "baza_cloud_v2_e5")
 
-# ----------------- UNAPRED KOMPAJLIRANI REGEX IZRAZI I STOP REČI -----------------
+# ============================================================
+# UNAPRED KOMPAJLIRANI REGEX IZRAZI I STOP REČI
+# ============================================================
 RE_URL = re.compile(r'(https?://[^\s<>"]+?\.(?:jpg|jpeg|png|webp|gif))', re.IGNORECASE)
 RE_CLEAN_URL = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F])+)')
 
 STOP_RECI = {
-    "ko", "je", "su", "sta", "pise", "bazi", "postoji", "navedi", "prikazi", "pokazi", 
-    "slika", "slike", "sliku", "foto", "fotografij", "u", "i", "na", "sa", "za", "o", 
+    "ko", "je", "su", "sta", "pise", "bazi", "postoji", "navedi", "prikazi", "pokazi",
+    "slika", "slike", "sliku", "foto", "fotografij", "u", "i", "na", "sa", "za", "o",
     "da", "li", "ima", "njegovu", "njihove", "njena", "mesto", "radno", "biro", "biroa",
     "planiranje", "projektovanje", "pd", "srbijasume", "sumarstvu", "detalje", "detaljnije",
     "koji", "koja", "koje", "kog", "kojoj", "kojim", "svi", "sve", "svih", "kao", "ali",
@@ -72,13 +97,72 @@ STOP_RECI = {
     "jos", "vrlo", "neki", "neka", "neko", "nesto"
 }
 
-# ----------------- INICIJALIZACIJA KLIJENATA -----------------
+# ============================================================
+# MAPIRANJE KLJUČNIH REČI -> KATEGORIJA DOKUMENTA
+# ------------------------------------------------------------
+# Ovo je ključno za rešavanje problema "ne nalazi štampače/tonere".
+# Kad upit sadrži reč iz neke kategorije, automatski se primenjuje
+# Qdrant filter na polje "tip" u payload-u.
+#
+# VAŽNO: Ove "tip" vrednosti moraju postojati u payload-u za filter
+# da radi. Trenutno u bazi postoje "fotografija_profil" i "dijagram".
+# Za ostalo, pokreni reindex.py koji automatski inferiše "tip" iz
+# naziva dokumenta i sadržaja.
+# ============================================================
+KATEGORIJA_MAPPING = {
+    "oprema": {
+        "keywords": [
+            "stampač", "stampac", "stampaci", "printer", "pisač", "pisac",
+            "toner", "toneri", "kertridž", "kertridz", "kartuša", "cartridge",
+            "skener", "monitor", "računar", "racunar", "kompjuter", "laptop",
+            "miš", "mis", "tastatura", "oprema", "inventar", "mreža", "mreza",
+            "štampa", "stampa", "server", "hardver", "uredjaj", "uređaj",
+        ],
+        "tip_values": [
+            "oprema", "kancelarijska_oprema", "inventar", "toner", "stampac",
+        ],
+    },
+    "kadrovski": {
+        "keywords": [
+            "direktor", "rukovodilac", "zaposleni", "radnik", "šef", "sef",
+            "osoblje", "lice", "lica", "kadrovi", "imenik", "biografija",
+            "fotografija", "profil",
+        ],
+        "tip_values": [
+            "kadrovski", "zaposleni", "osoblje", "fotografija_profil", "biografija",
+        ],
+    },
+    "pravni": {
+        "keywords": [
+            "član", "clan", "ugovor", "kolektivni", "pravilnik", "zakon",
+            "propis", "odluka", "rešenje", "resenje", "statut", "članovi",
+        ],
+        "tip_values": [
+            "pravni_akt", "ugovor", "kolektivni_ugovor", "pravilnik", "zakon", "odluka",
+        ],
+    },
+    "projektna": {
+        "keywords": [
+            "gazdinska", "g.j.", "gj ", "osnova", "projekat", "šuma", "sume",
+            "šumski", "sumski", "drvna", "drvno", "seča", "seca", "gazdinstv",
+            "gospodarska", "jedinica",
+        ],
+        "tip_values": [
+            "projektna_dokumentacija", "sumskoprivredna_osnova",
+            "gospodarska_jedinica", "mapa", "karta",
+        ],
+    },
+}
+
+# ============================================================
+# INICIJALIZACIJA KLIJENATA
+# ============================================================
 @st.cache_resource
 def init_clients():
     try:
         qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, check_compatibility=False)
         groq_client = Groq(api_key=GROQ_API_KEY)
-        embed_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+        embed_model = TextEmbedding(model_name=EMBEDDING_MODEL)
         return qdrant, groq_client, embed_model
     except Exception as e:
         st.error(f"Greška prilikom inicijalizacije klijenata: {e}")
@@ -86,7 +170,9 @@ def init_clients():
 
 qdrant, groq_client, embed_model = init_clients()
 
-# ----------------- NORMALIZACIJA I KORENI (STEMOVANJE) -----------------
+# ============================================================
+# NORMALIZACIJA I KORENI (STEMOVANJE)
+# ============================================================
 def sredi_tekst(tekst):
     if not tekst:
         return ""
@@ -114,9 +200,6 @@ def ukloni_dijakritike(tekst):
     txt = sredi_tekst(tekst).lower()
     return "".join([zamene.get(ch, ch) for ch in txt])
 
-# Zajednička f-ja za skraćivanje reči na koren — koristi se i za reči iz upita
-# i za STOP_RECI (ispod), da bi filter radio i na padežima ("Birou", "Biroa"),
-# ne samo na osnovnom obliku ("biro") koji je bio jedini hardkodovan u STOP_RECI.
 def _stemuj_rec(w):
     if len(w) >= 7:
         return w[:-2]
@@ -126,20 +209,9 @@ def _stemuj_rec(w):
 
 STOP_KORENI = {_stemuj_rec(w) for w in STOP_RECI}
 
-# Izvlači osnovne reči (BEZ filtriranja stop-reči ovde — to se sad radi
-# tek posle skraćivanja na koren, u izvuci_korene, da bi filter hvatao i padeže)
 def izvuci_kljucne_reci(upit_ascii):
     return [w for w in re.findall(r'\b\w+\b', upit_ascii) if len(w) > 2]
 
-# Skraćuje reči kako bi zanemario padeže (Mrčajevcu -> mrcajev, Bojane -> bojan),
-# pa TEK ONDA filtrira stop-reči poređenjem korena sa korenom (ne pune reči) —
-# tako npr. "Birou" -> koren "biro" ispravno upada u STOP_KORENI i ne prolazi.
-#
-# Reči kraće od 5 slova (npr. "vrh", "sve", "cer") se NE skraćuju dalje, ali
-# se i drugačije poklapaju sa tekstom (vidi koren_prisutan ispod) - moraju biti
-# CELA reč, ne deo neke duže reči. Ovo sprečava i lažna poklapanja (npr. "sve"
-# unutar "Svetlana") I omogućava kratkim, specifičnim imenima mesta (npr. "vrh",
-# "Pek", "Cer") da i dalje učestvuju u pretrazi, umesto da budu potpuno odbačena.
 def izvuci_korene(upit_ascii):
     reci = izvuci_kljucne_reci(upit_ascii)
     rezultat = []
@@ -151,16 +223,57 @@ def izvuci_korene(upit_ascii):
         rezultat.append((koren, skracen))
     return rezultat
 
-
 def koren_prisutan(koren, skracen, tekst):
     if skracen:
-        # koren je skraćen (npr. "toner" od "toneri") - sme da nastavi istim
-        # slovima udesno (da uhvati padeže), ali MORA da počne novu reč
         return re.search(r'\b' + re.escape(koren), tekst) is not None
-    # kratka, neskraćena reč (npr. "vrh") - mora biti CELA reč
     return re.search(r'\b' + re.escape(koren) + r'\b', tekst) is not None
 
-# ----------------- KEŠIRANJE SVIH ODLOMAKA IZ BAZE -----------------
+# ============================================================
+# EMBEDDING HELPER
+# ------------------------------------------------------------
+# Za mpnet model (default): nema prefiks
+# Za e5-large (ako se uvede): treba "query: " prefiks ovde
+#                              i "passage: " prefiks u reindex.py
+# ============================================================
+def embed_upit(tekst):
+    """Embedding za korisnički upit. Za e5-large bi trebalo: f'query: {tekst}'."""
+    if "e5" in EMBEDDING_MODEL.lower():
+        tekst = f"query: {tekst}"
+    return list(embed_model.embed([tekst]))[0].tolist()
+
+# ============================================================
+# DETEKCIJA KATEGORIJE IZ UPITA + QDRANT FILTER
+# ============================================================
+def detektuj_kategoriju(upit):
+    """
+    Na osnovu ključnih reči u upitu vraća listu vrednosti za 'tip' polje
+    koje treba koristiti u Qdrant filteru. Vraća None ako nema detekcije.
+    """
+    upit_lower = upit.lower()
+    matches = set()
+    for kategorija, info in KATEGORIJA_MAPPING.items():
+        for kw in info["keywords"]:
+            if kw in upit_lower:
+                matches.update(info["tip_values"])
+                break
+    return list(matches) if matches else None
+
+def napravi_qdrant_filter(tip_vrednosti):
+    """Pravi Qdrant filter za 'tip' polje (OR logika)."""
+    if not tip_vrednosti:
+        return None
+    return models.Filter(
+        should=[
+            models.FieldCondition(
+                key="tip",
+                match=models.MatchAny(any=tip_vrednosti),
+            )
+        ]
+    )
+
+# ============================================================
+# KEŠIRANJE SVIH ODLOMAKA IZ BAZE
+# ============================================================
 @st.cache_data(ttl=1800)
 def ucitaj_sve_tekstove():
     sve_tacke = []
@@ -176,27 +289,25 @@ def ucitaj_sve_tekstove():
             )
             for r in records:
                 if r.payload:
-                    raw_txt = (r.payload.get("tekst") or r.payload.get("text") or  
-                               r.payload.get("content") or r.payload.get("page_content") or 
+                    raw_txt = (r.payload.get("tekst") or r.payload.get("text") or
+                               r.payload.get("content") or r.payload.get("page_content") or
                                r.payload.get("body") or "")
-                    
-                    izvor = (r.payload.get("naziv_dokumenta") or r.payload.get("file_name") or  
-                             r.payload.get("izvor") or r.payload.get("dokument") or  
+
+                    izvor = (r.payload.get("naziv_dokumenta") or r.payload.get("file_name") or
+                             r.payload.get("izvor") or r.payload.get("dokument") or
                              r.payload.get("source") or "")
-                    
+
                     tip = r.payload.get("tip", "")
-                    
-                    # Link je ispravno, strukturirano polje za URL slike (slika_url je
-                    # legacy polje i uvek prazno - ostaje kao fallback radi sigurnosti)
-                    slika_url = (r.payload.get("Link") or r.payload.get("slika_url") or 
-                                 r.payload.get("image_url") or r.payload.get("slika") or 
+
+                    slika_url = (r.payload.get("Link") or r.payload.get("slika_url") or
+                                 r.payload.get("image_url") or r.payload.get("slika") or
                                  r.payload.get("photo_url") or r.payload.get("url") or "")
-                    
+
                     if not slika_url and raw_txt:
                         img_match = RE_URL.search(raw_txt)
                         if img_match:
                             slika_url = img_match.group(1)
-                    
+
                     if raw_txt:
                         norm_txt = sredi_tekst(raw_txt)
                         norm_izv = sredi_tekst(izvor)
@@ -208,22 +319,19 @@ def ucitaj_sve_tekstove():
                             "slika_url": str(slika_url).strip(),
                             "tip": tip
                         })
-            
+
             if next_offset is None or len(records) == 0:
                 break
-                
+
             offset = next_offset
     except Exception as e:
         st.warning(f"Upozorenje pri učitavanju baze: {e}")
 
     return sve_tacke
 
-# ----------------- PRIKAZ SLIKA - generalizovano preko 'tip' polja -----------------
-# Umesto hardkodovanih imena i korenova, oslanjamo se na ISTI hibridni skor koji već
-# rangira tekst (vektorska pretraga + koren-poklapanje) - ako je zapis o zaposlenom
-# ili dijagramu dovoljno dobro rangiran da uđe u top_k kontekst za LLM, prikazujemo
-# i njegovu sliku. Ovo eliminiše celu klasu bagova gde bi kratka, opšta reč u upitu
-# slučajno pogodila nečije ime (npr. "sve" unutar "Svetlana", "biro" unutar "Birou").
+# ============================================================
+# PRIKAZ SLIKA
+# ============================================================
 def filtriraj_slike_za_prikaz(top_k_stavke, max_slika=3):
     prikazi_slike = []
     vidjene = set()
@@ -245,12 +353,25 @@ def filtriraj_slike_za_prikaz(top_k_stavke, max_slika=3):
 
     return prikazi_slike
 
-# ----------------- OPTIMIZOVANI HIBRIDNI PRETRAŽIVAČ -----------------
-def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
+# ============================================================
+# OPTIMIZOVANI HIBRIDNI PRETRAŽIVAČ (Stage 2)
+# ------------------------------------------------------------
+# Glavne novine u Stage 2:
+#   1. E5 embedding (768 dim) sa "query: " prefiksom
+#   2. Auto-detekcija kategorije iz upita → Qdrant filter na "tip"
+#   3. Fallback bez filtera ako filtrirani rezultati daju premalo kandidata
+#   4. Meta-podaci o aktivnom filteru prikazani korisniku
+# ============================================================
+def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000, min_rezultata_sa_filterom=3):
     svi_odlomci = ucitaj_sve_tekstove()
     upit_ascii = ukloni_dijakritike(upit)
     norm_upit = sredi_tekst(upit)
-    
+
+    # --- NOVO: Auto-detekcija kategorije i pravljenje filtera ---
+    tip_vrednosti = detektuj_kategoriju(upit)
+    qdrant_filter = napravi_qdrant_filter(tip_vrednosti)
+    aktivan_filter = tip_vrednosti  # Čuva se za prikaz u metapodacima
+
     candidates_map = {}
     koreni = izvuci_korene(upit_ascii)
 
@@ -261,8 +382,18 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     je_zamenik = "zamenik" in upit_ascii or "zamenici" in upit_ascii
     je_direktor = ("direktor" in upit_ascii or "rukovodilac" in upit_ascii) and not je_zamenik
 
-    # SINGLE-PASS SCANNER
+    # --- LINEarni SKEN ---
+    # Kad je filter aktivan, preskačemo odlomke čiji 'tip' nije u filter listi
+    # (ovo ubrzava i sužava pretragu, a fallback logika dole hvata slučaj
+    # kad filter bude previše restriktivan)
     for item in svi_odlomci:
+        # NOVO: Hard filter na 'tip' ako je aktivan
+        if aktivan_filter and item.get("tip") and item["tip"] not in aktivan_filter:
+            continue
+        # Ako je filter aktivan a item NEMA 'tip', preskoči (osim ako fallback)
+        if aktivan_filter and not item.get("tip"):
+            continue
+
         txt_a = item["tekst_ascii"]
         izv_a = item["izvor_ascii"]
         key = item["tekst"]
@@ -280,12 +411,6 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
             if any(w in txt_a for w in ["zamenik", "zamenici", "svetlana", "mihajlovic", "goran", "caldovic"]):
                 score += 150000.0
 
-        # Dinamički Match ključnih KORENA, uz granicu reči (rešava padeže:
-        # Mrčajevcu -> mrcajev in mrcajevac, ALI i kratka imena kao "vrh" bez
-        # rizika od lažnog poklapanja usred neke druge reči).
-        # VAŽNO: match u tekstu vredi 5x više od match-a u izvoru (imenu fajla) —
-        # sprečava da fajlovi sa slučajnom ključnom reči u NAZIVU (npr. "Biro
-        # (stampa 2X)") guraju stvarno relevantne dokumente iz top_k.
         if koreni:
             tekst_pogodaka = sum(1 for k, skracen in koreni if koren_prisutan(k, skracen, txt_a))
             izvor_pogodaka = sum(1 for k, skracen in koreni if koren_prisutan(k, skracen, izv_a))
@@ -296,42 +421,61 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
         if score > 0:
             candidates_map[key] = {"item": item, "score": score}
 
-    # VEKTORSKA PRETRAGA (QDRANT)
-    try:
-        query_vector = list(embed_model.embed([norm_upit]))[0].tolist()
-        points = qdrant.search(
-            collection_name=COLLECTION_NAME,
-            query_vector=query_vector,
-            limit=15
-        )
-        for rank, hit in enumerate(points):
-            if hit.payload:
-                raw_txt = (hit.payload.get("tekst") or hit.payload.get("text") or hit.payload.get("content") or "")
-                izvor = (hit.payload.get("naziv_dokumenta") or hit.payload.get("file_name") or hit.payload.get("izvor") or "")
-                tip = hit.payload.get("tip", "")
-                slika_url = (hit.payload.get("Link") or hit.payload.get("slika_url") or 
-                             hit.payload.get("image_url") or hit.payload.get("slika") or "")
-                
-                if raw_txt:
-                    norm_txt = sredi_tekst(raw_txt)
-                    vec_score = (15 - rank) * 100.0
-                    
-                    if norm_txt in candidates_map:
-                        candidates_map[norm_txt]["score"] += vec_score
-                    else:
-                        candidates_map[norm_txt] = {
-                            "item": {
-                                "tekst": norm_txt,
-                                "tekst_ascii": ukloni_dijakritike(norm_txt),
-                                "izvor": sredi_tekst(izvor),
-                                "izvor_ascii": ukloni_dijakritike(izvor),
-                                "slika_url": str(slika_url).strip(),
-                                "tip": tip
-                            },
-                            "score": vec_score
-                        }
-    except Exception:
-        pass
+    # --- VEKTORSKA PRETRAGA (QDRANT) SA FILTEROM ---
+    # Pokušavamo sa filterom prvo. Ako vrati premalo, ponavljamo bez filtera.
+    vektor_pokusaji = [
+        (qdrant_filter, "sa filterom"),
+        (None, "bez filtera (fallback)"),
+    ]
+    vektor_rezultati = []
+    koriscen_filter = qdrant_filter
+    for filter_obj, _label in vektor_pokusaji:
+        try:
+            query_vector = embed_upit(norm_upit)
+            points = qdrant.search(
+                collection_name=COLLECTION_NAME,
+                query_vector=query_vector,
+                query_filter=filter_obj,
+                limit=15
+            )
+            vektor_rezultati = points
+            koriscen_filter = filter_obj
+            # Ako smo već bez filtera ili imamo dovoljno, prekini
+            if filter_obj is None or len(points) >= min_rezultata_sa_filterom:
+                break
+        except Exception:
+            continue
+
+    for rank, hit in enumerate(vektor_rezultati):
+        if hit.payload:
+            raw_txt = (hit.payload.get("tekst") or hit.payload.get("text") or hit.payload.get("content") or "")
+            izvor = (hit.payload.get("naziv_dokumenta") or hit.payload.get("file_name") or hit.payload.get("izvor") or "")
+            tip = hit.payload.get("tip", "")
+            slika_url = (hit.payload.get("Link") or hit.payload.get("slika_url") or
+                         hit.payload.get("image_url") or hit.payload.get("slika") or "")
+
+            if raw_txt:
+                norm_txt = sredi_tekst(raw_txt)
+                vec_score = (15 - rank) * 100.0
+
+                if norm_txt in candidates_map:
+                    candidates_map[norm_txt]["score"] += vec_score
+                else:
+                    # NOVO: Čak i za nove kandidate iz vektor pretrage,
+                    # poštuj aktivni filter (osim ako je u fallback režimu)
+                    if aktivan_filter and koriscen_filter is not None and tip and tip not in aktivan_filter:
+                        continue
+                    candidates_map[norm_txt] = {
+                        "item": {
+                            "tekst": norm_txt,
+                            "tekst_ascii": ukloni_dijakritike(norm_txt),
+                            "izvor": sredi_tekst(izvor),
+                            "izvor_ascii": ukloni_dijakritike(izvor),
+                            "slika_url": str(slika_url).strip(),
+                            "tip": tip
+                        },
+                        "score": vec_score
+                    }
 
     if not candidates_map and svi_odlomci:
         for item in svi_odlomci[:5]:
@@ -341,13 +485,8 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     rangirani = sorted(candidates_map.values(), key=lambda x: x["score"], reverse=True)
     top_k = [entry["item"] for entry in rangirani[:top_k_rezultata]]
 
-    # SLIKE
     slike_za_prikaz = filtriraj_slike_za_prikaz(top_k)
 
-    # FORMIRANJE KONTEKSTA
-    # Ograničavamo SVAKI odlomak posebno PRE spajanja - inače jedan dugačak
-    # odlomak (npr. dijagram sa punim OCR tekstom) može sam da potroši ceo
-    # budžet i odseče ostale, čak i relevantnije, odlomke koji dolaze posle njega.
     MAX_PO_ODLOMKU = 900
     kontekst_delovi = []
     for item in top_k:
@@ -360,9 +499,12 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000):
     if len(spojeni_tekst) > max_karaktera:
         spojeni_tekst = spojeni_tekst[:max_karaktera] + "\n...[Skraćeno]"
 
-    return spojeni_tekst, len(rangirani), len(svi_odlomci), slike_za_prikaz
+    # Vraćamo i info o aktivnom filteru da prikažemo korisniku
+    return spojeni_tekst, len(rangirani), len(svi_odlomci), slike_za_prikaz, aktivan_filter, koriscen_filter is not None
 
-# ----------------- STRIMOVANJE GROQ ODGOVORA -----------------
+# ============================================================
+# STRIMOVANJE GROQ ODGOVORA
+# ============================================================
 def strimuj_groq_odgovor(poruke):
     try:
         response_stream = groq_client.chat.completions.create(
@@ -396,20 +538,24 @@ def strimuj_groq_odgovor(poruke):
         else:
             raise e
 
-# ----------------- BOČNI MENI -----------------
+# ============================================================
+# BOČNI MENI
+# ============================================================
 with st.sidebar:
     st.image("https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/biro_logo.jpg", use_container_width=True)
     st.title("🌲 Биро Чат")
     st.markdown("**Дигитални асистент Бироа за планирање**\n\n*ПД „Србијашуме”*")
     st.divider()
-    
+
     st.markdown("### 🛠️ Статус система")
-    st.caption("🟢 **Векторска база:** Qdrant Cloud")
-    st.caption("🟢 **Језички модел:** Groq Llama (са резервним моделом)")
-    st.caption("🟢 **Обрада текста:** Српски падежи v8")
-    
+    st.caption(f"🟢 **Векторска база:** Qdrant Cloud")
+    st.caption(f"🟢 **Колекција:** `{COLLECTION_NAME}`")
+    st.caption(f"🟢 **Embedding:** {EMBEDDING_MODEL.split('/')[-1]} ({EMBEDDING_DIM} dim)")
+    st.caption(f"🟢 **Језички модел:** Groq Llama (са резервним)")
+    st.caption(f"🟢 **Филтер по типу:** активан")
+
     st.divider()
-    
+
     if st.button("🔄 Освежи кеш базе", use_container_width=True):
         st.cache_data.clear()
         st.success("Кеш је освежен!")
@@ -418,7 +564,9 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-# ----------------- GLAVNO ZAGLAVLJE -----------------
+# ============================================================
+# GLAVNO ZAGLAVLJE
+# ============================================================
 st.markdown("""
 <div class="main-header">
     <img src="https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/dijagrami/1614_GJ Crni vrh_2025-2034_strana_74_img_1227.png" style="height:70px;margin-bottom:8px;">
@@ -437,25 +585,29 @@ with st.expander("💡 Брза предложена питања (кликни�
         clicked_prompt = "Ко је директор Бироа и покажи његову слику?"
     if col2.button("👥 Ко су заменици?", use_container_width=True):
         clicked_prompt = "Ко су заменици директора у Бироу и прикажи њихове слике?"
-    if col3.button("🌲 Црни врх?", use_container_width=True):
-        clicked_prompt = "Постоји ли Црни врх у бази и шта пише о њему?"
+    if col3.button("🖨️ Шта имамо од опреме?", use_container_width=True):
+        clicked_prompt = "Које штампаче и тонере користимо у Бироу?"
     if col4.button("📜 Чланови 14 и 18?", use_container_width=True):
         clicked_prompt = "Наведи члан 14 и члан 18 Колективног уговора."
 
     if clicked_prompt:
         st.session_state.prompt_input = clicked_prompt
 
-# ----------------- PRIKAZ ISTORIJE PORUKA -----------------
+# ============================================================
+# PRIKAZ ISTORIJE PORUKA
+# ============================================================
 for msg in st.session_state.messages:
     avatar = "👤" if msg["role"] == "user" else "🌲"
     with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(msg["content"])
-        
+
         if "image_data" in msg and msg["image_data"]:
             for url, cap in msg["image_data"]:
                 st.image(url, width=300, caption=cap)
 
-# ----------------- OBRADA UNOSA KORISNIKA -----------------
+# ============================================================
+# OBRADA UNOSA KORISNIKA
+# ============================================================
 prompt = st.chat_input("Поставите питање...")
 
 if "prompt_input" in st.session_state and st.session_state.prompt_input:
@@ -469,7 +621,7 @@ if prompt:
     with st.chat_message("assistant", avatar="🌲"):
         with st.spinner("Претражујем базу и генеришем одговор..."):
             try:
-                kontekst, br_kandidata, ukupno_keširano, slike_podaci = dobij_hibridni_kontekst(prompt)
+                kontekst, br_kandidata, ukupno_keširano, slike_podaci, aktivan_filter, filter_primenjen = dobij_hibridni_kontekst(prompt)
 
                 system_instruction = (
                     "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
@@ -486,17 +638,16 @@ if prompt:
                 )
 
                 poruke_za_groq = [{"role": "system", "content": system_instruction}]
-                
-                # Zadržavamo poslednje 4 poruke za adekvatan kontekst i razumevanje potpitanja ("Daj detalje o tome")
+
                 skracena_istorija = st.session_state.messages[-2:]
                 for msg in skracena_istorija:
                     poruke_za_groq.append({"role": msg["role"], "content": msg["content"]})
-                
+
                 upit_sa_kontekstom = f"KONTEKST IZ BAZE:\n{kontekst}\n\nTrenutno korisničko pitanje: {prompt}"
                 poruke_za_groq.append({"role": "user", "content": upit_sa_kontekstom})
-                
+
                 odgovor = st.write_stream(strimuj_groq_odgovor(poruke_za_groq))
-                
+
                 for url, cap in slike_podaci:
                     st.image(url, width=300, caption=cap)
 
@@ -504,14 +655,20 @@ if prompt:
                     st.caption(f"Укупно одломака у кешу: **{ukupno_keširano}**")
                     st.caption(f"Рангираних кандидата: **{br_kandidata}**")
                     if slike_podaci:
-                         st.caption(f"Приказана визуелна референца: {len(slike_podaci)}")
+                        st.caption(f"Приказана визуелна референца: {len(slike_podaci)}")
+                    # NOVO: Prikaz aktivnog filtera
+                    if aktivan_filter:
+                        if filter_primenjen:
+                            st.caption(f"🎯 **Активан филтер:** `{aktivan_filter}`")
+                        else:
+                            st.caption(f"⚠️ **Детектована категорија** (nema dovoljno rezultata sa filterom): `{aktivan_filter}` — fallback na celu bazu")
                     st.text_area("Прочишћен текстуални контекст послат моделу:", value=kontekst, height=200)
 
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 st.session_state.messages.append({
-                    "role": "assistant", 
+                    "role": "assistant",
                     "content": odgovor,
-                    "image_data": slike_podaci 
+                    "image_data": slike_podaci
                 })
 
             except Exception as e:
