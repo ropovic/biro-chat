@@ -7,7 +7,7 @@ from fastembed import TextEmbedding
 
 # ----------------- KONFIGURACIJA STRANICE -----------------
 st.set_page_config(
-    page_title="Biro Chat Asistent",
+    page_title="Биро Чат Асистент",
     page_icon="🌲",
     layout="centered"
 )
@@ -66,7 +66,10 @@ STOP_RECI = {
     "ko", "je", "su", "sta", "pise", "bazi", "postoji", "navedi", "prikazi", "pokazi", 
     "slika", "slike", "sliku", "foto", "fotografij", "u", "i", "na", "sa", "za", "o", 
     "da", "li", "ima", "njegovu", "njihove", "njena", "mesto", "radno", "biro", "biroa",
-    "planiranje", "projektovanje", "pd", "srbijasume", "sumarstvu", "detalje", "detaljnije"
+    "planiranje", "projektovanje", "pd", "srbijasume", "sumarstvu", "detalje", "detaljnije",
+    "koji", "koja", "koje", "kog", "kojoj", "kojim", "svi", "sve", "svih", "kao", "ali",
+    "ili", "gde", "kada", "kako", "ovaj", "ova", "ovo", "taj", "ta", "to", "vec", "samo",
+    "jos", "vrlo", "neki", "neka", "neko", "nesto"
 }
 
 # ----------------- INICIJALIZACIJA KLIJENATA -----------------
@@ -391,47 +394,48 @@ def strimuj_groq_odgovor(poruke):
 # ----------------- BOČNI MENI -----------------
 with st.sidebar:
     st.image("https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/biro_logo.jpg", use_container_width=True)
-    st.title("🌲 Biro Chat")
-    st.markdown("**Digitalni asistent Biroa za planiranje**\n\n*PD Srbijašume*")
+    st.title("🌲 Биро Чат")
+    st.markdown("**Дигитални асистент Бироа за планирање**\n\n*ПД „Србијашуме”*")
     st.divider()
     
-    st.markdown("### 🛠️ Status sistema")
-    st.caption("🟢 **Vektorska baza:** Qdrant Cloud")
-    st.caption("🟢 **LLM:** Groq Llama (Auto-fallback)")
-    st.caption("🟢 **Token & Stemming:** Srpski Padeži v8")
+    st.markdown("### 🛠️ Статус система")
+    st.caption("🟢 **Векторска база:** Qdrant Cloud")
+    st.caption("🟢 **Језички модел:** Groq Llama (са резервним моделом)")
+    st.caption("🟢 **Обрада текста:** Српски падежи v8")
     
     st.divider()
     
-    if st.button("🔄 Osveži keš baze", use_container_width=True):
+    if st.button("🔄 Освежи кеш базе", use_container_width=True):
         st.cache_data.clear()
-        st.success("Keš je osvežen!")
+        st.success("Кеш је освежен!")
 
-    if st.button("🧹 Obriši razgovor", use_container_width=True):
+    if st.button("🧹 Обриши разговор", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
 # ----------------- GLAVNO ZAGLAVLJE -----------------
 st.markdown("""
 <div class="main-header">
-    <h1>🌲 Biro za planiranje</h1>
-    <p>PD Srbijašume — Digitalni asistent</p>
+    <img src="https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/dijagrami/1614_GJ Crni vrh_2025-2034_strana_74_img_1227.png" style="height:70px;margin-bottom:8px;">
+    <h1>🌲 Биро за планирање</h1>
+    <p>ПД „Србијашуме” — Дигитални асистент</p>
 </div>
 """, unsafe_allow_html=True)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-with st.expander("💡 Brza predložena pitanja (kliknite da postavite)", expanded=(len(st.session_state.messages) == 0)):
+with st.expander("💡 Брза предложена питања (кликните да поставите)", expanded=(len(st.session_state.messages) == 0)):
     col1, col2, col3, col4 = st.columns(4)
     clicked_prompt = None
-    if col1.button("👔 Ko je direktor?", use_container_width=True):
-        clicked_prompt = "Ko je direktor Biroa i pokaži njegovu sliku?"
-    if col2.button("👥 Ko su zamenici?", use_container_width=True):
-        clicked_prompt = "Ko su zamenici direktora u Birou i prikaži njihove slike?"
-    if col3.button("🌲 Crni vrh?", use_container_width=True):
-        clicked_prompt = "Postoji li Crni vrh u bazi i šta piše o njemu?"
-    if col4.button("📜 Članovi 14 i 18?", use_container_width=True):
-        clicked_prompt = "Navedi član 14 i član 18 Kolektivnog ugovora."
+    if col1.button("👔 Ко је директор?", use_container_width=True):
+        clicked_prompt = "Ко је директор Бироа и покажи његову слику?"
+    if col2.button("👥 Ко су заменици?", use_container_width=True):
+        clicked_prompt = "Ко су заменици директора у Бироу и прикажи њихове слике?"
+    if col3.button("🌲 Црни врх?", use_container_width=True):
+        clicked_prompt = "Постоји ли Црни врх у бази и шта пише о њему?"
+    if col4.button("📜 Чланови 14 и 18?", use_container_width=True):
+        clicked_prompt = "Наведи члан 14 и члан 18 Колективног уговора."
 
     if clicked_prompt:
         st.session_state.prompt_input = clicked_prompt
@@ -447,7 +451,7 @@ for msg in st.session_state.messages:
                 st.image(url, width=300, caption=cap)
 
 # ----------------- OBRADA UNOSA KORISNIKA -----------------
-prompt = st.chat_input("Postavite pitanje...")
+prompt = st.chat_input("Поставите питање...")
 
 if "prompt_input" in st.session_state and st.session_state.prompt_input:
     prompt = st.session_state.prompt_input
@@ -458,7 +462,7 @@ if prompt:
         st.markdown(prompt)
 
     with st.chat_message("assistant", avatar="🌲"):
-        with st.spinner("Pretražujem bazu i generišem odgovor..."):
+        with st.spinner("Претражујем базу и генеришем одговор..."):
             try:
                 kontekst, br_kandidata, ukupno_keširano, slike_podaci = dobij_hibridni_kontekst(prompt)
 
@@ -491,12 +495,12 @@ if prompt:
                 for url, cap in slike_podaci:
                     st.image(url, width=300, caption=cap)
 
-                with st.expander("🔍 Pregled metapodataka pretrage"):
-                    st.caption(f"Ukupno odlomaka u kešu: **{ukupno_keširano}**")
-                    st.caption(f"Rangiranih kandidata: **{br_kandidata}**")
+                with st.expander("🔍 Преглед метаподатака претраге"):
+                    st.caption(f"Укупно одломака у кешу: **{ukupno_keširano}**")
+                    st.caption(f"Рангираних кандидата: **{br_kandidata}**")
                     if slike_podaci:
-                         st.caption(f"Prikazana vizuelna referenca: {len(slike_podaci)}")
-                    st.text_area("Pročišćen tekstualni kontekst poslat modelu:", value=kontekst, height=200)
+                         st.caption(f"Приказана визуелна референца: {len(slike_podaci)}")
+                    st.text_area("Прочишћен текстуални контекст послат моделу:", value=kontekst, height=200)
 
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 st.session_state.messages.append({
@@ -506,4 +510,4 @@ if prompt:
                 })
 
             except Exception as e:
-                st.error(f"Došlo je do greške u komunikaciji: {e}")
+                st.error(f"Дошло је до грешке у комуникацији: {e}")
