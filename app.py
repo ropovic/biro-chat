@@ -403,7 +403,7 @@ def ucitaj_sve_tekstove():
 # ============================================================
 # PRIKAZ SLIKA
 # ============================================================
-def filtriraj_slike_za_prikaz(top_k_stavke, upit, aktivan_filter=None, max_slika=3):
+def filtriraj_slike_za_prikaz(top_k_stavke, upit, aktivan_filter=None, max_slika=6):
     """
     Bira koje slike/dijagrame da prikaže. Koristi KAT_SLIKA mapu kategorija
     → dozvoljeni tipovi slika da bi se izbacio "slučajni" vizuel iz drugog
@@ -464,16 +464,14 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000, min_rez
     je_direktor = ("direktor" in upit_ascii or "rukovodilac" in upit_ascii) and not je_zamenik
 
     # --- LINEarni SKEN ---
-    # Kad je filter aktivan, preskačemo odlomke čiji 'tip' nije u filter listi
-    # (ovo ubrzava i sužava pretragu, a fallback logika dole hvata slučaj
-    # kad filter bude previše restriktivan)
+    # Kad je filter aktivan, preskačemo odlomke čiji 'tip' NIJE u filter listi.
+    # ALI: zapise BEZ 'tip' polja NE preskačemo — mogu biti relevantni (samo
+    # nemamo metadata). Filter radi samo za poznate tipove, fallback logika
+    # dole pokriva ostalo.
     for item in svi_odlomci:
-        # NOVO: Hard filter na 'tip' ako je aktivan
         if aktivan_filter and item.get("tip") and item["tip"] not in aktivan_filter:
             continue
-        # Ako je filter aktivan a item NEMA 'tip', preskoči (osim ako fallback)
-        if aktivan_filter and not item.get("tip"):
-            continue
+        # BEZ TIPA: propusti (možda je relevantno, nemamo metadata)
 
         txt_a = item["tekst_ascii"]
         izv_a = item["izvor_ascii"]
@@ -709,7 +707,7 @@ if prompt:
                     "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
                     "Odgovaraj ISKLJUČIVO na osnovu dostavljenog KONTEKSTA.\n\n"
                     "STROGA PRAVILA ZA ODGOVARANJE:\n"
-                    "1. Daj jasan, sažet odgovor koji sadrži SVE relevantne činjenice iz konteksta. Izbegavaj nepotrebno ponavljanje i proširivanje — ne prepričavaj kontekst rečenicu po rečenicu, nego sintetiši ključne informacije. Za upit o osobi: ime, funkcija, dokument. Za upit o dokumentu: naslov, tema, ključni podaci. Za upit o opremi: model, namena, broj komada ako postoji.\n"
+                    "1. FOKUSIRAJ SE NA SPECIFIČAN POJAM IZ PITANJA. Ako korisnik pita 'Koji toneri se koriste za štampače?', fokusiraj se SAMO na tonere — ne ponavljaj listu štampača. Za pitanja o široj kategoriji ('Koji su štampači?') daj opšte informacije. Za pitanja o USKOM pojmu unutar kategorije, daj SAMO informacije o tom pojmu.\n"
                     "2. KORISNIK MOŽE TRAŽITI SLIKU — TI SE U ODGOVORU UOPŠTE NE BAVI PRIKAZOM SLIKA (aplikacija to sama radi). NIKAD ne pominji, ne komentariši i ne izvinjavaj se za (ne)mogućnost prikazivanja slika kao digitalni asistent — jednostavno opiši sadržaj kao da je slika već prikazana pored tvog odgovora.\n"
                     "3. Ako se tražena osoba ili podatak NE NALAZI u dostavljenom kontekstu, kratko kaži da podatak nije pronađen.\n"
                     "4. ZABRANJENO JE nuditi druge osobe iz konteksta kao zamenu.\n"
