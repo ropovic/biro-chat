@@ -505,7 +505,7 @@ def filtriraj_slike_za_prikaz(top_k_stavke, upit, aktivan_filter=None, max_slika
 #   3. Fallback bez filtera ako filtrirani rezultati daju premalo kandidata
 #   4. Meta-podaci o aktivnom filteru prikazani korisniku
 # ============================================================
-def dobij_hibridni_kontekst(upit, top_k_rezultata=10, max_karaktera=8000, min_rezultata_sa_filterom=3, use_reranker=True):
+def dobij_hibridni_kontekst(upit, top_k_rezultata=10, max_karaktera=8000, min_rezultata_sa_filterom=3, use_reranker=False):
     svi_odlomci = ucitaj_sve_tekstove()
     upit_ascii = ukloni_dijakritike(upit)
     norm_upit = sredi_tekst(upit)
@@ -633,8 +633,9 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=10, max_karaktera=8000, min_re
     # RANGIRANJE
     rangirani = sorted(candidates_map.values(), key=lambda x: x["score"], reverse=True)
 
-    # RE-RANKER (Stage 3) — uzimamo top 30 kandidata i rerankiramo ih
-    # cross-encoderom, zatim biramo top top_k_rezultata za LLM kontekst
+    # RE-RANKER (Stage 3) — opcioni, default OFF jer troši 1.1 GB RAM-a
+    # (Streamlit Cloud free ima 1 GB ukupno, pa bi reranker izazvao OOM)
+    # Za testiranje LOKALNO: postavi use_reranker=True u funkciji ispod
     if use_reranker and len(rangirani) > top_k_rezultata:
         # Pretvori u format za rerank_candidates
         rerank_input = []
