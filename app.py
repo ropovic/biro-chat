@@ -99,6 +99,54 @@ def embed_upit(tekst):
 
 
 # ============================================================
+# QDRANT HELPERS — zaobilaze problem sa indeksom
+# ============================================================
+def scroll_svi(tipovi=None, limit=1000):
+    """Skroluje SVE zapise, opciono filtrira po tipu U PYTHONU.
+    Qdrant FieldCondition ne radi bez indeksa, pa filtriramo lokalno."""
+    svi = []
+    offset = None
+    while True:
+        records, next_offset = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=500,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for r in records:
+            if not r.payload:
+                continue
+            if tipovi is not None:
+                tip = r.payload.get("tip", "")
+                if tip not in tipovi:
+                    continue
+            svi.append(r)
+        if next_offset is None or len(records) == 0:
+            break
+        offset = next_offset
+        if len(svi) >= limit:
+            break
+    return svi[:limit]
+
+
+def qdrant_query(query_vector, limit=20):
+    """Wrapper za query_points (novo) ili search (staro), zavisno od verzije."""
+    if hasattr(qdrant, "query_points"):
+        response = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_vector,
+            limit=limit,
+        )
+        return response.points
+    return qdrant.search(
+        collection_name=COLLECTION_NAME,
+        query_vector=query_vector,
+        limit=limit,
+    )
+
+
+# ============================================================
 # IMENA — Izdvajanje i blacklist
 # ============================================================
 # Organizacije, institucije, pozicije — NE SMEJU da prođu kao imena
@@ -180,30 +228,20 @@ def izvuci_imena_iz_teksta(tekst):
 
 def pronadji_osobu_po_imenu(ime_upita):
     """Traži specifičnu osobu po imenu. Vraća listu pogodaka sa slikama."""
-    # Normalizuj ime u latinicu
     ime_lower = sredi_upit(ime_upita).strip()
-    # Skroluj sve kadrovske/foto/biografija zapise
-    points, _ = qdrant.scroll(
-        collection_name=COLLECTION_NAME,
-        scroll_filter=models.Filter(should=[
-            models.FieldCondition(key="tip", match=models.MatchAny(any=[
-                "kadrovski", "zaposleni", "osoblje", "kadrovska_struktura",
-                "kadrovski_podaci", "fotografija_profil", "biografija",
-            ]))
-        ]),
-        with_payload=True,
-        with_vectors=False,
+    # Skroluj SVE i filtriraj po tipu u Pythonu (bez Qdrant indeksa)
+    points = scroll_svi(
+        tipovi={"kadrovski", "zaposleni", "osoblje", "kadrovska_struktura",
+                "kadrovski_podaci", "fotografija_profil", "biografija"},
         limit=1000,
     )
     pogodci = []
     for p in points:
         text_orig = p.payload.get("tekst", "") or ""
-        # Normalizuj u latinicu za pretragu
         text_norm = sredi_upit(text_orig)
         izvor = p.payload.get("naziv_dokumenta", "") or p.payload.get("file_name", "")
         url = (p.payload.get("Link", "") or p.payload.get("slika_url", "") or
                p.payload.get("image_url", "") or p.payload.get("slika", ""))
-        # Da li je ime u tekstu?
         if ime_lower in text_norm:
             imena = izvuci_imena_iz_teksta(text_orig)
             for ime in imena:
@@ -216,7 +254,6 @@ def pronadji_osobu_po_imenu(ime_upita):
                         "kontekst": text_orig[:300],
                     })
                     break
-    # Dedupe po imenu
     seen = set()
     uniq = []
     for p in pogodci:
@@ -229,16 +266,10 @@ def pronadji_osobu_po_imenu(ime_upita):
 
 def get_svi_zaposleni_sa_slikama():
     """Direktno iz baze: svi zaposleni + slike gde postoje."""
-    points, _ = qdrant.scroll(
-        collection_name=COLLECTION_NAME,
-        scroll_filter=models.Filter(should=[
-            models.FieldCondition(key="tip", match=models.MatchAny(any=[
-                "kadrovski", "zaposleni", "osoblje", "kadrovska_struktura",
-                "kadrovski_podaci", "fotografija_profil", "biografija",
-            ]))
-        ]),
-        with_payload=True,
-        with_vectors=False,
+    # Skroluj SVE i filtriraj po tipu u Pythonu
+    points = scroll_svi(
+        tipovi={"kadrovski", "zaposleni", "osoblje", "kadrovska_struktura",
+                "kadrovski_podaci", "fotografija_profil", "biografija"},
         limit=1000,
     )
     imenik = {}
@@ -248,7 +279,6 @@ def get_svi_zaposleni_sa_slikama():
         izvor = (payload.get("naziv_dokumenta", "") or payload.get("file_name", "") or "")
         url = (payload.get("Link", "") or payload.get("slika_url", "") or
                payload.get("image_url", "") or payload.get("slika", ""))
-        # Izvuci imena iz teksta
         imena = izvuci_imena_iz_teksta(text)
         for ime in imena:
             kljuc = ime.lower()
@@ -297,16 +327,10 @@ def detektuj_tip_upita(upit):
 def handle_direktor():
     """Direktno traži direktora u bazi, BEZ LLM-a.
     Ako nema eksplicitnog zapisa, traži sve osobe sa titulom 'dr'/'mr'."""
-    points, _ = qdrant.scroll(
-        collection_name=COLLECTION_NAME,
-        scroll_filter=models.Filter(should=[
-            models.FieldCondition(key="tip", match=models.MatchAny(any=[
-                "kadrovski", "zaposleni", "osoblje", "biografija",
-                "fotografija_profil", "kadrovska_struktura",
-            ]))
-        ]),
-        with_payload=True,
-        with_vectors=False,
+    # Skroluj SVE i filtriraj po tipu u Pythonu
+    points = scroll_svi(
+        tipovi={"kadrovski", "zaposleni", "osoblje", "biografija",
+                "fotografija_profil", "kadrovska_struktura"},
         limit=1000,
     )
 
@@ -397,31 +421,28 @@ def handle_osoba_po_imenu(upit):
 
 def handle_oprema(upit):
     """Direktno prikaži opremu, BEZ LLM-a za listanje."""
-    u = upit.lower()
-    if "toner" in u or "kertridž" in u:
-        tip_filter = ["toner", "oprema"]
+    u = sredi_upit(upit)
+    # Skroluj SVE i filtriraj po tipu u Pythonu
+    zeljeni_tipovi = []
+    if "toner" in u or "kertridz" in u or "kertridz" in u:
+        zeljeni_tipovi = ["toner", "oprema", "kancelarijska_oprema"]
     else:
-        tip_filter = ["oprema", "kancelarijska_oprema", "inventar", "stampac"]
-    points = qdrant.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=embed_upit(sredi_tekst(upit)),
-        query_filter=models.Filter(should=[
-            models.FieldCondition(key="tip", match=models.MatchAny(any=tip_filter))
-        ]),
-        limit=10,
-    )
+        zeljeni_tipovi = ["oprema", "kancelarijska_oprema", "inventar", "stampac"]
+    points = scroll_svi(tipovi=set(zeljeni_tipovi), limit=200)
     if not points:
         return "⚠️ Nema pronađene opreme po tom upitu.", []
-    # Prikaz liste bez LLM-a
     delovi = []
     for hit in points:
         text = hit.payload.get("tekst", "") or ""
         izvor = hit.payload.get("naziv_dokumenta", "") or ""
-        # Skrati
+        if "Ime Prezime" in text:
+            continue
         if len(text) > 400:
             text = text[:400] + "..."
         delovi.append(f"**[{izvor}]**\n{text}")
-    return "### 🖨️ Pronađena oprema:\n\n" + "\n\n---\n\n".join(delovi), []
+    if not delovi:
+        return "⚠️ Nema pronađene opreme po tom upitu.", []
+    return "### 🖨️ Pronađena oprema:\n\n" + "\n\n---\n\n".join(delovi[:10]), []
 
 
 def handle_standard(upit, istorija):
@@ -553,14 +574,10 @@ def standardni_rag(upit, top_k=8, max_karaktera=5000):
         if score > 0:
             candidates_map[key] = {"item": item, "score": score}
 
-    # Qdrant semantička pretraga
+    # Qdrant semantička pretraga (kompatibilno sa starim i novim API-jem)
     try:
         query_vector = embed_upit(norm_upit)
-        points = qdrant.search(
-            collection_name=COLLECTION_NAME,
-            query_vector=query_vector,
-            limit=20,
-        )
+        points = qdrant_query(query_vector, limit=20)
         for rank, hit in enumerate(points):
             if hit.payload:
                 raw_txt = hit.payload.get("tekst", "") or hit.payload.get("text", "")
@@ -624,18 +641,12 @@ def standardni_rag(upit, top_k=8, max_karaktera=5000):
                       "grafikon", "tabela", "shema", "sema", "skica", "crtez"]
     if any(kw in u_norm for kw in vizuel_ključne) or "prikaz" in u_norm or "pokaz" in u_norm:
         try:
-            dijagram_points = qdrant.scroll(
-                collection_name=COLLECTION_NAME,
-                scroll_filter=models.Filter(should=[
-                    models.FieldCondition(key="tip", match=models.MatchAny(any=[
-                        "dijagram", "mapa", "karta", "tabela", "grafikon", "vizuel"
-                    ]))
-                ]),
-                with_payload=True,
-                with_vectors=False,
+            # Koristimo scroll_svi sa filterom u Pythonu (bez Qdrant indeksa)
+            dijagram_points = scroll_svi(
+                tipovi={"dijagram", "mapa", "karta", "tabela", "grafikon", "vizuel"},
                 limit=20,
             )
-            for d in dijagram_points[0]:
+            for d in dijagram_points:
                 url = (d.payload.get("Link", "") or d.payload.get("slika_url", "") or
                        d.payload.get("image_url", "") or "")
                 if url and url.startswith("http") and url not in seen:
