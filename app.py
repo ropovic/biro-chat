@@ -259,6 +259,68 @@ def embed_upit(tekst):
     return list(embed_model.embed([tekst]))[0].tolist()
 
 # ============================================================
+# CROSS-ENCODER RE-RANKER (Stage 3)
+# ------------------------------------------------------------
+# Cross-encoder je model koji za svaki (query, document) par daje
+# precizniji relevance score nego vektor similarity. Koristimo ga
+# kao DRUGI STUPANJ pretrage:
+#   1. Initial retrieval (linear scan + Qdrant) → top 30 kandidata
+#   2. Re-ranker → top 10 najrelevantijih
+#   3. To ide u LLM kontekst
+#
+# Za srpski koristimo multilingual model: jina-reranker-v2-base-multilingual
+# (1.1 GB, dobar za srpski).
+#
+# NAPOMENA: Na Streamlit Cloud free tier (1 GB RAM) reranker će OOM-ovati.
+# Imamo fallback na originalni ranking ako reranker ne uspe da se učita.
+# ============================================================
+@st.cache_resource
+def get_reranker():
+    """Lazy load rerankera. Vraća None ako ne uspe."""
+    try:
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+        model = TextCrossEncoder(model_name="jinaai/jina-reranker-v2-base-multilingual")
+        return model
+    except Exception:
+        return None
+
+def rerank_candidates(query, candidates, top_n):
+    """
+    Re-rangira candidate koristeći cross-encoder. Vraća top_n najrelevantijih.
+    Ako reranker nije dostupan, vraća prvih top_n kandidata (fallback).
+    """
+    if not candidates:
+        return []
+    if len(candidates) <= top_n:
+        return candidates[:top_n]
+
+    reranker = get_reranker()
+    if reranker is None:
+        # Fallback ako se reranker nije učitao
+        return candidates[:top_n]
+
+    try:
+        # Pripremi parove (query, document_text)
+        texts = [c.get("tekst", "") for c in candidates]
+        pairs = [(query, t) for t in texts]
+        # Rerank — vraća iterable score-ova
+        scores = list(reranker.rerank(pairs))
+        # Poveži sa originalnim kandidatima i sortiraj
+        scored = list(zip(candidates, scores))
+        # Sortiraj po score-u opadajuće
+        def get_score(item):
+            s = item[1]
+            if hasattr(s, "score"):
+                return float(s.score)
+            if isinstance(s, (tuple, list)) and len(s) >= 2:
+                return float(s[1])
+            return 0.0
+        scored.sort(key=get_score, reverse=True)
+        return [c for c, _ in scored[:top_n]]
+    except Exception:
+        return candidates[:top_n]
+
+# ============================================================
 # DETEKCIJA KATEGORIJE IZ UPITA + QDRANT FILTER
 # ============================================================
 def je_eksplicitno_vizuelni_upit(upit):
@@ -403,7 +465,7 @@ def ucitaj_sve_tekstove():
 # ============================================================
 # PRIKAZ SLIKA
 # ============================================================
-def filtriraj_slike_za_prikaz(top_k_stavke, upit, aktivan_filter=None, max_slika=6):
+def filtriraj_slike_za_prikaz(top_k_stavke, upit, aktivan_filter=None, max_slika=10):
     """
     Bira koje slike/dijagrame da prikaže. Koristi KAT_SLIKA mapu kategorija
     → dozvoljeni tipovi slika da bi se izbacio "slučajni" vizuel iz drugog
@@ -443,7 +505,7 @@ def filtriraj_slike_za_prikaz(top_k_stavke, upit, aktivan_filter=None, max_slika
 #   3. Fallback bez filtera ako filtrirani rezultati daju premalo kandidata
 #   4. Meta-podaci o aktivnom filteru prikazani korisniku
 # ============================================================
-def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000, min_rezultata_sa_filterom=3):
+def dobij_hibridni_kontekst(upit, top_k_rezultata=10, max_karaktera=8000, min_rezultata_sa_filterom=3, use_reranker=True):
     svi_odlomci = ucitaj_sve_tekstove()
     upit_ascii = ukloni_dijakritike(upit)
     norm_upit = sredi_tekst(upit)
@@ -570,7 +632,22 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000, min_rez
 
     # RANGIRANJE
     rangirani = sorted(candidates_map.values(), key=lambda x: x["score"], reverse=True)
-    top_k = [entry["item"] for entry in rangirani[:top_k_rezultata]]
+
+    # RE-RANKER (Stage 3) — uzimamo top 30 kandidata i rerankiramo ih
+    # cross-encoderom, zatim biramo top top_k_rezultata za LLM kontekst
+    if use_reranker and len(rangirani) > top_k_rezultata:
+        # Pretvori u format za rerank_candidates
+        rerank_input = []
+        for entry in rangirani[:30]:  # rerankujemo max 30
+            rerank_input.append({
+                "tekst": entry["item"].get("tekst", ""),
+                "item": entry["item"],
+                "score": entry["score"],
+            })
+        reranked = rerank_candidates(norm_upit, rerank_input, top_k_rezultata)
+        top_k = [r["item"] for r in reranked]
+    else:
+        top_k = [entry["item"] for entry in rangirani[:top_k_rezultata]]
 
     # SLIKE — poštuju aktivni filter i eksplicitnost namere korisnika
     slike_za_prikaz = filtriraj_slike_za_prikaz(top_k, upit, aktivan_filter=tip_vrednosti)
@@ -733,7 +810,7 @@ if prompt:
                     "6. SVAKO NOVO PITANJE dobija NOVI, SVEŽI KONTEKST iz baze (nalazi se uz 'Trenutno korisničko pitanje' ispod). UVEK odgovaraj na osnovu TOG novog konteksta — nikad ne prenosi informacije iz prethodnih odgovora u ovom razgovoru na novo, drugačije pitanje. Prethodne poruke koristi SAMO za razumevanje kratkih potpitanja tipa 'daj više detalja' ili 'a šta piše o tome' — u svim ostalim slučajevima ignorišti prethodnu temu.\n"
                     "7. TI NEMAŠ UVID U SAMU SLIKU/FOTOGRAFIJU, samo u tekstualni opis iz baze. NIKAD ne izmišljaj i ne pretpostavljaj kako slika izgleda (boje, izraz lica, odeća, kompozicija, 'verovatno prikazuje...') — prenesi SAMO činjenice koje stvarno piše u tekstu konteksta (ime, funkcija, naslov dokumenta), ništa vizuelno mimo toga.\n"
                     "8. AKO KORISNIK TRAŽI DIJAGRAM/SLIKU/ŠEMU, a u kontekstu NE POSTOJI vizuelni zapis sa odgovarajućim 'tip' poljem, eksplicitno reci da traženi vizuel NIJE pronađen. NIKAD nemoj pominjati druge dijagrame/slike/fotografije iz konteksta kao zamenu (čak i ako postoje). Aplikacija sama upravlja prikazom slika — tvoj posao je SAMO da preneseš šta STVARNO piše u kontekstu za dati upit.\n"
-                    "9. KAD KORISNIK PITA O ZAPOSLENIMA U BIROU: Tvoj odgovor MORA biti lista KONKRETNIH OSOBA sa IMENIMA i FUNKCIJAMA. Ti podaci MORAJU biti izričito prisutni u kontekstu kao 'zaposleni u Birou'. Ako kontekst ne sadrži eksplicitnu listu zaposlenih, reci: 'Nemam eksplicitnu listu zaposlenih u Birou, ali imam <N> fotografija osoba iz baze.' NIKAD nemoj pominjati autore priručnika, naučne radove, autore knjiga, ili osobe koje se pominju u kontekstu ali NISU eksplicitno zaposlene u Birou. Ako kontekst sadrži statističke podatke o zaposlenosti (po opštinama, sektorima, godinama) — IGNORIŠI ih potpuno, to NIJE odgovor na pitanje o ljudima u Birou.\n"
+                    "9. KAD KORISNIK PITA O ZAPOSLENIMA U BIROU: Tvoj odgovor MORA biti lista KONKRETNIH OSOBA sa IMENIMA i FUNKCIJAMA. Ti podaci MORAJU biti izričito prisutni u kontekstu kao 'zaposleni u Birou'. Ako kontekst sadrži zapise sa fotografijama osoba (sa imenima), NAVEDI SVA IMENA iz tih zapisa — ne samo jedno. NIKAD nemoj pominjati autore priručnika, naučne radove, autore knjiga, ili osobe koje se pominju u kontekstu ali NISU eksplicitno zaposlene u Birou. Ako kontekst sadrži statističke podatke o zaposlenosti (po opštinama, sektorima, godinama) — IGNORIŠI ih potpuno, to NIJE odgovor na pitanje o ljudima u Birou.\n"
                     "Odgovaraj isključivo na srpskom jeziku."
                 )
 
