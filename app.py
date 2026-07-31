@@ -503,7 +503,7 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000, min_rez
         # dobijaju isti score kao kadrovski zapisi. Sa boostom, pravi tip uvek
         # pobeduje.
         if aktivan_filter and item.get("tip") and item["tip"] in aktivan_filter:
-            score += 100000.0
+            score += 500000.0
 
         if score > 0:
             candidates_map[key] = {"item": item, "score": score}
@@ -733,7 +733,7 @@ if prompt:
                     "6. SVAKO NOVO PITANJE dobija NOVI, SVEŽI KONTEKST iz baze (nalazi se uz 'Trenutno korisničko pitanje' ispod). UVEK odgovaraj na osnovu TOG novog konteksta — nikad ne prenosi informacije iz prethodnih odgovora u ovom razgovoru na novo, drugačije pitanje. Prethodne poruke koristi SAMO za razumevanje kratkih potpitanja tipa 'daj više detalja' ili 'a šta piše o tome' — u svim ostalim slučajevima ignorišti prethodnu temu.\n"
                     "7. TI NEMAŠ UVID U SAMU SLIKU/FOTOGRAFIJU, samo u tekstualni opis iz baze. NIKAD ne izmišljaj i ne pretpostavljaj kako slika izgleda (boje, izraz lica, odeća, kompozicija, 'verovatno prikazuje...') — prenesi SAMO činjenice koje stvarno piše u tekstu konteksta (ime, funkcija, naslov dokumenta), ništa vizuelno mimo toga.\n"
                     "8. AKO KORISNIK TRAŽI DIJAGRAM/SLIKU/ŠEMU, a u kontekstu NE POSTOJI vizuelni zapis sa odgovarajućim 'tip' poljem, eksplicitno reci da traženi vizuel NIJE pronađen. NIKAD nemoj pominjati druge dijagrame/slike/fotografije iz konteksta kao zamenu (čak i ako postoje). Aplikacija sama upravlja prikazom slika — tvoj posao je SAMO da preneseš šta STVARNO piše u kontekstu za dati upit.\n"
-                    "9. KAD KORISNIK PITA O LJUDIMA/ZAPOSLENIMA: Fokusiraj se ISKLJUČIVO na konkretne osobe (imena, funkcije, odeljenja) koje rade u Birou. IGNORIŠI statističke podatke o broju zaposlenih po opštinama, sektorima ili godinama — to NIJE odgovor na pitanje o ljudima. Statistika je u OSNOVA dokumentima i tamo pripada.\n"
+                    "9. KAD KORISNIK PITA O ZAPOSLENIMA U BIROU: Tvoj odgovor MORA biti lista KONKRETNIH OSOBA sa IMENIMA i FUNKCIJAMA. Ti podaci MORAJU biti izričito prisutni u kontekstu kao 'zaposleni u Birou'. Ako kontekst ne sadrži eksplicitnu listu zaposlenih, reci: 'Nemam eksplicitnu listu zaposlenih u Birou, ali imam <N> fotografija osoba iz baze.' NIKAD nemoj pominjati autore priručnika, naučne radove, autore knjiga, ili osobe koje se pominju u kontekstu ali NISU eksplicitno zaposlene u Birou. Ako kontekst sadrži statističke podatke o zaposlenosti (po opštinama, sektorima, godinama) — IGNORIŠI ih potpuno, to NIJE odgovor na pitanje o ljudima u Birou.\n"
                     "Odgovaraj isključivo na srpskom jeziku."
                 )
 
