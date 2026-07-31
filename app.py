@@ -465,9 +465,10 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000, min_rez
 
     # --- LINEarni SKEN ---
     # Kad je filter aktivan, preskačemo odlomke čiji 'tip' NIJE u filter listi.
-    # ALI: zapise BEZ 'tip' polja NE preskačemo — mogu biti relevantni (samo
-    # nemamo metadata). Filter radi samo za poznate tipove, fallback logika
-    # dole pokriva ostalo.
+    # Zapisi BEZ 'tip' polja se NE preskaču (mogu biti relevantni), ali
+    # dobijaju MANJI SCORE od zapisa sa matching tipom — tako da tip-kategorizovani
+    # zapisi (npr. fotografije zaposlenih za kadrovski filter) uvek
+    # rangiraju iznad nekategorizovanih (koji mogu biti nepovezani).
     for item in svi_odlomci:
         if aktivan_filter and item.get("tip") and item["tip"] not in aktivan_filter:
             continue
@@ -496,6 +497,13 @@ def dobij_hibridni_kontekst(upit, top_k_rezultata=6, max_karaktera=6000, min_rez
             ukupno = tekst_pogodaka * 5 + izvor_pogodaka
             if ukupno > 0:
                 score += ukupno * 10000.0
+
+        # JAK BOOST za matching tip kad je filter aktivan — ovo rešava haos
+        # kod upita tipa "zaposleni" gde OSNOVA chunkovi (no tip, sa statistikama)
+        # dobijaju isti score kao kadrovski zapisi. Sa boostom, pravi tip uvek
+        # pobeduje.
+        if aktivan_filter and item.get("tip") and item["tip"] in aktivan_filter:
+            score += 100000.0
 
         if score > 0:
             candidates_map[key] = {"item": item, "score": score}
@@ -623,8 +631,18 @@ def strimuj_groq_odgovor(poruke):
 # ============================================================
 with st.sidebar:
     st.image("https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/srbijasume_logo.jpg", use_container_width=True)
-    st.title("🌲 Биро Чат")
-    st.markdown("**Дигитални асистент Бироа за планирање**\n\n*ПД „Србијашуме”*")
+    st.markdown(
+        "<h1 style='text-align: center; color: #1b4332; margin-top: 8px;'>🌲 Биро асистент</h1>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<p style='text-align: center; color: #1b4332;'><strong>Дигитални асистент Бироа за планирање</strong></p>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<p style='text-align: center; color: #52796f; font-style: italic;'>ПД „Србијашуме”</p>",
+        unsafe_allow_html=True,
+    )
     st.divider()
 
     st.markdown("### 🛠️ Статус система")
@@ -715,6 +733,7 @@ if prompt:
                     "6. SVAKO NOVO PITANJE dobija NOVI, SVEŽI KONTEKST iz baze (nalazi se uz 'Trenutno korisničko pitanje' ispod). UVEK odgovaraj na osnovu TOG novog konteksta — nikad ne prenosi informacije iz prethodnih odgovora u ovom razgovoru na novo, drugačije pitanje. Prethodne poruke koristi SAMO za razumevanje kratkih potpitanja tipa 'daj više detalja' ili 'a šta piše o tome' — u svim ostalim slučajevima ignorišti prethodnu temu.\n"
                     "7. TI NEMAŠ UVID U SAMU SLIKU/FOTOGRAFIJU, samo u tekstualni opis iz baze. NIKAD ne izmišljaj i ne pretpostavljaj kako slika izgleda (boje, izraz lica, odeća, kompozicija, 'verovatno prikazuje...') — prenesi SAMO činjenice koje stvarno piše u tekstu konteksta (ime, funkcija, naslov dokumenta), ništa vizuelno mimo toga.\n"
                     "8. AKO KORISNIK TRAŽI DIJAGRAM/SLIKU/ŠEMU, a u kontekstu NE POSTOJI vizuelni zapis sa odgovarajućim 'tip' poljem, eksplicitno reci da traženi vizuel NIJE pronađen. NIKAD nemoj pominjati druge dijagrame/slike/fotografije iz konteksta kao zamenu (čak i ako postoje). Aplikacija sama upravlja prikazom slika — tvoj posao je SAMO da preneseš šta STVARNO piše u kontekstu za dati upit.\n"
+                    "9. KAD KORISNIK PITA O LJUDIMA/ZAPOSLENIMA: Fokusiraj se ISKLJUČIVO na konkretne osobe (imena, funkcije, odeljenja) koje rade u Birou. IGNORIŠI statističke podatke o broju zaposlenih po opštinama, sektorima ili godinama — to NIJE odgovor na pitanje o ljudima. Statistika je u OSNOVA dokumentima i tamo pripada.\n"
                     "Odgovaraj isključivo na srpskom jeziku."
                 )
 
