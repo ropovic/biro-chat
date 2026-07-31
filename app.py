@@ -42,14 +42,15 @@ SYSTEM_PROMPT = (
     "STROGA PRAVILA ZA ODGOVARANJE:\n"
     "1. FOKUSIRAJ SE NA SPECIFIČAN POJAM IZ PITANJA. Ako korisnik pita 'Koji toneri se koriste za štampače?', fokusiraj se SAMO na tonere — ne ponavljaj listu štampača.\n"
     "2. KORISNIK MOŽE TRAŽITI SLIKU — aplikacija to sama radi.\n"
-    "3. Ako se tražena osoba ili podatak NE NALAZI u kontekstu, kratko kaži da podatak nije pronađen.\n"
-    "4. ZABRANJENO JE nuditi druge osobe iz konteksta kao zamenu.\n"
+    "3. Ako se tražena osoba ili podatak NE NALAZI u kontekstu, kratko kaži da podatak nije pronađen. NEMOJ IZVOĐITI ZAKLJUČKE niti pretpostavljati na osnovu sličnosti.\n"
+    "4. ZABRANJENO JE nuditi druge osobe iz konteksta kao zamenu. Ako kontekst ne pominje tačno traženu osobu, odgovori 'nije pronađeno'.\n"
     "5. STROGO JE ZABRANJENO ispisivanje URL linkova ili slika u Markdown formatu u tvom tekstualnom odgovoru — slike prikazuje aplikacija automatski.\n"
     "6. SVAKO NOVO PITANJE dobija NOVI KONTEKST — ne prenosi info iz prethodnih odgovora osim ako korisnik eksplicitno traži 'daj detalje o tome'.\n"
     "7. TI NEMAŠ UVID U SLIKU — samo u tekstualni opis. ZABRANJENO je opisivati boje ili detalje sa slike.\n"
     "8. AKO KORISNIK TRAŽI DIJAGRAM, a nema ga u kontekstu, eksplicitno reci da nije pronađen.\n"
-    "9. KAD KORISNIK PITA O ZAPOSLENIMA: Sve osobe čija se IMENA pojavljuju u kontekstu smatraju se zaposlenima. NAVEDI SVA IMENA. Funkcije navedi SAMO ako su eksplicitno navedene u kontekstu. IGNORIŠI statističke podatke (procenat, broj zaposlenih po kategorijama, plate).\n"
+    "9. KAD KORISNIK PITA O ZAPOSLENIMA: Navedi SAMO osobe čija se IMENA pojavljuju u kontekstu. NE IZVOĐI zaključke. Ako kontekst sadrži opise organizacione strukture (odseci, službe, pozicije), to NISU imena zaposlenih. Funkcije navedi SAMO ako su eksplicitno navedene u kontekstu. IGNORIŠI statističke podatke (procenat, broj zaposlenih po kategorijama, plate).\n"
     "10. AKO KONTEKST SADRŽI OCR-ED TEKST: INTERPRETIRAJ ga sažeto, daj suštinu — ne kopiraj sirovi OCR.\n"
+    "11. ZABRANJENO JE nagađati. Ako kontekst daje samo nepotpune informacije, reci šta JE pronađeno i šta NIJE.\n"
     "Odgovaraj isključivo na srpskom jeziku."
 )
 
@@ -203,6 +204,10 @@ DIJAGRAM_KLJUČNE_REČI = {
 }
 
 
+# === UKLONJENO: specificni_dijagram_tip je pravio vise stete nego koristi ===
+# (filtrirao je slike po izvoru fajla, ali izvor nema semanticke kljucne reci)
+
+
 def je_eksplicitno_vizuelni_upit(upit):
     upit_lower = (upit or "").lower()
     return any(r in upit_lower for r in [
@@ -268,12 +273,7 @@ def dozvoljeni_tipovi_za_filter(aktivan_filter, eksplicitno_vizuel=False):
 
 def specificni_dijagram_tip(upit):
     """Detektuje specifičan tip dijagrama po ključnoj reči u upitu."""
-    upit_lower = upit.lower()
-    for kljucna_rec, tipovi in DIJAGRAM_KLJUČNE_REČI.items():
-        if kljucna_rec in upit_lower:
-            # Vrati listu mogućih tipova
-            return tipovi
-    return None
+    return None  # Disabled — vidi gore
 
 
 # ============================================================
@@ -283,15 +283,14 @@ def izvuci_imena_iz_teksta(tekst):
     """Izvlači moguća imena iz teksta."""
     if not tekst:
         return []
-    # Normalizuj prvo
     norm = tekst
-    # Srpska slova: tražimo uzorak "VelikoSlovo+ maloSlova"
-    # Dozvoli č, ć, š, ž, đ
+    # Pattern: 2-3 kapitalizovane reči
     pattern = r'\b([A-ZČĆŠĐŽ][a-zčćšđž]{2,}(?:\s+[A-ZČĆŠĐŽ][a-zčćšđž]{2,}){1,2})\b'
     matches = re.findall(pattern, norm)
 
-    # Filtriranje — izbaci lažne pogotke
+    # Pojačana blacklist — hvata i organizacione termine
     blacklist = {
+        # Organizacije / institucije
         "BiZa Planiranje", "Biro Za", "Srbija Šume", "Srbijasume", "Sumarstvo Srbije",
         "Šumarski Fakultet", "Beograd Sumarstvo", "Univerzitet U", "Ministarstvo Poljoprivrede",
         "Republika Srbija", "Grad Beograd", "Opstina Beograd", "Uprava Za", "Direkcija Za",
@@ -300,6 +299,17 @@ def izvuci_imena_iz_teksta(tekst):
         "Biro Za Planiranje", "Preduzece Za", "Sume Srbije", "Javno Preduzece",
         "Sumsko Privredna", "Osnova Gazdovanja", "Gazdinska Jedinica", "Gospodarska Jedinica",
         "Etat Sume", "Drvna Masa", "Krupno Drvo", "Sitno Drvo", "Celuloza I",
+        # Organizacione jedinice (ovo je falilo!)
+        "Šumsko Gazdinsko", "Šumskog Gazdinskog", "Upravno Odjeljenje", "Upravnog Odjeljenja",
+        "Šef Šumskog", "Šef Upravnog", "Šumari Inženjeri", "Inženjeri Šumarstva",
+        "Tehničari Šumarstva", "Tehnicari Šumarstva", "Šumski Radnici", "Šumskih Radnika",
+        "Šumski Tehničar", "Šumski Inženjer", "Inženjer Šumarstva", "Tehničar Šumarstva",
+        "Pomoćnik Direktora", "Pomoćnik Rukovodioca", "Rukovodilac Biroa",
+        "Sekretar Biroa", "Administrator Biroa", "Voditelj Poslova",
+        "Odjeljenje Za", "Sluzba Za", "Odsjek Za", "Sektor Za", "Referent Za",
+        "Šef Službe", "Šef Odsjeka", "Šef Sektora", "Rukovodilac Sektora",
+        "Šumsko Privredno", "Šumsko Gospodarsko", "Privredno Društvo", "Drustvo Za",
+        "Ljudski Resursi", "Kadrovska Služba", "Pravna Služba", "Finansijska Služba",
     }
     titles = {"dr", "mr", "prof", "doc", "ing", "inž", "dipl"}
 
@@ -307,15 +317,25 @@ def izvuci_imena_iz_teksta(tekst):
     for m in matches:
         if m in blacklist:
             continue
+        # Filtriraj ako SADRŽI bilo koji od ključnih termina
         if any(b in m for b in ["Sumarstvo", "Beograd", "Srbija", "Sume", "Biro", "Fakultet",
                                  "Univerzitet", "Ministarstvo", "Pravilnik", "Ugovor", "Uredba",
-                                 "Zakon", "Praviln"]):
+                                 "Zakon", "Praviln", "Odjeljenje", "Odjeljenja", "Služba",
+                                 "Odsjek", "Sektor", "Društvo", "Preduzece", "Resursi",
+                                 "Uprava", "Upravno", "Gazdinsk", "Gazdinska", "Privred",
+                                 "Radnik", "Radnika", "Tehničar", "Tehnicar", "Inženjer",
+                                 "Inzenjer", "Šumari", "Sumari"]):
             continue
         # Očisti od titula
         reci = m.split()
         ciste = [r for r in reci if r.lower().rstrip(".") not in titles]
         if ciste and len(ciste) >= 2:
-            rezultat.append(" ".join(ciste))
+            # Proveri da li su SVE reči lično ime (sva počinju velikim slovom)
+            if all(r[0].isupper() for r in ciste if r[0].isalpha()):
+                # Proveri da nema "Ime Prezime" placeholder
+                if "Ime" in ciste and "Prezime" in ciste:
+                    continue
+                rezultat.append(" ".join(ciste))
     return rezultat
 
 
@@ -426,19 +446,15 @@ def ucitaj_sve_tekstove():
     return sve_tacke
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=600)  # 10 min — da se izbegne prespor reload
 def get_tekstovi():
     return ucitaj_sve_tekstove()
 
 
 def filtriraj_slike_za_prikaz(top_k_stavke, upit, aktivan_filter=None, max_slika=10):
+    """Vraća slike koje treba prikazati uz odgovor."""
     eksplicitno_vizuel = je_eksplicitno_vizuelni_upit(upit)
     dozvoljeni_tipovi = dozvoljeni_tipovi_za_filter(aktivan_filter, eksplicitno_vizuel)
-
-    # Ako je specifičan dijagram (npr. "ruža vetrova"), filtriraj po izvoru
-    specificni_tip = specificni_dijagram_tip(upit)
-    if specificni_tip:
-        dozvoljeni_tipovi = dozvoljeni_tipovi & {"dijagram", "mapa", "karta", "grafikon", "tabela"}
 
     prikazi_slike = []
     vidjene = set()
@@ -450,12 +466,6 @@ def filtriraj_slike_za_prikaz(top_k_stavke, upit, aktivan_filter=None, max_slika
         if not url or not url.startswith("http") or url in vidjene:
             continue
 
-        # Specifični filter za dijagram
-        if specificni_tip:
-            izvor_a = item.get("izvor_ascii", "").lower()
-            if not any(kw in izvor_a for kw in specificni_tip):
-                continue
-
         oznaka = "Fotografija" if tip == "fotografija_profil" else "Dijagram/mapa"
         prikazi_slike.append((url, f"{oznaka}. Izvor: {item['izvor']}"))
         vidjene.add(url)
@@ -465,51 +475,12 @@ def filtriraj_slike_za_prikaz(top_k_stavke, upit, aktivan_filter=None, max_slika
 
 
 # ============================================================
-# RE-RANKER (Stage 2)
+# RE-RANKER (Stage 2) — DISABLED za Streamlit Cloud
 # ============================================================
-_reranker = None
-
-
-@st.cache_resource
-def get_reranker():
-    global _reranker
-    if not USE_RERANKER:
-        return None
-    try:
-        from fastembed.rerank.cross_encoder import TextCrossEncoder
-        # Na Streamlit Cloud (1 GB) ovo može OOM-ovati
-        # Pokreni lokalno sa $env:USE_RERANKER="true"
-        _reranker = TextCrossEncoder(model_name="jinaai/jina-reranker-v2-base-multilingual")
-        return _reranker
-    except Exception as e:
-        st.warning(f"Reranker load failed: {e}. Koristim linearni score.")
-        return None
-
-
-def rerank_candidates(query, candidates, top_n):
-    if not candidates or len(candidates) <= top_n:
-        return candidates[:top_n] if candidates else []
-    reranker = get_reranker()
-    if reranker is None:
-        return candidates[:top_n]
-    try:
-        texts = [c.get("tekst", "") for c in candidates]
-        pairs = [(query, t) for t in texts]
-        scores = list(reranker.rerank(pairs))
-        scored = list(zip(candidates, scores))
-
-        def get_score(item):
-            s = item[1]
-            if hasattr(s, "score"):
-                return float(s.score)
-            if isinstance(s, (tuple, list)) and len(s) >= 2:
-                return float(s[1])
-            return 0.0
-
-        scored.sort(key=get_score, reverse=True)
-        return [c for c, _ in scored[:top_n]]
-    except Exception:
-        return candidates[:top_n]
+# Reranker kod je UKLONJEN. USE_RERANKER se čuva kao konstanta
+# radi dokumentacije, ali se nigde ne poziva. Ako kasnije bude
+# trebalo lokalno testiranje sa rerankerom, vrati import i logiku.
+USE_RERANKER = False  # hardkodovano, ne diraj na Cloud-u
 
 
 # ============================================================
@@ -600,17 +571,8 @@ def dobij_kontekst_i_slike(upit, top_k_rezultata=10, max_karaktera=8000):
 
     rangirani = sorted(candidates_map.values(), key=lambda x: x["score"], reverse=True)
 
-    # Re-ranker
-    if USE_RERANKER and len(rangirani) > top_k_rezultata:
-        rerank_input = [{
-            "tekst": e["item"].get("tekst", ""),
-            "item": e["item"],
-            "score": e["score"],
-        } for e in rangirani[:30]]
-        reranked = rerank_candidates(norm_upit, rerank_input, top_k_rezultata)
-        top_k = [r["item"] for r in reranked]
-    else:
-        top_k = [e["item"] for e in rangirani[:top_k_rezultata]]
+    # Bez rerankera (USE_RERANKER=False za Cloud)
+    top_k = [e["item"] for e in rangirani[:top_k_rezultata]]
 
     # Kontekst za LLM
     MAX_PO_ODLOMKU = 900
@@ -707,8 +669,17 @@ with st.sidebar:
     st.markdown("### 🌲 Биро асистент")
     st.caption(f"Kolekcija: `{COLLECTION_NAME}`")
     st.caption(f"Model: {EMBEDDING_MODEL.split('/')[-1]}")
-    st.caption(f"Reranker: {'✅ ON' if USE_RERANKER else '❌ OFF (1 GB limit)'}")
-    st.caption(f"Baza: {get_tekstovi().__len__() if get_tekstovi() else 0} zapisa")
+    st.caption(f"Reranker: ❌ OFF (1 GB limit)")
+    st.markdown("---")
+    st.markdown("**Brze akcije:**")
+    if st.button("🧹 Obriši razgovor", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+    if st.button("🔄 Osveži bazu (clear cache)", use_container_width=True):
+        get_tekstovi.clear()
+        st.cache_data.clear()
+        st.success("✅ Keš obrisan.")
+        st.rerun()
     st.markdown("---")
     st.markdown("**Legenda:**")
     st.markdown("👤 = osoba  \n🖨️ = oprema  \n📜 = pravni  \n🌲 = projektna  \n🌀 = dijagram")
