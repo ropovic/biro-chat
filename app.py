@@ -76,7 +76,7 @@ def sredi_tekst(t):
     t = str(t).replace('Љ', 'Lj').replace('љ', 'lj').replace('Њ', 'Nj').replace('њ', 'nj')
     zamene = {'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ж':'ž','з':'z','и':'i',
               'ј':'j','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s',
-              'т':'t','у':'u','ф':'f','х':'h','ц':'c','ч':'č','ш':'š'}
+              'т':'t','у':'u','ф':'f','х':'h','ц':'c','ч':'č','ш':'š','ć':'ć','đ':'đ'}
     return "".join([zamene.get(c, c) for c in t])
 
 
@@ -85,6 +85,11 @@ def ukloni_dijakritike(t):
         return ""
     zamene = {'č':'c','ć':'c','š':'s','ž':'z','đ':'d'}
     return "".join([zamene.get(c, c) for c in sredi_tekst(t).lower()])
+
+
+def sredi_upit(t):
+    """Normalizuje upit: ćirilica u latinicu, sve u lowercase."""
+    return ukloni_dijakritike(sredi_tekst(t or "").lower())
 
 
 def embed_upit(tekst):
@@ -121,13 +126,15 @@ IMENA_BLACKLIST = {
 }
 
 # Reči koje NISU imena (pozicije, opisi)
+# NAPOMENA: "Direktor" je UKLONJEN jer je izbacivao imena u kontekstu
+# gde se pominje "direktor Marko Petrović" — to je ime, samo sa titulom
 NIJE_IME_KLJUCNE = [
     "Sumarstvo", "Beograd", "Srbija", "Sume", "Biro", "Fakultet", "Univerzitet",
     "Ministarstvo", "Pravilnik", "Ugovor", "Uredba", "Zakon", "Praviln",
-    "Odjeljenje", "Odjeljenja", "Služba", "Odsjek", "Sektor", "Društvo", "Preduzece",
+    "Odjeljenje", "Odjeljenja", "Sluzba", "Služba", "Odsjek", "Sektor", "Društvo", "Preduzece",
     "Resursi", "Uprava", "Upravno", "Gazdinsk", "Gazdinska", "Privred", "Radnik",
     "Radnika", "Tehničar", "Tehnicar", "Inženjer", "Inzenjer", "Šumari", "Sumari",
-    "Šumsko", "Sumsko", "Rukovodilac", "Direktor", "Pomoćnik", "Pomoćnik",
+    "Šumsko", "Sumsko", "Rukovodilac", "Pomoćnik", "Pomoćnik",
     "Šef", "Sekretar", "Administrator", "Voditelj", "Referent", "Službenik",
     "Odsek", "Odseka", "Centar", "Centru", "Centra",
 ]
@@ -173,7 +180,8 @@ def izvuci_imena_iz_teksta(tekst):
 
 def pronadji_osobu_po_imenu(ime_upita):
     """Traži specifičnu osobu po imenu. Vraća listu pogodaka sa slikama."""
-    ime_lower = ime_upita.lower().strip()
+    # Normalizuj ime u latinicu
+    ime_lower = sredi_upit(ime_upita).strip()
     # Skroluj sve kadrovske/foto/biografija zapise
     points, _ = qdrant.scroll(
         collection_name=COLLECTION_NAME,
@@ -189,29 +197,32 @@ def pronadji_osobu_po_imenu(ime_upita):
     )
     pogodci = []
     for p in points:
-        text = (p.payload.get("tekst", "") or "").lower()
+        text_orig = p.payload.get("tekst", "") or ""
+        # Normalizuj u latinicu za pretragu
+        text_norm = sredi_upit(text_orig)
         izvor = p.payload.get("naziv_dokumenta", "") or p.payload.get("file_name", "")
         url = (p.payload.get("Link", "") or p.payload.get("slika_url", "") or
                p.payload.get("image_url", "") or p.payload.get("slika", ""))
         # Da li je ime u tekstu?
-        if ime_lower in text:
-            # Izvuci originalno ime (sa velikim slovima)
-            imena = izvuci_imena_iz_teksta(p.payload.get("tekst", ""))
+        if ime_lower in text_norm:
+            imena = izvuci_imena_iz_teksta(text_orig)
             for ime in imena:
-                if ime.lower() == ime_lower or ime.lower().split()[-1] == ime_lower.split()[-1]:
+                ime_norm = sredi_upit(ime)
+                if ime_norm == ime_lower or ime_norm.split()[-1] == ime_lower.split()[-1]:
                     pogodci.append({
                         "ime": ime,
                         "izvor": izvor,
                         "url": url,
-                        "kontekst": (p.payload.get("tekst", "") or "")[:300],
+                        "kontekst": text_orig[:300],
                     })
                     break
     # Dedupe po imenu
     seen = set()
     uniq = []
     for p in pogodci:
-        if p["ime"].lower() not in seen:
-            seen.add(p["ime"].lower())
+        kljuc = sredi_upit(p["ime"])
+        if kljuc not in seen:
+            seen.add(kljuc)
             uniq.append(p)
     return uniq
 
@@ -254,25 +265,29 @@ def get_svi_zaposleni_sa_slikama():
 # RUTIRANJE
 # ============================================================
 def detektuj_tip_upita(upit):
-    """Vraća tip upita: 'direktor', 'osoba_ime', 'lista_zaposlenih', 'oprema', 'standard'."""
-    u = upit.lower()
-    # Direktor
-    if re.search(r'\b(ko je|ko je novi|tko je)\b.*\bdirektor', u) or \
-       re.search(r'\bdirektor\s+(biro| biroa| biroa za)', u) or \
-       re.search(r'\bkako se zove direktor', u):
+    """Vraća tip upita. Normalizuje ćirilicu u latinicu pre regexa."""
+    # KLJUČNO: sredi_upit konvertuje ćirilicu u latinicu
+    u = sredi_upit(upit)
+
+    # Direktor — matchuje "direktor", "ko je direktor", "kako se zove direktor"
+    if re.search(r'\bdirektor\b', u) or re.search(r'\bko\s+je\s+direktor\b', u):
         return "direktor"
+
     # Lista zaposlenih
-    if re.search(r'\b(svi |lista |spisak |navedi )?(zaposleni|zaposlene|svi u biro|svi iz biro|ko radi|kadrovska strukt|ljudi)\b', u) or \
+    if re.search(r'\b(svi |lista |spisak |navedi )?(zaposleni|zaposlene|svi u biro|svi iz biro|ko radi|ko sve radi|kadrovska strukt|ljudi)\b', u) or \
        re.search(r'\bimenik\b', u):
         return "lista_zaposlenih"
+
     # Konkretna osoba (Ime Prezime ili samo ime)
-    # Tražimo veliko slovo + još jedno veliko slovo u upitu
-    imena_u_upitu = re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\s+[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\b', upit)
+    # Tražimo VELIKO slovo + još jedno VELIKO slovo u ORIGINALNOM upitu
+    imena_u_upitu = re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\s+[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\b', upit or "")
     if imena_u_upitu:
         return "osoba_ime"
+
     # Oprema
-    if re.search(r'\b(stampač|stampac|printer|toner|kertridž|oprema|štampač)\b', u):
+    if re.search(r'\b(stampac|stampaci|printer|toner|toneri|kertridz|oprema|stampa|pisač)\b', u):
         return "oprema"
+
     return "standard"
 
 
@@ -280,44 +295,68 @@ def detektuj_tip_upita(upit):
 # HANDLERI
 # ============================================================
 def handle_direktor():
-    """Direktno traži direktora u bazi, BEZ LLM-a."""
+    """Direktno traži direktora u bazi, BEZ LLM-a.
+    Ako nema eksplicitnog zapisa, traži sve osobe sa titulom 'dr'/'mr'."""
     points, _ = qdrant.scroll(
         collection_name=COLLECTION_NAME,
         scroll_filter=models.Filter(should=[
             models.FieldCondition(key="tip", match=models.MatchAny(any=[
                 "kadrovski", "zaposleni", "osoblje", "biografija",
+                "fotografija_profil", "kadrovska_struktura",
             ]))
         ]),
         with_payload=True,
         with_vectors=False,
         limit=1000,
     )
-    direktori = []
+
+    direktori_eksplicitni = []  # gde piše "direktor [Ime]"
+    sve_osobe_sa_titulom = []  # sve osobe sa "dr" / "mr"
+
     for p in points:
         text = p.payload.get("tekst", "") or ""
         izvor = p.payload.get("naziv_dokumenta", "") or ""
-        text_lower = text.lower()
-        # Ako tekst eksplicitno kaže "direktor [Ime Prezime]"
-        if re.search(r'\bdirektor[,\s]+[A-ZČĆŠĐŽ]', text):
+        # Normalizuj u latinicu za regex
+        text_norm = sredi_upit(text)
+
+        # 1) Eksplicitno "direktor" u tekstu
+        if re.search(r'\bdirektor\b', text_norm):
             imena = izvuci_imena_iz_teksta(text)
             for ime in imena:
-                if ime not in [d["ime"] for d in direktori]:
-                    direktori.append({"ime": ime, "izvor": izvor})
-    if not direktori:
-        return "⚠️ **Nije eksplicitno pronađeno** ko je direktor Biroa u bazi. " \
-               "Moguće je da ta informacija nedostaje u indeksiranim dokumentima.", []
-    if len(direktori) == 1:
-        d = direktori[0]
-        # Pokušaj naći sliku direktora
-        slike = []
-        # Probaj pronaći fotografiju za to ime
-        foto_pogodci = pronadji_osobu_po_imenu(d["ime"])
-        for fp in foto_pogodci[:2]:
-            if fp["url"]:
-                slike.append((fp["url"], f"Direktor: {fp['ime']}"))
-        return f"Direktor Biroa za planiranje je: **{d['ime']}**", slike
-    imena = ", ".join([d["ime"] for d in direktori])
-    return f"Prema bazi, direktori su: {imena}", []
+                if ime not in [d["ime"] for d in direktori_eksplicitni]:
+                    direktori_eksplicitni.append({"ime": ime, "izvor": izvor})
+
+        # 2) Sve osobe sa titulom (za fallback)
+        if re.search(r'\b(dr|mr|prof|doc|ing|inž|dipl)\b', text_norm):
+            imena = izvuci_imena_iz_teksta(text)
+            for ime in imena:
+                if ime not in [d["ime"] for d in sve_osobe_sa_titulom]:
+                    sve_osobe_sa_titulom.append({"ime": ime, "izvor": izvor})
+
+    # Prioritet: eksplicitni direktor
+    if direktori_eksplicitni:
+        if len(direktori_eksplicitni) == 1:
+            d = direktori_eksplicitni[0]
+            slike = []
+            foto_pogodci = pronadji_osobu_po_imenu(d["ime"])
+            for fp in foto_pogodci[:2]:
+                if fp["url"]:
+                    slike.append((fp["url"], f"Direktor: {fp['ime']}"))
+            return f"Direktor Biroa za planiranje je: **{d['ime']}**", slike
+        imena = ", ".join([d["ime"] for d in direktori_eksplicitni])
+        return f"Prema bazi, direktori su: {imena}", []
+
+    # Fallback: osobe sa titulom
+    if sve_osobe_sa_titulom:
+        # Vrati prvih 3
+        prvih = sve_osobe_sa_titulom[:3]
+        imena = ", ".join([d["ime"] for d in prvih])
+        return (f"⚠️ U bazi ne postoji eksplicitan zapis 'direktor je Ime Prezime'. "
+                f"Mogući kandidati sa titulom: {imena}. "
+                f"Ako znaš ko je direktor, dodaj taj podatak u bazu."), []
+
+    return ("⚠️ Nije pronađen nijedan zapis o direktoru u bazi. "
+            "Dodaj informaciju o direktoru u indeksirane dokumente."), []
 
 
 def handle_lista_zaposlenih():
@@ -566,7 +605,7 @@ def standardni_rag(upit, top_k=8, max_karaktera=5000):
     if len(kontekst) > max_karaktera:
         kontekst = kontekst[:max_karaktera] + "\n[Skraćeno]"
 
-    # Slike — uzmi do 4
+    # Slike iz tekstualnih rezultata
     slike = []
     seen = set()
     for item in top_k_items:
@@ -578,7 +617,36 @@ def standardni_rag(upit, top_k=8, max_karaktera=5000):
         if len(slike) >= 4:
             break
 
-    return kontekst, len(rangirani), len(svi_odlomci), slike
+    # Ako je upit vizuelni (dijagram, mapa, ruža vetrova, grafikon, tabela)
+    # posebno dohvati zapise sa slikama dijagrama
+    u_norm = sredi_upit(upit)
+    vizuel_ključne = ["dijagram", "mapa", "karta", "ruza vetrova", "vetrova",
+                      "grafikon", "tabela", "shema", "sema", "skica", "crtez"]
+    if any(kw in u_norm for kw in vizuel_ključne) or "prikaz" in u_norm or "pokaz" in u_norm:
+        try:
+            dijagram_points = qdrant.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=models.Filter(should=[
+                    models.FieldCondition(key="tip", match=models.MatchAny(any=[
+                        "dijagram", "mapa", "karta", "tabela", "grafikon", "vizuel"
+                    ]))
+                ]),
+                with_payload=True,
+                with_vectors=False,
+                limit=20,
+            )
+            for d in dijagram_points[0]:
+                url = (d.payload.get("Link", "") or d.payload.get("slika_url", "") or
+                       d.payload.get("image_url", "") or "")
+                if url and url.startswith("http") and url not in seen:
+                    slike.append((url, f"Dijagram. {d.payload.get('naziv_dokumenta', '')}"))
+                    seen.add(url)
+                    if len(slike) >= 6:
+                        break
+        except Exception:
+            pass
+
+    return kontekst, len(rangirani), len(svi_odlomci), slike[:6]
 
 
 # ============================================================
