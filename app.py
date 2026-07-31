@@ -32,8 +32,9 @@ EMBEDDING_DIM = 768
 COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "baza_cloud_v2_e5")
 R2_PUBLIC_URL = "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev"
 LOGO_URL = f"{R2_PUBLIC_URL}/srbijasume_logo.jpg"
-# Reranker: uključi lokalno (16 GB), isključi na Streamlit Cloud (1 GB)
-USE_RERANKER = os.environ.get("USE_RERANKER", "true").lower() == "true"
+# Reranker: isključen po defaultu (Streamlit Cloud 1 GB limit).
+# LOKALNO: $env:USE_RERANKER="true" pre pokretanja.
+USE_RERANKER = os.environ.get("USE_RERANKER", "false").lower() == "true"
 
 SYSTEM_PROMPT = (
     "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
@@ -476,10 +477,12 @@ def get_reranker():
         return None
     try:
         from fastembed.rerank.cross_encoder import TextCrossEncoder
+        # Na Streamlit Cloud (1 GB) ovo može OOM-ovati
+        # Pokreni lokalno sa $env:USE_RERANKER="true"
         _reranker = TextCrossEncoder(model_name="jinaai/jina-reranker-v2-base-multilingual")
         return _reranker
     except Exception as e:
-        st.warning(f"Reranker nije mogao da se učita: {e}. Koristim linearni score.")
+        st.warning(f"Reranker load failed: {e}. Koristim linearni score.")
         return None
 
 
