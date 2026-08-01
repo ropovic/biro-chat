@@ -216,16 +216,34 @@ def handle_osoba_po_imenu(upit):
 def je_pitanje_za_eksterno(upit):
     """Da li pitanje zahteva eksternu pretragu (opšta znanja)."""
     u = sredi_upit(upit)
-    # Pitanja o ljudima, definicijama, opštim pojmovima
+    # Pitanja o ljudima, definicijama, opštim pojmovima, KOMPANIJI
     ekstern_ključne = [
-        "ko je ministar", "ko je predsednik", "ko je direktor", "ko je osnivac",
-        "ko je osnovao", "ko je izumeo", "ko je napravio",
+        # Pitanja o ljudima
+        "ko je ministar", "ko je predsednik", "ko je direktor pd",
+        "ko je osnivac", "ko je osnovao", "ko je izumeo", "ko je napravio",
+        # Definicije
         "sta je", "sta su", "sta znaci", "sta predstavlja",
+        # Opšta pitanja
         "koji je", "koja je", "koje je",
         "kako se zove", "gde se nalazi", "kada je",
         "koliko kosta", "koliko je",
+        # KOMPANIJA / FIRMA
+        "pd srbijasume", "javno preduzece", "preduzece za gazdovanje",
+        "o kompaniji", "o firmi", "istorija", "kako posluje",
+        "sediste", "kontakt", "veb sajt", "web sajt", "sajt",
     ]
     return any(kw in u for kw in ekstern_ključne)
+
+
+def je_pitanje_o_kompaniji(upit):
+    """Da li pitanje je o kompaniji (PD Srbijašume) — ne treba slike zaposlenih."""
+    u = sredi_upit(upit)
+    kompanija_ključne = [
+        "pd srbijasume", "javno preduzece", "preduzece", "firma",
+        "kompanija", "organizacija", "istorija", "delatnost",
+        "sediste", "veb sajt", "web sajt",
+    ]
+    return any(kw in u for kw in kompanija_ključne)
 
 
 def handle_oprema_specificno(upit):
@@ -671,8 +689,9 @@ if user_input:
                             if ext:
                                 ext_info = f"\n\n=== SPOLJNI IZVORI ===\n{ext}"
                                 koristio_ext = True
-                                # Za opšta pitanja NE prikazuj slike iz interne baze
-                                slike = []
+                        # Za pitanja o KOMPANIJI — ukloni slike zaposlenih iz baze
+                        if je_pitanje_o_kompaniji(user_input) or koristio_ext:
+                            slike = []
                         messages = [
                             {"role": "system", "content": SYSTEM_PROMPT},
                             {"role": "user", "content": f"KONTEKST IZ BAZE:\n{kontekst}{ext_info}\n\nPitanje: {user_input}"},
