@@ -92,34 +92,40 @@ def handle_direktor():
         payload = p.payload or {}
         tekst = payload.get("tekst", "") or ""
         url = payload.get("Link") or payload.get("slika_url", "")
-        funkcija = (payload.get("Funkcija", "") or "").lower()
-        # Izvuci ime iz "Fotografija [Ime Prezime], ..."
+        funkcija_raw = payload.get("Funkcija", "") or ""
+        funkcija = funkcija_raw.lower()
         m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
         if not m:
             continue
         ime = m.group(1)
-        if "zamenik" in funkcija:
-            zamenici.append((ime, url, payload.get("Funkcija", "")))
-        elif "direktor" in funkcija:
-            direktori.append((ime, url, payload.get("Funkcija", "")))
+        # Detektuj precizno: "direktor" ali NE "pomoćnik" ili "zamenik"
+        if "direktor" in funkcija and "zamenik" not in funkcija and "pomoćnik" not in funkcija:
+            direktori.append((ime, url, funkcija_raw))
+        elif "zamenik" in funkcija:
+            zamenici.append((ime, url, funkcija_raw))
 
     if not direktori and not zamenici:
         return "⚠️ Nisu pronađeni direktor/zamenici u photo zapisima.", []
 
     slike = []
     delovi = []
+    # Pokaži SAMO 1 direktor (prvi) + max 1 zamenik (prvi)
     if direktori:
         ime = direktori[0][0]
         url = direktori[0][1]
-        delovi.append(f"**Direktor:** {ime}")
+        delovi.append(f"**Direktor Biroа:** {ime}")
         if url:
             slike.append((url, f"Direktor: {ime}"))
     if zamenici:
-        imena = ", ".join([z[0] for z in zamenici[:3]])
-        delovi.append(f"**Zamenici direktora:** {imena}")
-        for ime, url, _ in zamenici[:3]:
-            if url:
-                slike.append((url, f"Zamenik: {ime}"))
+        ime = zamenici[0][0]
+        url = zamenici[0][1]
+        delovi.append(f"**Zamenik direktora:** {ime}")
+        if url:
+            slike.append((url, f"Zamenik: {ime}"))
+        # Ako ih ima više, samo imena
+        if len(zamenici) > 1:
+            ostali = ", ".join([z[0] for z in zamenici[1:]])
+            delovi.append(f"Ostali zamenici: {ostali}")
 
     return "\n\n".join(delovi), slike
 
@@ -415,9 +421,10 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
     if st.button("🔄 Освежи кеш", use_container_width=True):
-        st.cache_resource.clear()
+        # Bezbedno: samo clear data cache, ne resource cache
+        # Resource cache (qdrant, groq, embed) se ne dira — TTL to reguliše
         st.cache_data.clear()
-        st.session_state.cache_msg = "Кеш обрисан"
+        st.session_state.cache_msg = "Кеш података обрисан"
         st.rerun()
     if st.session_state.get("cache_msg"):
         st.success(f"✅ {st.session_state.cache_msg}")
