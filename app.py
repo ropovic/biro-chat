@@ -354,16 +354,10 @@ def handle_clan(broj):
     """Pravni član: skeniraj pravni_akt, nađi CEO clan N do sledećeg clana ili kraja."""
     points = scroll_tip("pravni_akt", limit=500)
     pogodci = []
-    # Regex: "clan N" ... sve do "clan N+1" ili "clan M (bilo koji drugi)" ili kraja
-    clan_pat = _re.compile(
+    # Regex: "clan N" ... sve do sledećeg "clan M" ili kraja dokumenta
+    clan_pat = re.compile(
         rf'(?:clan|cl\.?|cln\.?)\s*{re.escape(broj)}\b(.*?)(?=(?:clan|cl\.?|cln\.?)\s*\d+\b|$)',
-        _re.DOTALL | _re.IGNORECASE
-    )
-    # Bez _,re — koristimo običan re
-    import re as _re2
-    clan_pat = _re2.compile(
-        rf'(?:clan|cl\.?|cln\.?)\s*{_re2.escape(broj)}\b(.*?)(?=(?:clan|cl\.?|cln\.?)\s*\d+\b|$)',
-        _re2.DOTALL | _re2.IGNORECASE
+        re.DOTALL | re.IGNORECASE
     )
 
     for p in points:
