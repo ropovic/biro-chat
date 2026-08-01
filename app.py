@@ -164,72 +164,71 @@ def handle_lista_zaposlenih():
 
 
 def handle_oprema_specificno(upit):
-    """Oprema: skeniraj 'oprema' tip, prikaži čistu listu."""
+    """Oprema: skeniraj 'oprema' tip, prikaži čistu listu.
+    Filter: štampači ILI toneri (ne oba)."""
+    import re as _re
     points = scroll_tip("oprema", limit=50)
     u = sredi_upit(upit)
     is_toner = "toner" in u or "kertridz" in u
     is_printer = any(kw in u for kw in ["stampac", "stampaci", "printer", "pisac"])
 
-    # Izvuci SAMO modele (npr. "Kyocera FS-9530dn", "HP C4844A")
-    import re as _re
-    stampaci_pat = _re.compile(r'\b(Kyocera|Canon|HP|Brother|Samsung|Epson|Lexmark|Xerox|OKI)\s+[A-Z0-9][A-Za-z0-9\-\.]{3,20}\b')
-    toneri_pat = _re.compile(r'\b(TK-[A-Z0-9]{3,5}|HP\s+[A-Z]?\d{3,4}[A-Z]?|Canon\s+[A-Z0-9]+|Kyocera\s+TK-\d+|CE\d{2,3}[A-Z]?)\b')
+    # KLJUČNO: Non-capturing group (?:...) da findall vrati CEO match, ne samo grupu
+    stampaci_pat = _re.compile(r'\b(?:Kyocera|Canon|HP|Brother|Samsung|Epson|Lexmark|Xerox|OKI)\s+[A-Z0-9][A-Za-z0-9\-\.]{2,20}\b')
+    toneri_pat = _re.compile(r'\b(?:TK-[A-Z0-9]{3,5}|HP\s+[A-Z]?\d{3,4}[A-Z]?|Canon\s+[A-Z0-9]{2,6}|Kyocera\s+TK-\d+|CE\d{2,3}[A-Z]?)\b')
 
     stampaci_lista = set()
     toneri_lista = set()
-    svi_tekstovi = []
 
     for p in points:
         payload = p.payload or {}
         tekst_orig = payload.get("tekst", "") or ""
         tekst = sredi_upit(tekst_orig)
-        izvor = payload.get("izvor", "") or payload.get("naziv_dokumenta", "")
 
         # Filtriranje po tipu upita
         if is_toner and "toner" not in tekst and "kertridz" not in tekst:
             continue
         if is_printer and not any(kw in tekst for kw in ["stampac", "printer", "kyocera", "canon", "hp", "pisac"]):
             continue
+        # Ako ni toner ni printer, preskoči za specifične upite
+        if is_toner or is_printer:
+            # Nađi SAMO odgovarajuće modele
+            if is_toner:
+                for m in toneri_pat.findall(tekst_orig):
+                    toneri_lista.add(m)
+            if is_printer:
+                for m in stampaci_pat.findall(tekst_orig):
+                    stampaci_lista.add(m)
 
-        # Nađi modele
-        for m in stampaci_pat.findall(tekst_orig):
-            stampaci_lista.add(m)
-        for m in toneri_pat.findall(tekst_orig):
-            toneri_lista.add(m)
+    # Formatiranje — SAMO ono što je traženo
+    if is_toner:
+        if not toneri_lista:
+            return "⚠️ Nisu pronađeni toneri po tom upitu.", []
+        delovi = ["**Toneri u Birou:**"]
+        for t in sorted(toneri_lista):
+            delovi.append(f"  • {t}")
+        return "\n".join(delovi), []
 
-        # Skrati tekst za kontekst
-        linije = []
-        for l in tekst_orig.split("\n"):
-            ll = sredi_upit(l)
-            if any(x in ll for x in ["mihaila pupina", "bircaninova", "tel/fax",
-                                      "javno preduzece", "trebovanje", "srbija",
-                                      "d.o.o.", "cara dusana", "slovenska", "adresa"]):
-                continue
-            if ll.strip() and len(ll) < 200:
-                linije.append(l.strip())
-        if linije:
-            svi_tekstovi.append(" • ".join(linije[:5])[:400])
+    if is_printer:
+        if not stampaci_lista:
+            return "⚠️ Nisu pronađeni štampači po tom upitu.", []
+        delovi = ["**Štampači u Birou:**"]
+        for s in sorted(stampaci_lista):
+            delovi.append(f"  • {s}")
+        return "\n".join(delovi), []
 
-    # Formatiranje
-    delovi = []
+    # Opšti upit za opremu
+    delovi = ["**Oprema u Birou:**"]
     if stampaci_lista:
-        delovi.append("Štampači u Birou:")
+        delovi.append("\nŠtampači:")
         for s in sorted(stampaci_lista):
             delovi.append(f"  • {s}")
     if toneri_lista:
-        delovi.append("")
-        delovi.append("Toneri:")
+        delovi.append("\nToneri:")
         for t in sorted(toneri_lista):
             delovi.append(f"  • {t}")
-    if svi_tekstovi and not stampaci_lista and not toneri_lista:
-        # Nema specifičnih modela, vrati kontekst
-        delovi.append("Pojmovi iz baze:")
-        for t in svi_tekstovi[:5]:
-            delovi.append(f"  • {t}")
-
-    if not delovi:
-        return "⚠️ Nema pronađene opreme po tom upitu.", []
-    return "**Pronađena oprema:**\n\n" + "\n".join(delovi), []
+    if not stampaci_lista and not toneri_lista:
+        return "⚠️ Nema pronađene opreme.", []
+    return "\n".join(delovi), []
 
 
 def handle_dijagram(upit):
