@@ -164,15 +164,47 @@ def handle_lista_zaposlenih():
 
 
 def handle_osoba_po_imenu(upit):
-    """Traži osobu po imenu u photo records."""
+    """Traži osobu po imenu u photo records.
+    Podržava: 'Ime Prezime', 'Ime', 'Ime Prezime' (genitiv)."""
     import re as _re
-    # Izvuci imena (veliko slovo + veliko slovo) iz ORIGINALNOG upita
-    imena = _re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\s+[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\b', upit or "")
-    # ćirilica varijanta
+    if not upit:
+        return "⚠️ Prazno pitanje.", []
+
+    # 1) Probaj dvo-člano ime (npr. "Bojana Jelić")
+    imena = _re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\s+[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\b', upit)
+    # 2) Probaj ćirilično dvo-člano ime
     if not imena:
-        imena = _re.findall(r'\b[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ][а-яё]{2,}\b', upit or "")
+        imena = _re.findall(r'\b[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ][а-яё]{2,}\b', upit)
+    # 3) Probaj jedno-člano ime (npr. "Bojane", "Bojana")
     if not imena:
-        return "⚠️ Nisam pronašao ime u pitanju. Koristite format: 'Ime Prezime'.", []
+        # Filtriraj "stop reči" da ne bismo uzeli "Biroa", "Srbijasume" itd.
+        stop_reci_ime = {"biro", "biroa", "srbijasume", "srbija", "suma", "sumama",
+                         "baze", "birou", "kolektivni", "ugovor", "clan", "preduzece",
+                         "firma", "kompanija", "pd", "jp"}
+        # Veliko slovo + 3+ slova (min 4 karaktera)
+        kandidati = _re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{3,}\b', upit)
+        # Filtriraj stop reči
+        kandidati = [k for k in kandidati if sredi_upit(k) not in stop_reci_ime]
+        if kandidati:
+            # Pretvori u "[Ime]" format za konzistentnost
+            imena = kandidati  # npr. ["Bojane"]
+
+    if not imena:
+        return ("⚠️ Nisam pronašao ime u pitanju.\n\n"
+                "Koristite format: **'Ime Prezime'** (npr. 'Bojana Jelić') "
+                "ili **'Ime'** (npr. 'Bojana')."), []
+
+    # Normalizuj imena za pretragu
+    imena_za_pretragu = []
+    for ime in imena:
+        ime_norm = sredi_upit(ime)
+        # Podeli na delove
+        delovi = ime_norm.split()
+        imena_za_pretragu.append({
+            "originalno": ime,
+            "norm": ime_norm,
+            "delovi": delovi,
+        })
 
     points = scroll_tip("fotografija_profil", limit=100)
     pogodci = []
@@ -181,36 +213,66 @@ def handle_osoba_po_imenu(upit):
         tekst = payload.get("tekst", "") or ""
         tekst_norm = sredi_upit(tekst)
         url = payload.get("Link") or payload.get("slika_url", "")
-        for ime in imena:
-            ime_norm = sredi_upit(ime)
-            # Podeli ime na delove i traži sve delove
-            delovi_imena = ime_norm.split()
-            if all(d in tekst_norm for d in delovi_imena):
-                # Izvuci lepo ime
-                m = _re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
-                ime_lepo = m.group(1) if m else ime
-                funkcija = payload.get("Funkcija", "")
-                pogodci.append({"ime": ime_lepo, "url": url, "funkcija": funkcija})
+
+        for ime_info in imena_za_pretragu:
+            # WORD BOUNDARY matching: koristimo regex \b za svaki deo
+            svi_delovi_prisutni = True
+            for d in ime_info["delovi"]:
+                if not _re.search(rf'\b{_re.escape(d)}', tekst_norm):
+                    svi_delovi_prisutni = False
+                    break
+            if not svi_delovi_prisutni:
+                continue
+
+            # Izvuci lepo ime iz "Fotografija [Ime Prezime], ..."
+            m = _re.search(
+                r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+(?:\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)?)',
+                tekst
+            )
+            ime_lepo = m.group(1) if m else ime_info["originalno"]
+            funkcija = payload.get("Funkcija", "")
+            # Dedupe po IMENU_LEPOM (lowercase)
+            kljuc = sredi_upit(ime_lepo)
+            pogodci.append({
+                "ime": ime_lepo,
+                "url": url,
+                "funkcija": funkcija,
+                "kljuc": kljuc,
+            })
 
     if not pogodci:
-        return f"⚠️ {', '.join(imena)} — nisam pronašao u bazi.", []
+        imena_str = ", ".join([i["originalno"] for i in imena_za_pretragu])
+        return f"⚠️ **{imena_str}** — nisam pronašao u bazi fotografija.", []
 
-    # Dedupe
+    # Dedupe po kljuc-u (lowercase imena)
     seen = set()
     uniq = []
     for p in pogodci:
-        if p["ime"] not in seen:
-            seen.add(p["ime"])
+        if p["kljuc"] not in seen:
+            seen.add(p["kljuc"])
             uniq.append(p)
 
-    delovi = [f"**Pronađeno {len(uniq)}:**", ""]
+    # KLJUČNO: Ako je samo jedno ime traženo, vrati SAMO njegove slike
+    # (ne i slike drugih koji su možda slučajno matchovali)
+    if len(imena_za_pretragu) == 1:
+        target_norm = imena_za_pretragu[0]["norm"]
+        # Filtriraj SAMO one čije ime zaista sadrži target
+        filtered = []
+        for p in uniq:
+            # Da li ime_lepo sadrži sve delove targeta?
+            if all(d in p["kljuc"] for d in imena_za_pretragu[0]["delovi"]):
+                filtered.append(p)
+        uniq = filtered if filtered else uniq
+
+    delovi_text = [f"**Pronađeno {len(uniq)}:**", ""]
     for p in uniq:
         if p.get("funkcija"):
-            delovi.append(f"- **{p['ime']}** — {p['funkcija']}")
+            delovi_text.append(f"- **{p['ime']}** — {p['funkcija']}")
         else:
-            delovi.append(f"- **{p['ime']}**")
-    slike = [(p["url"], p["ime"]) for p in uniq if p["url"]]
-    return "\n".join(delovi), slike
+            delovi_text.append(f"- **{p['ime']}**")
+    # Maksimalno 3 slike
+    slike = [(p["url"], p["ime"]) for p in uniq if p["url"]][:3]
+    return "\n".join(delovi_text), slike
 
 
 def je_pitanje_za_eksterno(upit):
@@ -604,9 +666,10 @@ def detektuj_tip(upit):
 
     # Traženje osobe po imenu: "pronađi [Ime]", "nađi [Ime]", "ima li [Ime]"
     if any(kw in u for kw in ["pronadi", "nadji", "nadjem",
-                                "ima li", "gde je", "ko je to", "sta je sa"]):
+                                "ima li", "gde je", "ko je to", "sta je sa",
+                                "da li", "dal je", "dal i", "je li"]):
         # Ali NE ako je o direktoru ili listi zaposlenih
-        if "direktor" not in u and "zaposleni" not in u:
+        if "direktor" not in u and "zaposleni" not in u and "lista" not in u:
             return "osoba_ime"
 
     # Lista zaposlenih — "zaposleni" + indikatori liste/pitanja
