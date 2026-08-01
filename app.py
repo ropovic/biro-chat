@@ -175,19 +175,22 @@ def handle_osoba_po_imenu(upit):
     # 2) Probaj ćirilično dvo-člano ime
     if not imena:
         imena = _re.findall(r'\b[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ][а-яё]{2,}\b', upit)
-    # 3) Probaj jedno-člano ime (npr. "Bojane", "Bojana")
+    # 3) Probaj jedno-člano ime (npr. "Bojane", "Bojana", "petrovića")
     if not imena:
-        # Filtriraj "stop reči" da ne bismo uzeli "Biroa", "Srbijasume" itd.
+        # Filtriraj "stop reči" da ne bismo uzeli "biro", "srbijasume" itd.
         stop_reci_ime = {"biro", "biroa", "srbijasume", "srbija", "suma", "sumama",
                          "baze", "birou", "kolektivni", "ugovor", "clan", "preduzece",
-                         "firma", "kompanija", "pd", "jp"}
-        # Veliko slovo + 3+ slova (min 4 karaktera)
-        kandidati = _re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{3,}\b', upit)
-        # Filtriraj stop reči
+                         "firma", "kompanija", "pd", "jp",
+                         "svi", "sve", "sva", "kako", "sta", "koji", "koja", "koje",
+                         "gde", "kada", "imam", "imaju", "postoji", "treba", "hocu",
+                         "ovaj", "taj", "ovo", "ta", "to", "neka", "neko", "nesto",
+                         "moze", "molim", "zasto", "zbog", "prema", "preko"}
+        # CASE-INSENSITIVE: bilo veliko ili malo slovo na početku
+        kandidati = _re.findall(r'\b[A-Za-zčćšđžČĆŠĐŽ][a-zčćšđž]{3,}\b', upit or "")
+        # Filtriraj stop reči (case-insensitive)
         kandidati = [k for k in kandidati if sredi_upit(k) not in stop_reci_ime]
         if kandidati:
-            # Pretvori u "[Ime]" format za konzistentnost
-            imena = kandidati  # npr. ["Bojane"]
+            imena = kandidati  # npr. ["petrovića"] — case-insensitive matching će raditi
 
     if not imena:
         return ("⚠️ Nisam pronašao ime u pitanju.\n\n"
