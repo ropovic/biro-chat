@@ -1,31 +1,24 @@
 """
-app.py — Biro za planiranje RAG asistent (Streamlit)
-======================================================
+app.py v5.0 — MINIMALNA verzija
+================================
+Bez specijalnih handlera. Samo:
+- Qdrant search (bez filtera)
+- Embed + LLM
+- Slike gde postoje
+- 6 quick prompt dugmadi
 
-Verzija 4.0 — Pametni ruteri (NE SVE ide kroz LLM):
-- "Ko je direktor?" → direktno iz baze, BEZ LLM halucinacije
-- "Svi zaposleni" → listanje + slike, BEZ LLM
-- "Ima li Bojane?" → pretraga po imenu, BEZ LLM
-- "Štampači/toneri" → direktan prikaz, BEZ LLM
-- Ostalo → LLM sa strogim promptom
-
-Performance:
-- Bez rerankera (1 GB limit)
-- TTL keša 1200 (20 min)
-- max_karaktera 5000 (umesto 8000) — brži LLM
-- max_tokens 400 (umesto 600) — brži LLM
+Ovo je vraćanje na osnove — verzija koja je radila pre svih dorada.
 """
 
 import os
 import re
-import time
 import streamlit as st
-from qdrant_client import QdrantClient, models
+from qdrant_client import QdrantClient
 from groq import Groq
 from fastembed import TextEmbedding
 
 # ============================================================
-# KONFIG
+# CONFIG
 # ============================================================
 EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "baza_cloud_v2_e5")
@@ -33,25 +26,17 @@ R2_PUBLIC_URL = "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev"
 LOGO_URL = f"{R2_PUBLIC_URL}/srbijasume_logo.jpg"
 
 SYSTEM_PROMPT = (
-    "Ti si stručni digitalni asistent Biroa za planiranje (PD Srbijašume).\n"
-    "Odgovaraj ISKLJUČIVO na osnovu dostavljenog KONTEKSTA.\n\n"
-    "KRITIČNA PRAVILA:\n"
-    "1. NEMOJ IZVOĐITI ZAKLJUČKE. Ako kontekst ne pominje TAČNO traženi podatak, "
-    "odgovori: 'Podatak nije pronađen u bazi.' NE izmišljaj, NE pretpostavljaj.\n"
-    "2. KAD KORISNIK PITA 'Ko je direktor?' — navedi SAMO ako kontekst EKSPLICITNO kaže "
-    "'direktor je Ime Prezime'. Ako se ime pojavljuje BEZ eksplicitne funkcije, "
-    "reci 'nije eksplicitno navedeno ko je direktor'.\n"
-    "3. KAD KORISNIK PITA O ZAPOSLENIMA — navedi SAMO imena koja se pojavljuju kao "
-    "LIČNA IMENA. IGNORIŠI opise organizacione strukture (odseci, službe, pozicije).\n"
-    "4. NEMOJ generisati URL-ove ni Markdown slike — aplikacija to radi automatski.\n"
-    "5. Odgovaraj isključivo na srpskom jeziku. Kratko i jasno.\n"
-    "6. Ako kontekst sadrži OCR — interpretiraj sažeto, NE kopiraj sirovi tekst.\n"
-    "7. Ako kontekst ima 'Ime Prezime' (placeholder) — IGNORIŠI taj zapis.\n"
-    "8. Ako je pitanje nejasno, traži pojašnjenje umesto da nagađaš."
+    "Ti si digitalni asistent Biroa za planiranje (PD Srbijašume). "
+    "Odgovaraj ISKLJUČIVO na osnovu KONTEKSTA. "
+    "Ako podatak nije u kontekstu, reci 'nije pronađeno'. "
+    "Fokusiraj se na specifičan pojam iz pitanja. "
+    "Ne izvodi zaključke, ne pretpostavljaj. "
+    "Navedi imena zaposlenih SAMO ako su eksplicitno u kontekstu. "
+    "Odgovaraj na srpskom, kratko i jasno."
 )
 
 # ============================================================
-# KLIJENTI
+# CLIENTS
 # ============================================================
 @st.cache_resource
 def get_clients():
@@ -67,811 +52,127 @@ def get_clients():
 
 qdrant, groq_client, embed_model = get_clients()
 
-# ============================================================
-# NORMALIZACIJA
-# ============================================================
-def sredi_tekst(t):
-    if not t:
-        return ""
-    t = str(t).replace('Љ', 'Lj').replace('љ', 'lj').replace('Њ', 'Nj').replace('њ', 'nj')
-    zamene = {'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ж':'ž','з':'z','и':'i',
-              'ј':'j','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s',
-              'т':'t','у':'u','ф':'f','х':'h','ц':'c','ч':'č','ш':'š','ć':'ć','đ':'đ'}
-    return "".join([zamene.get(c, c) for c in t])
 
-
-def ukloni_dijakritike(t):
-    if not t:
-        return ""
-    zamene = {'č':'c','ć':'c','š':'s','ž':'z','đ':'d'}
-    return "".join([zamene.get(c, c) for c in sredi_tekst(t).lower()])
-
-
-def sredi_upit(t):
-    """Normalizuje upit: ćirilica u latinicu, sve u lowercase."""
-    return ukloni_dijakritike(sredi_tekst(t or "").lower())
-
-
-def embed_upit(tekst):
+def embed_query(text):
     if "e5" in EMBEDDING_MODEL.lower():
-        tekst = f"query: {tekst}"
-    return list(embed_model.embed([tekst]))[0].tolist()
+        text = f"query: {text}"
+    return list(embed_model.embed([text]))[0].tolist()
 
 
 # ============================================================
-# QDRANT HELPERS — zaobilaze problem sa indeksom
+# RAG — jednostavan
 # ============================================================
-def scroll_svi(tipovi=None, limit=1000):
-    """Skroluje SVE zapise, opciono filtrira po tipu U PYTHONU.
-    Robustan na razne formate `tip` polja: string, lista, velika slova, itd."""
-    svi = []
-    offset = None
-    # Normalizuj tipove za upoređivanje
-    if tipovi is not None:
-        tipovi_norm = {str(t).lower().strip() for t in tipovi}
-    while True:
-        records, next_offset = qdrant.scroll(
-            collection_name=COLLECTION_NAME,
-            limit=500,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False,
-        )
-        for r in records:
-            if not r.payload:
-                continue
-            if tipovi is not None:
-                tip = r.payload.get("tip", "")
-                # tip može biti string, lista, ili nešto drugo
-                tipovi_u_zapisu = []
-                if isinstance(tip, list):
-                    tipovi_u_zapisu = [str(t).lower().strip() for t in tip]
-                else:
-                    tip_str = str(tip).lower().strip()
-                    # Podeli ako ima zarez ili razmak
-                    tipovi_u_zapisu = [t.strip() for t in re.split(r'[,;\s]+', tip_str) if t.strip()]
-                # Provera da li se BILO KOJI od tipova zapisa poklapa sa BILO KIM od filtera
-                if not any(t in tipovi_norm or any(t in ft or ft in t for ft in tipovi_norm)
-                           for t in tipovi_u_zapisu):
-                    continue
-            svi.append(r)
-        if next_offset is None or len(records) == 0:
-            break
-        offset = next_offset
-        if len(svi) >= limit:
-            break
-    return svi[:limit]
-
-
-def qdrant_query(query_vector, limit=20):
-    """Wrapper za query_points (novo) ili search (staro), zavisno od verzije."""
-    if hasattr(qdrant, "query_points"):
-        response = qdrant.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_vector,
-            limit=limit,
-        )
-        return response.points
-    return qdrant.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=query_vector,
-        limit=limit,
-    )
-
-
-# ============================================================
-# IMENA — Izdvajanje i blacklist
-# ============================================================
-# Organizacije, institucije, pozicije — NE SMEJU da prođu kao imena
-IMENA_BLACKLIST = {
-    # Organizacije
-    "BiZa Planiranje", "Biro Za", "Biro Za Planiranje", "Srbija Šume", "Srbijasume",
-    "Sumarstvo Srbije", "Sume Srbije", "Javno Preduzece", "Preduzece Za",
-    "Šumarski Fakultet", "Beograd Sumarstvo", "Univerzitet U", "Ministarstvo Poljoprivrede",
-    "Republika Srbija", "Grad Beograd", "Opstina Beograd", "Uprava Za", "Direkcija Za",
-    "Kolektivni Ugovor", "Kadrovski Pravilnik", "Pravilnik O", "Statut Preduzeca",
-    "Osnivacki Akt", "Sistematizacija Radnih", "Mesto Rada", "Radno Mesto",
-    "Sumsko Privredna", "Osnova Gazdovanja", "Gazdinska Jedinica", "Gospodarska Jedinica",
-    "Etat Sume", "Drvna Masa", "Krupno Drvo", "Sitno Drvo", "Celuloza I",
-    "Šumsko Gazdinsko", "Šumskog Gazdinskog", "Upravno Odjeljenje", "Upravnog Odjeljenja",
-    "Šef Šumskog", "Šef Upravnog", "Šumari Inženjeri", "Inženjeri Šumarstva",
-    "Tehničari Šumarstva", "Tehnicari Šumarstva", "Šumski Radnici", "Šumskih Radnika",
-    "Šumski Tehničar", "Šumski Inženjer", "Inženjer Šumarstva", "Tehničar Šumarstva",
-    "Pomoćnik Direktora", "Pomoćnik Rukovodioca", "Rukovodilac Biroa",
-    "Sekretar Biroa", "Administrator Biroa", "Voditelj Poslova",
-    "Odjeljenje Za", "Sluzba Za", "Odsjek Za", "Sektor Za", "Referent Za",
-    "Šef Službe", "Šef Odsjeka", "Šef Sektora", "Rukovodilac Sektora",
-    "Šumsko Privredno", "Šumsko Gospodarsko", "Privredno Društvo", "Drustvo Za",
-    "Ljudski Resursi", "Kadrovska Služba", "Pravna Služba", "Finansijska Služba",
-    "PD Srbijašume", "PD Srbijasume", "JP Srbijasume",
-}
-
-# Reči koje NISU imena (pozicije, opisi)
-# NAPOMENA: "Direktor" je UKLONJEN jer je izbacivao imena u kontekstu
-# gde se pominje "direktor Marko Petrović" — to je ime, samo sa titulom
-NIJE_IME_KLJUCNE = [
-    "Sumarstvo", "Beograd", "Srbija", "Sume", "Biro", "Fakultet", "Univerzitet",
-    "Ministarstvo", "Pravilnik", "Ugovor", "Uredba", "Zakon", "Praviln",
-    "Odjeljenje", "Odjeljenja", "Sluzba", "Služba", "Odsjek", "Sektor", "Društvo", "Preduzece",
-    "Resursi", "Uprava", "Upravno", "Gazdinsk", "Gazdinska", "Privred", "Radnik",
-    "Radnika", "Tehničar", "Tehnicar", "Inženjer", "Inzenjer", "Šumari", "Sumari",
-    "Šumsko", "Sumsko", "Rukovodilac", "Pomoćnik", "Pomoćnik",
-    "Šef", "Sekretar", "Administrator", "Voditelj", "Referent", "Službenik",
-    "Odsek", "Odseka", "Centar", "Centru", "Centra",
-]
-
-TITULE = {"dr", "mr", "prof", "doc", "ing", "inž", "dipl"}
-
-
-def izvuci_imena_iz_teksta(tekst):
-    """Izvlači SAMO validna lična imena iz teksta."""
-    if not tekst:
-        return []
-    norm = tekst
-    pattern = r'\b([A-ZČĆŠĐŽ][a-zčćšđž]{2,}(?:\s+[A-ZČĆŠĐŽ][a-zčćšđž]{2,}){1,2})\b'
-    matches = re.findall(pattern, norm)
-
-    rezultat = []
-    for m in matches:
-        # Tačno poklapanje sa blacklistom
-        if m in IMENA_BLACKLIST:
-            continue
-        # Sadrži ključne reči (pozicije, organizacije)
-        if any(b in m for b in NIJE_IME_KLJUCNE):
-            continue
-        # Očisti od titula
-        reci = [r for r in m.split() if r.lower().rstrip(".") not in TITULE]
-        if not reci or len(reci) < 2:
-            continue
-        # SVE reči moraju početi velikim slovom
-        if not all(r[0].isupper() for r in reci if r[0].isalpha()):
-            continue
-        # Nema placeholder "Ime Prezime"
-        if "Ime" in reci and "Prezime" in reci:
-            continue
-        # Minimalna dužina svake reči
-        if any(len(r) < 3 for r in reci):
-            continue
-        # Filtriraj očigledno engleske/strane reči
-        if any(r.lower() in {"the", "and", "for", "with", "from", "this", "that"} for r in reci):
-            continue
-        rezultat.append(" ".join(reci))
-    return rezultat
-
-
-def pronadji_osobu_po_imenu(ime_upita):
-    """Traži specifičnu osobu po imenu. Vraća listu pogodaka sa slikama."""
-    ime_lower = sredi_upit(ime_upita).strip()
-    # Skroluj SVE i filtriraj po tipu u Pythonu (bez Qdrant indeksa)
-    points = scroll_svi(
-        tipovi={"kadrovski", "zaposleni", "osoblje", "kadrovska_struktura",
-                "kadrovski_podaci", "fotografija_profil", "biografija"},
-        limit=1000,
-    )
-    pogodci = []
-    for p in points:
-        text_orig = p.payload.get("tekst", "") or ""
-        text_norm = sredi_upit(text_orig)
-        izvor = p.payload.get("naziv_dokumenta", "") or p.payload.get("file_name", "")
-        url = (p.payload.get("Link", "") or p.payload.get("slika_url", "") or
-               p.payload.get("image_url", "") or p.payload.get("slika", ""))
-        if ime_lower in text_norm:
-            imena = izvuci_imena_iz_teksta(text_orig)
-            for ime in imena:
-                ime_norm = sredi_upit(ime)
-                if ime_norm == ime_lower or ime_norm.split()[-1] == ime_lower.split()[-1]:
-                    pogodci.append({
-                        "ime": ime,
-                        "izvor": izvor,
-                        "url": url,
-                        "kontekst": text_orig[:300],
-                    })
-                    break
-    seen = set()
-    uniq = []
-    for p in pogodci:
-        kljuc = sredi_upit(p["ime"])
-        if kljuc not in seen:
-            seen.add(kljuc)
-            uniq.append(p)
-    return uniq
-
-
-def get_svi_zaposleni_sa_slikama():
-    """Direktno iz baze: svi zaposleni + slike gde postoje.
-    Ključno: NE duplira imena između kadrovskih i foto zapisa."""
-    points = scroll_svi(
-        tipovi={"kadrovski", "zaposleni", "osoblje", "kadrovska_struktura",
-                "kadrovski_podaci", "fotografija_profil", "biografija"},
-        limit=1000,
-    )
-    imenik = {}
-
-    # Prvo prođi kroz FOTO zapise — tu su samo URL-ovi, ime se dobija iz naziva fajla
-    foto_po_imenu = {}  # kljuc_prezime -> url
-    for p in points:
-        payload = p.payload or {}
-        tip = payload.get("tip", "")
-        if "fotografija_profil" in tip or "biografija" in tip:
-            url = (payload.get("Link", "") or payload.get("slika_url", "") or
-                   payload.get("image_url", "") or payload.get("slika", ""))
-            izvor = (payload.get("naziv_dokumenta", "") or payload.get("file_name", "") or "")
-            if not url:
-                continue
-            # Pokušaj izvući ime iz naziva fajla (npr. "brano_vamovic.jpg" -> "Brano Vamovic")
-            if izvor:
-                ime_iz_fajla = re.sub(r'\.(jpg|jpeg|png|webp)$', '', izvor, flags=re.IGNORECASE)
-                ime_iz_fajla = ime_iz_fajla.replace("_", " ").replace("-", " ").strip()
-                # Samo ako liči na ime (2+ reči)
-                reci = ime_iz_fajla.split()
-                if len(reci) >= 2 and all(len(r) >= 2 for r in reci):
-                    # Proveri da li sadrži "Ime Prezime" placeholder
-                    if "Ime" in reci and "Prezime" in reci:
-                        continue
-                    kljuc = reci[-1].lower()  # prezime
-                    foto_po_imenu[kljuc] = (ime_iz_fajla.title(), url)
-
-    # Sada prođi kroz TEKSTUALNE kadrovske zapise — tu su imena
-    for p in points:
-        payload = p.payload or {}
-        tip = payload.get("tip", "")
-        # Preskoči foto zapise (već obrađeni)
-        if "fotografija_profil" in tip or "biografija" in tip:
-            continue
-        text = payload.get("tekst", "") or ""
-        izvor = (payload.get("naziv_dokumenta", "") or payload.get("file_name", "") or "")
-        if "Ime Prezime" in text:
-            continue
-        imena = izvuci_imena_iz_teksta(text)
-        for ime in imena:
-            # Očisti "Direktor" ili druge titule sa kraja
-            reci = ime.split()
-            ciste = [r for r in reci if r.lower() not in {"direktor", "rukovodilac", "sef", "šef", "pomoćnik"}]
-            if ciste and len(ciste) >= 2:
-                ime = " ".join(ciste)
-            kljuc = ime.lower()
-            if kljuc not in imenik:
-                imenik[kljuc] = {"ime": ime, "foto": "", "izvori": []}
-            if izvor and izvor not in imenik[kljuc]["izvori"]:
-                imenik[kljuc]["izvori"].append(izvor)
-
-    # Poveži sa slikama
-    for kljuc, entry in imenik.items():
-        prezime = entry["ime"].split()[-1].lower()
-        if prezime in foto_po_imenu:
-            entry["foto"] = foto_po_imenu[prezime][1]
-
-    return sorted(imenik.values(), key=lambda x: x["ime"].split()[-1])
-
-
-# ============================================================
-# RUTIRANJE
-# ============================================================
-def detektuj_tip_upita(upit):
-    """Vraća tip upita. Normalizuje ćirilicu u latinicu pre regexa."""
-    # KLJUČNO: sredi_upit konvertuje ćirilicu u latinicu
-    u = sredi_upit(upit)
-
-    # Direktor — matchuje "direktor", "ko je direktor", "kako se zove direktor"
-    if re.search(r'\bdirektor\b', u) or re.search(r'\bko\s+je\s+direktor\b', u):
-        return "direktor"
-
-    # Lista zaposlenih
-    if re.search(r'\b(svi |lista |spisak |navedi )?(zaposleni|zaposlene|svi u biro|svi iz biro|ko radi|ko sve radi|kadrovska strukt|ljudi)\b', u) or \
-       re.search(r'\bimenik\b', u):
-        return "lista_zaposlenih"
-
-    # Konkretna osoba (Ime Prezime ili samo ime)
-    # Tražimo VELIKO slovo + još jedno VELIKO slovo u ORIGINALNOM upitu
-    imena_u_upitu = re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\s+[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\b', upit or "")
-    if imena_u_upitu:
-        return "osoba_ime"
-
-    # Oprema
-    if re.search(r'\b(stampac|stampaci|printer|toner|toneri|kertridz|oprema|stampa|pisač)\b', u):
-        return "oprema"
-
-    # Pravni član
-    if re.search(r'\b(clan|član)\s*\d+', u):
-        return "clan"
-
-    return "standard"
-
-
-# ============================================================
-# HANDLERI
-# ============================================================
-def handle_direktor():
-    """Direktno traži direktora u bazi, BEZ LLM-a.
-    Ako nema eksplicitnog zapisa, traži sve osobe sa titulom 'dr'/'mr'."""
-    points = scroll_svi(
-        tipovi={"kadrovski", "zaposleni", "osoblje", "biografija",
-                "fotografija_profil", "kadrovska_struktura"},
-        limit=1000,
-    )
-
-    direktori_eksplicitni = []
-    sve_osobe_sa_titulom = []
-
-    for p in points:
-        text = p.payload.get("tekst", "") or ""
-        izvor = p.payload.get("naziv_dokumenta", "") or ""
-        text_norm = sredi_upit(text)
-
-        # 1) Eksplicitno "direktor" — izvlači ime iz konteksta oko reči
-        if re.search(r'\bdirektor\b', text_norm):
-            # Nađi okolinu reči "direktor" (50 karaktera levo i desno)
-            for m in re.finditer(r'.{0,80}\bdirektor\b.{0,80}', text):
-                imena = izvuci_imena_iz_teksta(m.group())
-                for ime in imena:
-                    # Očisti titule sa kraja
-                    reci = ime.split()
-                    ciste = [r for r in reci if r.lower() not in {
-                        "direktor", "rukovodilac", "šef", "sef", "pomoćnik", "pomoćnik"
-                    }]
-                    if ciste and len(ciste) >= 2:
-                        ime = " ".join(ciste)
-                    if ime not in [d["ime"] for d in direktori_eksplicitni]:
-                        direktori_eksplicitni.append({"ime": ime, "izvor": izvor})
-
-        # 2) Sve osobe sa titulom (za fallback)
-        if re.search(r'\b(dr|mr|prof|doc|ing|inž|dipl)\b', text_norm):
-            imena = izvuci_imena_iz_teksta(text)
-            for ime in imena:
-                if ime not in [d["ime"] for d in sve_osobe_sa_titulom]:
-                    sve_osobe_sa_titulom.append({"ime": ime, "izvor": izvor})
-
-    if direktori_eksplicitni:
-        if len(direktori_eksplicitni) == 1:
-            d = direktori_eksplicitni[0]
-            slike = []
-            try:
-                foto_pogodci = pronadji_osobu_po_imenu(d["ime"])
-                for fp in foto_pogodci[:2]:
-                    if fp["url"]:
-                        slike.append((fp["url"], f"Direktor: {fp['ime']}"))
-            except Exception:
-                pass
-            return f"Direktor Biroa za planiranje je: **{d['ime']}**", slike
-        imena = ", ".join([d["ime"] for d in direktori_eksplicitni])
-        return f"Prema bazi, direktori su: {imena}", []
-
-    if sve_osobe_sa_titulom:
-        prvih = sve_osobe_sa_titulom[:3]
-        imena = ", ".join([d["ime"] for d in prvih])
-        return (f"⚠️ U bazi ne postoji eksplicitan zapis 'direktor je Ime Prezime'. "
-                f"Mogući kandidati sa titulom: {imena}."), []
-
-    return ("⚠️ Nije pronađen nijedan zapis o direktoru u bazi."), []
-
-
-def handle_lista_zaposlenih():
-    """Vraća listu svih zaposlenih sa slikama, BEZ LLM-a."""
+def do_rag(query, top_k=10):
+    """Jednostavan RAG: Qdrant search + kontekst + slike."""
     try:
-        zaposleni = get_svi_zaposleni_sa_slikama()
+        vec = embed_query(query)
+        if hasattr(qdrant, "query_points"):
+            response = qdrant.query_points(
+                collection_name=COLLECTION_NAME,
+                query=vec,
+                limit=top_k,
+            )
+            points = response.points
+        else:
+            points = qdrant.search(
+                collection_name=COLLECTION_NAME,
+                query_vector=vec,
+                limit=top_k,
+            )
     except Exception as e:
-        return f"⚠️ Greška pri dohvatanju zaposlenih: {e}", []
-    if not zaposleni:
-        # Fallback: pokušaj bez filtriranja tipa
-        try:
-            svi = scroll_svi(tipovi=None, limit=2000)
-            imenik = {}
-            for p in svi:
-                text = p.payload.get("tekst", "") or ""
-                if "Ime Prezime" in text:
-                    continue
-                imena = izvuci_imena_iz_teksta(text)
-                for ime in imena:
-                    kljuc = ime.lower()
-                    if kljuc not in imenik:
-                        imenik[kljuc] = ime
-            zaposleni = [{"ime": v, "foto": ""} for v in sorted(imenik.values(), key=lambda x: x.split()[-1])]
-        except Exception:
-            pass
-    if not zaposleni:
-        return "⚠️ Nisu pronađeni zaposleni u bazi. Proveri da li su dokumenti indeksirani sa `tip` poljem.", []
-    imena_lista = "\n".join([f"• {z['ime']}" for z in zaposleni])
-    sa_sl = [z for z in zaposleni if z.get("foto")]
-    return (f"**Запослени у Бироу ({len(zaposleni)})**\n\n{imena_lista}"
-            f"\n\n<sub>📸 Фотографије: {len(sa_sl)}/{len(zaposleni)}</sub>"), \
-           [(z["foto"], z["ime"]) for z in sa_sl]
+        return "", 0, [], f"Greška pri pretrazi: {e}"
 
-
-def handle_osoba_po_imenu(upit):
-    """Traži osobu po imenu iz upita, BEZ LLM-a."""
-    imena = re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\s+[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\b', upit)
-    if not imena:
-        return "⚠️ Nisam pronašao ime u pitanju.", []
-    svi_pogoci = []
-    for ime in imena:
-        pogoci = pronadji_osobu_po_imenu(ime)
-        svi_pogoci.extend(pogoci)
-    if not svi_pogoci:
-        return f"⚠️ **{', '.join(imena)}** — nije pronađena u bazi.", []
-    # Formatiraj
     delovi = []
     slike = []
     seen = set()
-    for p in svi_pogoci:
-        if p["ime"].lower() in seen:
-            continue
-        seen.add(p["ime"].lower())
-        delovi.append(f"**{p['ime']}** — {p['izvor']}")
-        if p["url"]:
-            slike.append((p["url"], p["ime"]))
-    return "### 👤 Pronađeno:\n\n" + "\n\n".join(delovi), slike[:6]
 
-
-def ocisti_tekst_opreme(text):
-    """Skrati i očisti tekst opreme od adresa, datuma, itd."""
-    linije = text.split("\n")
-    ciste = []
-    skip_patterns = [
-        r"mihaila pupina", r"birčaninova", r"tel/fax", r"tel:", r"fax:",
-        r"\d{5,}\s+beograd", r"broj:", r"datum:", r"datum\s*\d",
-        r"javno preduzece", r"biro za planiranje", r"srbija",
-        r"potrebne su nam", r"trebovanje", r"\d{2}\.\d{2}\.\d{4}",
-        r"d\.o\.o\.", r"cara dušana", r"slovenska",
-        r"^\s*$",
-    ]
-    for linija in linije:
-        ll = linija.lower().strip()
-        if not ll:
-            continue
-        if any(re.search(p, ll) for p in skip_patterns):
-            continue
-        ciste.append(linija.strip())
-    rez = " ".join(ciste)
-    # Nađi prvi MODEL/PROIZVOD (Kyocera, Canon, HP) i iseci pre toga
-    m = re.search(r'\b(kyocera|canon|hp|brother|samsung|epson|lexmark|oki|xerox)\b', rez, re.IGNORECASE)
-    if m:
-        rez = rez[m.start():]
-    if len(rez) > 250:
-        rez = rez[:250] + "..."
-    return rez.strip()
-
-
-def handle_oprema(upit):
-    """Direktno prikaži opremu, BEZ LLM-a za listanje."""
-    u = sredi_upit(upit)
-    zeljeni_tipovi = []
-    if "toner" in u or "kertridz" in u:
-        zeljeni_tipovi = ["toner", "oprema", "kancelarijska_oprema", "stampac"]
-    else:
-        zeljeni_tipovi = ["oprema", "kancelarijska_oprema", "inventar", "stampac", "racunar", "skener"]
-    points = scroll_svi(tipovi=set(zeljeni_tipovi), limit=200)
-    if not points:
-        return "⚠️ Nema pronađene opreme po tom upitu.", []
-    delovi = []
     for hit in points:
-        text = hit.payload.get("tekst", "") or ""
-        izvor = hit.payload.get("naziv_dokumenta", "") or ""
-        if "Ime Prezime" in text:
+        if not hit.payload:
             continue
-        cist = ocisti_tekst_opreme(text)
-        if not cist or len(cist) < 15:
-            continue
-        # Kratko, samo ime dokumenta + sadržaj
-        delovi.append(f"<sub>{izvor}</sub>\n{cist}")
-    if not delovi:
-        return "⚠️ Nema pronađene opreme po tom upitu.", []
-    return "**Pronađena oprema:**\n\n" + "\n\n---\n\n".join(delovi[:10]), []
+        text = hit.payload.get("tekst", "") or hit.payload.get("text", "") or ""
+        izvor = hit.payload.get("naziv_dokumenta", "") or hit.payload.get("file_name", "") or ""
+        url = (hit.payload.get("Link", "") or hit.payload.get("slika_url", "") or
+               hit.payload.get("image_url", "") or hit.payload.get("slika", ""))
+
+        # Skrati tekst
+        cist = re.sub(r'http[s]?://\S+', '', text).strip()
+        cist = re.sub(r'\n{3,}', '\n\n', cist)
+        if "Ime Prezime" in cist:
+            cist = cist.replace("Ime Prezime", "[ime]")
+        if len(cist) > 600:
+            cist = cist[:600] + "..."
+        if cist:
+            delovi.append(f"[{izvor}]\n{cist}")
+
+        # Slike
+        if url and url.startswith("http") and url not in seen:
+            slike.append((url, izvor or "Slika"))
+            seen.add(url)
+
+    kontekst = "\n\n---\n\n".join(delovi)
+    if len(kontekst) > 6000:
+        kontekst = kontekst[:6000] + "\n[Skraćeno]"
+
+    return kontekst, len(points), slike, ""
 
 
-def handle_clan(upit):
-    """Direktno traži pravni član u bazi, BEZ LLM-a.
-    Deduplikuje i vraća samo 1 najrelevantniji pogodak."""
-    u = sredi_upit(upit)
-    m = re.search(r'\bclan\s*(\d+)\b', u) or re.search(r'\bčlan\s*(\d+)\b', u)
-    if not m:
-        return "⚠️ Nisam pronašao broj člana u pitanju.", []
-    broj = m.group(1)
-
-    points = scroll_svi(
-        tipovi={"pravni_akt", "ugovor", "kolektivni_ugovor", "pravilnik", "zakon", "odluka"},
-        limit=2000,
-    )
-
-    pogodci = []
-    seen = set()
-    for p in points:
-        text = p.payload.get("tekst", "") or ""
-        izvor = p.payload.get("naziv_dokumenta", "") or ""
-        text_norm = sredi_upit(text)
-        # Pronađi "član 14" — matchuje sve varijante
-        # Patern: "clan 14" + bilo šta do "clan 15" ili "clan " sa drugim brojem
-        clan_pat = rf'\bclan\s*{broj}\b[^\n]*(?:\n(?!\bclan\s*\d).*)*'
-        for cm in re.finditer(clan_pat, text_norm, re.IGNORECASE):
-            tekst_clana = cm.group()[:1200].strip()
-            # Dedupe po sadržaju
-            kljuc = sredi_upit(tekst_clana[:80])
-            if kljuc in seen:
-                continue
-            seen.add(kljuc)
-            pogodci.append({"tekst": tekst_clana, "izvor": izvor})
-            break  # samo prvi pogodak po zapisu
-
-    if not pogodci:
-        return f"⚠️ Član {broj} nije pronađen u bazi pravnih akata.", []
-
-    # Vrati SAMO prvi (najrelevantniji)
-    p = pogodci[0]
-    return f"**Čлан {broj}:**\n\n<sub>{p['izvor']}</sub>\n\n{p['tekst']}", []
-
-
-def handle_standard(upit, istorija):
-    """Standardni RAG sa LLM-om i strogim promptom."""
-    kontekst, br_kandidata, ukupno, slike = standardni_rag(upit)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    # Istorija (samo prethodna 2 razgovora)
-    for h in istorija[-2:]:
-        if h.get("role") in ("user", "assistant"):
-            messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({
-        "role": "user",
-        "content": f"KONTEKST:\n{kontekst}\n\nPitanje: {upit}"
-    })
+def ask_llm(messages):
+    """Poziv LLM sa fallback-om na manji model."""
     try:
-        response = groq_client.chat.completions.create(
+        resp = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=messages,
             temperature=0.1,
-            max_tokens=400,
+            max_tokens=500,
         )
-        odgovor = response.choices[0].message.content
+        return resp.choices[0].message.content
     except Exception:
-        # Fallback na manji model
         try:
-            response = groq_client.chat.completions.create(
+            resp = groq_client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=messages,
                 temperature=0.1,
-                max_tokens=400,
+                max_tokens=500,
             )
-            odgovor = response.choices[0].message.content
+            return resp.choices[0].message.content
         except Exception as e:
-            odgovor = f"⚠️ Greška: {e}"
-    return odgovor, slike, br_kandidata, ukupno
-
-
-# ============================================================
-# STANDARDNI RAG
-# ============================================================
-@st.cache_data(ttl=1200)
-def get_tekstovi():
-    """Skroluje sve tekstove iz baze."""
-    sve_tacke = []
-    offset = None
-    while True:
-        records, next_offset = qdrant.scroll(
-            collection_name=COLLECTION_NAME,
-            limit=500,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False,
-        )
-        for r in records:
-            if r.payload:
-                raw_txt = (r.payload.get("tekst") or r.payload.get("text") or
-                           r.payload.get("content") or "")
-                izvor = (r.payload.get("naziv_dokumenta") or r.payload.get("file_name") or
-                         r.payload.get("izvor") or "")
-                tip = r.payload.get("tip", "")
-                slika_url = (r.payload.get("Link") or r.payload.get("slika_url") or
-                             r.payload.get("image_url") or "")
-                if raw_txt:
-                    sve_tacke.append({
-                        "tekst": sredi_tekst(raw_txt),
-                        "tekst_ascii": ukloni_dijakritike(sredi_tekst(raw_txt)),
-                        "izvor": sredi_tekst(izvor),
-                        "izvor_ascii": ukloni_dijakritike(sredi_tekst(izvor)),
-                        "slika_url": str(slika_url).strip(),
-                        "tip": tip,
-                    })
-        if next_offset is None or len(records) == 0:
-            break
-        offset = next_offset
-    return sve_tacke
-
-
-def _stemuj(w):
-    if len(w) >= 7: return w[:-2]
-    if len(w) >= 5: return w[:-1]
-    return w
-
-
-STOP = {"ko","je","su","sta","pise","bazi","postoji","navedi","prikazi","pokazi",
-        "slika","slike","sliku","foto","u","i","na","sa","za","o","da","li","ima",
-        "mesto","radno","biro","biroa","planiranje","projektovanje","pd","srbijasume",
-        "detalje","detaljnije","koji","koja","koje","svi","sve","svih","kao","ali",
-        "ili","gde","kada","kako","ovaj","ova","ovo","taj","ta","to","samo","jos",
-        "vrlo","neki","neka","neko","nesto","moze","molim","mi","vas","ovo","sta",
-        "trazi","trazim","nalaze","nadjem","naci","reci","kaze","kazu","neka","vec"}
-
-
-def izvuci_korene(upit_ascii):
-    reci = [w for w in re.findall(r'\b\w+\b', upit_ascii) if len(w) > 2]
-    out = []
-    for w in reci:
-        k = _stemuj(w)
-        if k in {_stemuj(s) for s in STOP}:
-            continue
-        out.append((k, len(k) < len(w)))
-    return out
-
-
-def koren_prisutan(k, skracen, tekst):
-    if skracen:
-        return re.search(r'\b' + re.escape(k), tekst) is not None
-    return re.search(r'\b' + re.escape(k) + r'\b', tekst) is not None
-
-
-def standardni_rag(upit, top_k=8, max_karaktera=5000):
-    """Standardni RAG za opšta pitanja."""
-    svi_odlomci = get_tekstovi()
-    upit_ascii = ukloni_dijakritike(upit)
-    norm_upit = sredi_tekst(upit)
-
-    koreni = izvuci_korene(upit_ascii)
-    candidates_map = {}
-
-    # Linearni sken sa korenima
-    for item in svi_odlomci:
-        txt_a = item["tekst_ascii"]
-        izv_a = item["izvor_ascii"]
-        key = item["tekst"]
-        score = 0.0
-        if koreni:
-            tp = sum(1 for k, s in koreni if koren_prisutan(k, s, txt_a))
-            ip = sum(1 for k, s in koreni if koren_prisutan(k, s, izv_a))
-            score = (tp * 5 + ip) * 10000.0
-        if score > 0:
-            candidates_map[key] = {"item": item, "score": score}
-
-    # Qdrant semantička pretraga (kompatibilno sa starim i novim API-jem)
-    try:
-        query_vector = embed_upit(norm_upit)
-        points = qdrant_query(query_vector, limit=20)
-        for rank, hit in enumerate(points):
-            if hit.payload:
-                raw_txt = hit.payload.get("tekst", "") or hit.payload.get("text", "")
-                izvor = (hit.payload.get("naziv_dokumenta", "") or
-                         hit.payload.get("file_name", "") or "")
-                tip = hit.payload.get("tip", "")
-                slika_url = (hit.payload.get("Link", "") or hit.payload.get("slika_url", "") or "")
-                if raw_txt:
-                    norm_txt = sredi_tekst(raw_txt)
-                    vec_score = (20 - rank) * 50.0
-                    if norm_txt in candidates_map:
-                        candidates_map[norm_txt]["score"] += vec_score
-                    else:
-                        candidates_map[norm_txt] = {
-                            "item": {
-                                "tekst": norm_txt,
-                                "tekst_ascii": ukloni_dijakritike(norm_txt),
-                                "izvor": sredi_tekst(izvor),
-                                "izvor_ascii": ukloni_dijakritike(sredi_tekst(izvor)),
-                                "slika_url": str(slika_url).strip(),
-                                "tip": tip,
-                            },
-                            "score": vec_score,
-                        }
-    except Exception:
-        pass
-
-    rangirani = sorted(candidates_map.values(), key=lambda x: x["score"], reverse=True)
-    top_k_items = [e["item"] for e in rangirani[:top_k]]
-
-    # Kontekst
-    MAX_PO = 700
-    delovi = []
-    for item in top_k_items:
-        cist = re.sub(r'http[s]?://\S+', '', item["tekst"]).strip()
-        if "Ime Prezime" in cist:
-            continue  # Ignoriši placeholder
-        if len(cist) > MAX_PO:
-            cist = cist[:MAX_PO] + "..."
-        delovi.append(f"[{item['izvor']}]\n{cist}")
-    kontekst = "\n\n---\n\n".join(delovi)
-    if len(kontekst) > max_karaktera:
-        kontekst = kontekst[:max_karaktera] + "\n[Skraćeno]"
-
-    # Slike iz tekstualnih rezultata
-    slike = []
-    seen = set()
-    for item in top_k_items:
-        url = item.get("slika_url", "").strip()
-        if not url or not url.startswith("http") or url in seen:
-            continue
-        slike.append((url, f"Izvor: {item['izvor']}"))
-        seen.add(url)
-        if len(slike) >= 4:
-            break
-
-    # Ako je upit vizuelni (dijagram, mapa, ruža vetrova, grafikon, tabela)
-    # posebno dohvati zapise sa slikama dijagrama
-    u_norm = sredi_upit(upit)
-    vizuel_ključne = ["dijagram", "mapa", "karta", "ruza vetrova", "vetrova",
-                      "grafikon", "tabela", "shema", "sema", "skica", "crtez"]
-    # Specifični filteri za tipove dijagrama
-    specificne_ključne = None
-    if "vetrova" in u_norm or "ruza vetrova" in u_norm:
-        specificne_ključne = ["vetrova", "windrose", "wind_rose", "ruza", "vjetrova", "pravac", "stanica"]
-    elif "panj" in u_norm:
-        specificne_ključne = ["panj", "stump"]
-    elif "sortiment" in u_norm:
-        specificne_ključne = ["sortiment"]
-    elif "prirast" in u_norm:
-        specificne_ključne = ["prirast", "prirastaj"]
-    elif "gazdinsk" in u_norm or "g.j" in u_norm or "gospodarsk" in u_norm:
-        specificne_ključne = ["gazdinsk", "gospodarsk", "gj_", "mapa"]
-
-    if any(kw in u_norm for kw in vizuel_ključne) or "prikaz" in u_norm or "pokaz" in u_norm:
-        try:
-            dijagram_points = scroll_svi(
-                tipovi={"dijagram", "mapa", "karta", "tabela", "grafikon", "vizuel"},
-                limit=50,
-            )
-            for d in dijagram_points:
-                url = (d.payload.get("Link", "") or d.payload.get("slika_url", "") or
-                       d.payload.get("image_url", "") or "")
-                if not url or not url.startswith("http") or url in seen:
-                    continue
-                # Ako imamo specifični filter, primeni ga
-                if specificne_ključne:
-                    izvor_norm = sredi_upit(d.payload.get("naziv_dokumenta", ""))
-                    tekst_norm = sredi_upit(d.payload.get("tekst", ""))
-                    if not any(kw in izvor_norm or kw in tekst_norm for kw in specificne_ključne):
-                        continue
-                slike.append((url, d.payload.get("naziv_dokumenta", "Dijagram")))
-                seen.add(url)
-                if len(slike) >= 6:
-                    break
-        except Exception:
-            pass
-
-    return kontekst, len(rangirani), len(svi_odlomci), slike[:6]
+            return f"⚠️ Greška: {e}"
 
 
 # ============================================================
 # UI
 # ============================================================
-st.set_page_config(
-    page_title="Биро асистент",
-    page_icon="🌲",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+st.set_page_config(page_title="Биро асистент", page_icon="🌲", layout="wide")
 
 # Header
 col_l, col_c, col_r = st.columns([1, 3, 1])
 with col_c:
     st.image(LOGO_URL, width=110)
     st.markdown(
-        "<h1 style='text-align: center; color: #1b4332; margin-top: 0;'>🌲 Биро асистент</h1>",
+        "<h2 style='text-align: center; color: #1b4332; margin: 0;'>🌲 Биро асистент</h2>",
         unsafe_allow_html=True,
     )
     st.markdown(
-        "<p style='text-align: center; color: #52796f; margin-top: -10px;'>"
+        "<p style='text-align: center; color: #52796f; margin: 0;'>"
         "ПД „Србијашуме” • Биро за планирање</p>",
         unsafe_allow_html=True,
     )
 
 st.markdown("---")
 
-# 6 dugmadi
+# 6 quick prompt dugmadi
 st.markdown("##### 💡 Брза питања:")
-quick_cols = st.columns(6)
+cols = st.columns(6)
 QUICK = [
-    "👤 Директор",
-    "👥 Сви запослени",
-    "🖨️ Штампачи",
-    "🎨 Тонери",
-    "🌀 Ружа ветрова",
-    "📜 Члан 14",
+    "Ко је директор Бироа?",
+    "Који су запослени у Бироу?",
+    "Који су штампачи у Бироу?",
+    "Који тонeri се користе?",
+    "Покажи дијаграм руже ветрова",
+    "Члан 14 колективног уговора",
 ]
 for i, label in enumerate(QUICK):
-    with quick_cols[i]:
+    with cols[i]:
         if st.button(label, use_container_width=True, key=f"q{i}"):
             st.session_state.pending = label
 
@@ -879,36 +180,33 @@ st.markdown("---")
 
 # Sidebar
 with st.sidebar:
-    st.image(LOGO_URL, width=90)
-    st.markdown("### 🌲 Биро асистент")
-    st.caption(f"Model: {EMBEDDING_MODEL.split('/')[-1]}")
+    st.image(LOGO_URL, width=80)
+    st.markdown("### 🌲 Биро")
+    st.caption(f"Kolekcija: {COLLECTION_NAME}")
     st.markdown("---")
-    if st.button("🧹 Obriši razgovor", use_container_width=True):
+    if st.button("🧹 Обриши разговор", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
-    if st.button("🔄 Osveži bazu", use_container_width=True):
-        get_tekstovi.clear()
+    if st.button("🔄 Освежи кеш", use_container_width=True):
+        st.cache_resource.clear()
         st.cache_data.clear()
-        st.session_state.cache_cleared = time.strftime("%H:%M:%S")
+        st.session_state.cache_msg = "Кеш обрисан"
         st.rerun()
-    if st.session_state.get("cache_cleared"):
-        st.success(f"✅ Keš obrisan u {st.session_state.cache_cleared}")
-        if time.time() - st.session_state.get("cache_msg_ts", 0) > 5:
-            del st.session_state.cache_cleared
-        st.session_state.cache_msg_ts = time.time()
+    if st.session_state.get("cache_msg"):
+        st.success(f"✅ {st.session_state.cache_msg}")
+        del st.session_state.cache_msg
 
 # Istorija
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Prikaz
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg.get("images"):
-            cols = st.columns(min(3, len(msg["images"])))
+            img_cols = st.columns(min(3, len(msg["images"])))
             for idx, (url, cap) in enumerate(msg["images"]):
-                with cols[idx % 3]:
+                with img_cols[idx % 3]:
                     st.image(url, caption=cap, width=250)
 
 # Input
@@ -923,48 +221,40 @@ if user_input:
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        with st.spinner("Тражим..."):
+        with st.spinner("Тражим у бази..."):
             try:
-                tip_upita = detektuj_tip_upita(user_input)
-                slike = []
-                meta = ""
-
-                if tip_upita == "direktor":
-                    odgovor, slike = handle_direktor()
-                elif tip_upita == "lista_zaposlenih":
-                    odgovor, slike = handle_lista_zaposlenih()
-                elif tip_upita == "osoba_ime":
-                    odgovor, slike = handle_osoba_po_imenu(user_input)
-                elif tip_upita == "oprema":
-                    odgovor, slike = handle_oprema(user_input)
-                elif tip_upita == "clan":
-                    odgovor, slike = handle_clan(user_input)
+                kontekst, br_k, slike, err = do_rag(user_input)
+                if err:
+                    st.error(err)
+                    st.session_state.messages.append({
+                        "role": "assistant", "content": err, "images": []
+                    })
                 else:
-                    odgovor, slike, br_k, ukupno = handle_standard(
-                        user_input, st.session_state.messages
-                    )
-                    meta = f"\n\n<sub>📊 Kandidati: {br_k} | Baza: {ukupno}</sub>"
+                    messages = [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": f"KONTEKST:\n{kontekst}\n\nPitanje: {user_input}"},
+                    ]
+                    odgovor = ask_llm(messages)
 
-                # Prikaz slika
-                if slike:
-                    st.markdown("---")
-                    cols = st.columns(min(3, len(slike)))
-                    for idx, (url, cap) in enumerate(slike):
-                        with cols[idx % 3]:
-                            st.image(url, caption=cap, width=280)
-                    st.markdown("---")
+                    # Slike
+                    if slike:
+                        st.markdown("---")
+                        img_cols = st.columns(min(3, len(slike)))
+                        for idx, (url, cap) in enumerate(slike):
+                            with img_cols[idx % 3]:
+                                st.image(url, caption=cap, width=250)
+                        st.markdown("---")
 
-                st.markdown(odgovor + meta)
+                    st.markdown(odgovor)
+                    st.caption(f"📊 Kandidati: {br_k}")
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": odgovor + meta,
-                    "images": slike,
-                })
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": odgovor,
+                        "images": slike,
+                    })
             except Exception as e:
                 st.error(f"⚠️ Greška: {e}")
                 st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": f"⚠️ Greška: {e}",
-                    "images": [],
+                    "role": "assistant", "content": f"⚠️ Greška: {e}", "images": []
                 })
