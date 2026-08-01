@@ -166,32 +166,33 @@ def handle_lista_zaposlenih():
 def handle_oprema_specificno(upit):
     """Oprema: skeniraj 'oprema' tip, filtriraj po upitu."""
     points = scroll_tip("oprema", limit=50)
-    u = upit.lower()
-    is_toner = "toner" in u or "kertridž" in u or "kertridz" in u
-    is_printer = "štampač" in u or "stampac" in u or "printer" in u
+    u = sredi_upit(upit)
+    is_toner = "toner" in u or "kertridz" in u
+    is_printer = any(kw in u for kw in ["stampac", "stampaci", "printer", "pisac"])
 
     delovi = []
-    slike = []
     for p in points:
         payload = p.payload or {}
-        tekst = (payload.get("tekst", "") or "").lower()
+        tekst_orig = payload.get("tekst", "") or ""
+        tekst = sredi_upit(tekst_orig)
         izvor = payload.get("izvor", "") or payload.get("naziv_dokumenta", "")
-        url = payload.get("slika_url", "")
 
         # Filtriranje
-        if is_toner and not ("toner" in tekst or "kertrid" in tekst):
+        if is_toner and not ("toner" in tekst or "kertridz" in tekst):
             continue
-        if is_printer and not any(kw in tekst for kw in ["štampač", "stampac", "printer", "kyocera", "canon", "hp"]):
+        if is_printer and not any(kw in tekst for kw in ["stampac", "printer", "kyocera", "canon", "hp", "pisac"]):
             continue
+        if not is_toner and not is_printer:
+            # Opšti upit za opremu — prikaži sve
+            pass
 
-        # Skrati tekst
-        cist = payload.get("tekst", "")
-        # Izbaci adrese
+        # Skrati tekst, izbaci adrese
         linije = []
-        for l in cist.split("\n"):
-            ll = l.lower()
-            if any(x in ll for x in ["mihaila pupina", "birčaninova", "tel/fax",
-                                      "javno preduzece", "trebovanje"]):
+        for l in tekst_orig.split("\n"):
+            ll = sredi_upit(l)
+            if any(x in ll for x in ["mihaila pupina", "bircaninova", "tel/fax",
+                                      "javno preduzece", "trebovanje", "srbija",
+                                      "d.o.o.", "cara dusana", "slovenska"]):
                 continue
             if ll.strip():
                 linije.append(l.strip())
@@ -199,36 +200,34 @@ def handle_oprema_specificno(upit):
 
         if cist:
             delovi.append(f"**{izvor or 'Oprema'}:**\n{cist}")
-        if url:
-            slike.append((url, izvor or "Oprema"))
 
     if not delovi:
         return "⚠️ Nema pronađene opreme po tom upitu.", []
-    return "**Pronađena oprema:**\n\n" + "\n\n---\n\n".join(delovi[:10]), slike
+    # Bez slika — oprema nema relevantne slike u bazi
+    return "**Pronađena oprema:**\n\n" + "\n\n---\n\n".join(delovi[:10]), []
 
 
 def handle_dijagram(upit):
     """Dijagram: skeniraj dijagram tip, koristi ocr_tekst za pretragu."""
     points = scroll_tip("dijagram", limit=200)
-    u = upit.lower()
+    u = sredi_upit(upit)
 
     delovi = []
     slike = []
     for p in points:
         payload = p.payload or {}
-        tekst = (payload.get("tekst", "") or "").lower()
-        ocr = (payload.get("ocr_tekst", "") or "").lower()
+        tekst = sredi_upit(payload.get("tekst", "") or "")
+        ocr = sredi_upit(payload.get("ocr_tekst", "") or "")
         izvor = payload.get("izvor", "") or ""
         url = payload.get("Link", "") or payload.get("slika_url", "")
 
-        # Ako upit sadrži "ruža vetrova", filtriraj
-        if "vetrova" in u or "ruza" in u:
+        # Ako upit traži specifičan tip, filtriraj
+        if any(kw in u for kw in ["vetrova", "ruza vetrova", "wind"]):
             if not ("vetrova" in ocr or "vetrova" in tekst or "wind" in ocr or "ruza" in tekst):
                 continue
 
-        if url:
+        if url and url.startswith("http"):
             slike.append((url, izvor or "Dijagram"))
-        delovi.append(f"**{izvor or 'Dijagram'}**")
 
     if not slike:
         return "⚠️ Nema dijagrama koji odgovaraju tom upitu.", []
@@ -236,17 +235,16 @@ def handle_dijagram(upit):
 
 
 def handle_clan(broj):
-    """Pravni član: skeniraj pravni_akt, nađi 'član N'."""
+    """Pravni član: skeniraj pravni_akt, nađi 'clan N' (ćirilica normalizovana)."""
     points = scroll_tip("pravni_akt", limit=500)
     pogodci = []
     for p in points:
         payload = p.payload or {}
         tekst = payload.get("tekst", "") or ""
-        tekst_norm = tekst.lower()
-        # Traži "члан N" ili "clan N"
-        if f"члан {broj}" in tekst_norm or f"clan {broj}" in tekst_norm:
-            # Izvuci oko člana
-            idx = max(tekst_norm.find(f"члан {broј}"), tekst_norm.find(f"clan {broj}"))
+        tekst_norm = sredi_upit(tekst)
+        if f"clan {broj}" in tekst_norm:
+            # Nađi poziciju u ORIGINALNOM tekstu
+            idx = tekst_norm.find(f"clan {broj}")
             if idx < 0:
                 continue
             start = max(0, idx - 50)
@@ -261,7 +259,7 @@ def handle_clan(broj):
     seen = set()
     uniq = []
     for p in pogodci:
-        kljuc = p["tekst"][:100].lower()
+        kljuc = sredi_upit(p["tekst"][:100])
         if kljuc not in seen:
             seen.add(kljuc)
             uniq.append(p)
@@ -345,30 +343,58 @@ def ask_llm(messages):
 # ============================================================
 # RUTIRANJE
 # ============================================================
+def sredi_upit(t):
+    """Konvertuje ćirilicu u latinicu i uklanja dijakritike."""
+    if not t:
+        return ""
+    # 1) Ćirilica → latinica
+    zamene_cir = {
+        'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ж':'ž','з':'z','и':'i',
+        'ј':'j','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s',
+        'т':'t','у':'u','ф':'f','х':'h','ц':'c','ч':'č','ш':'š','ć':'ć','ђ':'đ',
+    }
+    out1 = []
+    for c in str(t).lower():
+        out1.append(zamene_cir.get(c, c))
+    s = "".join(out1)
+    # 2) Ukloni dijakritike
+    zamene_dij = {'č':'c', 'ć':'c', 'š':'s', 'ž':'z', 'đ':'d'}
+    return "".join([zamene_dij.get(c, c) for c in s])
+
+
 def detektuj_tip(upit):
-    u = upit.lower()
-    # Direktor
+    u = sredi_upit(upit)  # KLJUČNO: ćirilica → latinica
+
+    # Direktor (pre liste, jer "direktor" sadrži specifičniji pojam)
     if "direktor" in u and "zamenik" not in u:
         return "direktor"
-    if "ko je direktor" in u or "ko je novi direktor" in u:
-        return "direktor"
-    # Lista zaposlenih
-    if any(kw in u for kw in ["svi zaposleni", "lista zaposlenih", "spisak", "ko radi", "kadrovska"]):
-        return "lista_zaposlenih"
-    # Štampači/toneri
+
+    # Lista zaposlenih — "zaposleni" + indikatori liste/pitanja
+    if "zaposlen" in u:
+        indikatori = ["svi", "lista", "spisak", "koji su", "ko je sve", "navedi",
+                      "ko radi", "kadrov", "imena", "ljudi", "ko je", "tko je"]
+        if any(ind in u for ind in indikatori):
+            return "lista_zaposlenih"
+
+    # Toneri (specifičniji od štampača)
     if "toner" in u or "kertrid" in u:
         return "oprema"
-    if any(kw in u for kw in ["štampač", "stampac", "stampaci", "printer", "oprema"]):
+
+    # Štampači
+    if any(kw in u for kw in ["stampac", "stampaci", "printer", "pisač", "oprema", "racunar"]):
         return "oprema"
-    # Dijagram
-    if any(kw in u for kw in ["dijagram", "mapa", "karta", "ruža vetrova", "ruza vetrova",
-                                "vetrova", "grafikon", "šema", "shema", "tabela", "skica", "crtež"]):
+
+    # Dijagram / vizuel
+    if any(kw in u for kw in ["dijagram", "mapa", "karta", "ruza vetrova", "vetrova",
+                                "grafikon", "sema", "shema", "tabela", "skica",
+                                "crtez", "prikaz", "pokaz"]):
         return "dijagram"
+
     # Pravni član
-    m = re.search(r"član\s*(\d+)|clan\s*(\d+)", u)
+    m = re.search(r"clan\s*(\d+)", u)
     if m:
-        broj = m.group(1) or m.group(2)
-        return f"clan_{broj}"
+        return f"clan_{m.group(1)}"
+
     return "standard"
 
 
