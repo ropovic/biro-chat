@@ -163,6 +163,71 @@ def handle_lista_zaposlenih():
     return f"**Запослени у Бироу ({len(uniq)}):**\n\n{imena_lista}", slike
 
 
+def handle_osoba_po_imenu(upit):
+    """Traži osobu po imenu u photo records."""
+    import re as _re
+    # Izvuci imena (veliko slovo + veliko slovo) iz ORIGINALNOG upita
+    imena = _re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\s+[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\b', upit or "")
+    # ćirilica varijanta
+    if not imena:
+        imena = _re.findall(r'\b[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ][а-яё]{2,}\b', upit or "")
+    if not imena:
+        return "⚠️ Nisam pronašao ime u pitanju. Koristite format: 'Ime Prezime'.", []
+
+    points = scroll_tip("fotografija_profil", limit=100)
+    pogodci = []
+    for p in points:
+        payload = p.payload or {}
+        tekst = payload.get("tekst", "") or ""
+        tekst_norm = sredi_upit(tekst)
+        url = payload.get("Link") or payload.get("slika_url", "")
+        for ime in imena:
+            ime_norm = sredi_upit(ime)
+            # Podeli ime na delove i traži sve delove
+            delovi_imena = ime_norm.split()
+            if all(d in tekst_norm for d in delovi_imena):
+                # Izvuci lepo ime
+                m = _re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
+                ime_lepo = m.group(1) if m else ime
+                funkcija = payload.get("Funkcija", "")
+                pogodci.append({"ime": ime_lepo, "url": url, "funkcija": funkcija})
+
+    if not pogodci:
+        return f"⚠️ {', '.join(imena)} — nisam pronašao u bazi.", []
+
+    # Dedupe
+    seen = set()
+    uniq = []
+    for p in pogodci:
+        if p["ime"] not in seen:
+            seen.add(p["ime"])
+            uniq.append(p)
+
+    delovi = [f"**Pronađeno {len(uniq)}:**", ""]
+    for p in uniq:
+        if p.get("funkcija"):
+            delovi.append(f"- **{p['ime']}** — {p['funkcija']}")
+        else:
+            delovi.append(f"- **{p['ime']}**")
+    slike = [(p["url"], p["ime"]) for p in uniq if p["url"]]
+    return "\n".join(delovi), slike
+
+
+def je_pitanje_za_eksterno(upit):
+    """Da li pitanje zahteva eksternu pretragu (opšta znanja)."""
+    u = sredi_upit(upit)
+    # Pitanja o ljudima, definicijama, opštim pojmovima
+    ekstern_ključne = [
+        "ko je ministar", "ko je predsednik", "ko je direktor", "ko je osnivac",
+        "ko je osnovao", "ko je izumeo", "ko je napravio",
+        "sta je", "sta su", "sta znaci", "sta predstavlja",
+        "koji je", "koja je", "koje je",
+        "kako se zove", "gde se nalazi", "kada je",
+        "koliko kosta", "koliko je",
+    ]
+    return any(kw in u for kw in ekstern_ključne)
+
+
 def handle_oprema_specificno(upit):
     """Oprema: skeniraj 'oprema' tip, prikaži čistu listu.
     Filter: štampači ILI toneri (ne oba)."""
@@ -454,6 +519,13 @@ def detektuj_tip(upit):
     if "direktor" in u and "zamenik" not in u:
         return "direktor"
 
+    # Traženje osobe po imenu: "pronađi [Ime]", "nađi [Ime]", "ima li [Ime]"
+    if any(kw in u for kw in ["pronadi", "nadji", "nadjem",
+                                "ima li", "gde je", "ko je to", "sta je sa"]):
+        # Ali NE ako je o direktoru ili listi zaposlenih
+        if "direktor" not in u and "zaposleni" not in u:
+            return "osoba_ime"
+
     # Lista zaposlenih — "zaposleni" + indikatori liste/pitanja
     if "zaposlen" in u:
         indikatori = ["svi", "lista", "spisak", "koji su", "ko je sve", "navedi",
@@ -576,6 +648,8 @@ if user_input:
                     odgovor, slike = handle_direktor()
                 elif tip == "lista_zaposlenih":
                     odgovor, slike = handle_lista_zaposlenih()
+                elif tip == "osoba_ime":
+                    odgovor, slike = handle_osoba_po_imenu(user_input)
                 elif tip == "oprema":
                     odgovor, slike = handle_oprema_specificno(user_input)
                 elif tip == "dijagram":
@@ -589,19 +663,25 @@ if user_input:
                         st.error(err)
                         odgovor = err
                     else:
-                        # Ako interni kontekst nije dovoljan, probaj eksternu pretragu
+                        # Za opšta pitanja (Ko je ministar, Šta je X) — probaj eksterno
                         ext_info = ""
-                        if not je_kontekst_dovoljan(kontekst):
+                        koristio_ext = False
+                        if je_pitanje_za_eksterno(user_input):
                             ext = external_search(user_input)
                             if ext:
                                 ext_info = f"\n\n=== SPOLJNI IZVORI ===\n{ext}"
-                                meta += f" | 🌐 Eksterno: da"
+                                koristio_ext = True
+                                # Za opšta pitanja NE prikazuj slike iz interne baze
+                                slike = []
                         messages = [
                             {"role": "system", "content": SYSTEM_PROMPT},
                             {"role": "user", "content": f"KONTEKST IZ BAZE:\n{kontekst}{ext_info}\n\nPitanje: {user_input}"},
                         ]
                         odgovor = ask_llm(messages)
-                        meta = f"\n\n<sub>📊 Kandidati: {br_k}</sub>"
+                        meta = f"\n\n<sub>📊 Kandidati: {br_k}"
+                        if koristio_ext:
+                            meta += " | 🌐 Eksterno"
+                        meta += "</sub>"
 
                 if slike:
                     st.markdown("---")
