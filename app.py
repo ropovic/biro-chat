@@ -172,7 +172,6 @@ def handle_oprema_specificno(upit):
     is_toner = "toner" in u or "kertridz" in u
     is_printer = any(kw in u for kw in ["stampac", "stampaci", "printer", "pisac"])
 
-    # KLJUČNO: Non-capturing group (?:...) da findall vrati CEO match, ne samo grupu
     stampaci_pat = _re.compile(r'\b(?:Kyocera|Canon|HP|Brother|Samsung|Epson|Lexmark|Xerox|OKI)\s+[A-Z0-9][A-Za-z0-9\-\.]{2,20}\b')
     toneri_pat = _re.compile(r'\b(?:TK-[A-Z0-9]{3,5}|HP\s+[A-Z]?\d{3,4}[A-Z]?|Canon\s+[A-Z0-9]{2,6}|Kyocera\s+TK-\d+|CE\d{2,3}[A-Z]?)\b')
 
@@ -184,14 +183,11 @@ def handle_oprema_specificno(upit):
         tekst_orig = payload.get("tekst", "") or ""
         tekst = sredi_upit(tekst_orig)
 
-        # Filtriranje po tipu upita
         if is_toner and "toner" not in tekst and "kertridz" not in tekst:
             continue
         if is_printer and not any(kw in tekst for kw in ["stampac", "printer", "kyocera", "canon", "hp", "pisac"]):
             continue
-        # Ako ni toner ni printer, preskoči za specifične upite
         if is_toner or is_printer:
-            # Nađi SAMO odgovarajuće modele
             if is_toner:
                 for m in toneri_pat.findall(tekst_orig):
                     toneri_lista.add(m)
@@ -199,33 +195,40 @@ def handle_oprema_specificno(upit):
                 for m in stampaci_pat.findall(tekst_orig):
                     stampaci_lista.add(m)
 
-    # Formatiranje — SAMO ono što je traženo
+    def dodaj_proizvodjaca(kod):
+        """Dodaje ime proizvođača ako nedostaje."""
+        if kod.startswith("TK-") or kod.startswith("tk-"):
+            return f"Kyocera {kod}"
+        if kod.startswith("CE"):
+            return f"HP {kod}"
+        return kod
+
     if is_toner:
         if not toneri_lista:
             return "⚠️ Nisu pronađeni toneri po tom upitu.", []
-        delovi = ["**Toneri u Birou:**"]
+        delovi = ["**Toneri u Birou:**", ""]
         for t in sorted(toneri_lista):
-            delovi.append(f"  • {t}")
+            delovi.append(f"- {dodaj_proizvodjaca(t)}")
         return "\n".join(delovi), []
 
     if is_printer:
         if not stampaci_lista:
             return "⚠️ Nisu pronađeni štampači po tom upitu.", []
-        delovi = ["**Štampači u Birou:**"]
+        delovi = ["**Štampači u Birou:**", ""]
         for s in sorted(stampaci_lista):
-            delovi.append(f"  • {s}")
+            delovi.append(f"- {s}")
         return "\n".join(delovi), []
 
-    # Opšti upit za opremu
-    delovi = ["**Oprema u Birou:**"]
+    delovi = ["**Oprema u Birou:**", ""]
     if stampaci_lista:
-        delovi.append("\nŠtampači:")
+        delovi.append("**Štampači:**")
         for s in sorted(stampaci_lista):
-            delovi.append(f"  • {s}")
+            delovi.append(f"- {s}")
+        delovi.append("")
     if toneri_lista:
-        delovi.append("\nToneri:")
+        delovi.append("**Toneri:**")
         for t in sorted(toneri_lista):
-            delovi.append(f"  • {t}")
+            delovi.append(f"- {dodaj_proizvodjaca(t)}")
     if not stampaci_lista and not toneri_lista:
         return "⚠️ Nema pronađene opreme.", []
     return "\n".join(delovi), []
@@ -368,6 +371,58 @@ def ask_llm(messages):
             return resp.choices[0].message.content
         except Exception as e:
             return f"⚠️ Greška: {e}"
+
+
+# ============================================================
+# EKSTERNI SEARCH (Tavily) — fallback kad baza nema podatak
+# ============================================================
+import requests
+
+def external_search(query, max_results=3):
+    """Tavily pretraga. Vraća formatiran tekst ili None ako ne radi.
+    Besplatno: 1000 pretraga/mesec. signup: https://tavily.com"""
+    api_key = os.environ.get("TAVILY_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        r = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": api_key,
+                "query": query,
+                "max_results": max_results,
+                "include_answer": True,
+                "search_depth": "basic",
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        delovi = []
+        if data.get("answer"):
+            delovi.append(f"**Sažetak:** {data['answer']}\n")
+        for res in data.get("results", []):
+            delovi.append(
+                f"**{res.get('title', '')}**\n"
+                f"  URL: {res.get('url', '')}\n"
+                f"  {res.get('content', '')[:400]}"
+            )
+        return "\n\n".join(delovi) if delovi else None
+    except Exception:
+        return None
+
+
+def je_kontekst_dovoljan(kontekst):
+    """Provera da li kontekst ima dovoljno smislenog sadržaja."""
+    if not kontekst or len(kontekst.strip()) < 100:
+        return False
+    # Ako sadrži samo "nije pronađeno" ili je premali
+    niske_reci = ["nije pronađeno", "nema podatak", "podatak nije"]
+    tekst_lower = kontekst.lower()
+    if any(fraza in tekst_lower for fraza in niske_reci) and len(kontekst) < 300:
+        return False
+    return True
 
 
 # ============================================================
@@ -534,9 +589,16 @@ if user_input:
                         st.error(err)
                         odgovor = err
                     else:
+                        # Ako interni kontekst nije dovoljan, probaj eksternu pretragu
+                        ext_info = ""
+                        if not je_kontekst_dovoljan(kontekst):
+                            ext = external_search(user_input)
+                            if ext:
+                                ext_info = f"\n\n=== SPOLJNI IZVORI ===\n{ext}"
+                                meta += f" | 🌐 Eksterno: da"
                         messages = [
                             {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": f"KONTEKST:\n{kontekst}\n\nPitanje: {user_input}"},
+                            {"role": "user", "content": f"KONTEKST IZ BAZE:\n{kontekst}{ext_info}\n\nPitanje: {user_input}"},
                         ]
                         odgovor = ask_llm(messages)
                         meta = f"\n\n<sub>📊 Kandidati: {br_k}</sub>"
