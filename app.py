@@ -248,15 +248,39 @@ def je_pitanje_o_kompaniji(upit):
 
 def handle_oprema_specificno(upit):
     """Oprema: skeniraj 'oprema' tip, prikaži čistu listu.
-    Filter: štampači ILI toneri (ne oba)."""
-    import re as _re
+    Filter: štampači ILI toneri (ne oba).
+    Razdvaja prema tipu zapisa, ne samo keyword match-u."""
     points = scroll_tip("oprema", limit=50)
     u = sredi_upit(upit)
     is_toner = "toner" in u or "kertridz" in u
     is_printer = any(kw in u for kw in ["stampac", "stampaci", "printer", "pisac"])
 
-    stampaci_pat = _re.compile(r'\b(?:Kyocera|Canon|HP|Brother|Samsung|Epson|Lexmark|Xerox|OKI)\s+[A-Z0-9][A-Za-z0-9\-\.]{2,20}\b')
-    toneri_pat = _re.compile(r'\b(?:TK-[A-Z0-9]{3,5}|HP\s+[A-Z]?\d{3,4}[A-Z]?|Canon\s+[A-Z0-9]{2,6}|Kyocera\s+TK-\d+|CE\d{2,3}[A-Z]?)\b')
+    # Specifični patterni za štampače (isključuju tonere)
+    # Kyocera FS-9530dn, M3655idn, P2040dn, TASKalfa, ECOSYS
+    # HP Designjet, OfficeJet, LaserJet, PageWide
+    # Canon imageRUNNER, TX-3000, iR, PIXMA
+    printer_pat = re.compile(
+        r'\b(?:'
+        r'Kyocera\s+(?:FS-\d+[a-z]*|M\d+[a-z]*|P\d+[a-z]*|TASKalfa\w*|ECOSYS\w*)'
+        r'|HP\s+(?:Designjet\w*|OfficeJet\w*|LaserJet\w*|PageWide\w*)'
+        r'|Canon\s+(?:imageRUNNER\w*|TX-\d+|iR\d+\w*|PIXMA\w*|imagePRESS\w*)'
+        r'|Brother\s+(?:MFC\w*|DCP\w*|HL\w*)'
+        r'|Epson\s+(?:WorkForce\w*|EcoTank\w*|SureColor\w*)'
+        r')\b',
+        re.IGNORECASE
+    )
+
+    # Specifični patterni za tonere (isključuju štampače)
+    # Kyocera TK-XXX, HP CXXXX ili CE-XXX, Canon PFI-XXX ili CL-XXX
+    toner_pat = re.compile(
+        r'\b(?:'
+        r'TK-\d{2,5}[A-Z]?'
+        r'|HP\s+[CP]\d{3,5}[A-Z]?'
+        r'|HP\s+CE\d{2,4}[A-Z]?'
+        r'|Canon\s+(?:PFI-\d+\w*|CL-\d+\w*|PGI-\d+\w*)'
+        r')\b',
+        re.IGNORECASE
+    )
 
     stampaci_lista = set()
     toneri_lista = set()
@@ -266,23 +290,27 @@ def handle_oprema_specificno(upit):
         tekst_orig = payload.get("tekst", "") or ""
         tekst = sredi_upit(tekst_orig)
 
-        if is_toner and "toner" not in tekst and "kertridz" not in tekst:
-            continue
-        if is_printer and not any(kw in tekst for kw in ["stampac", "printer", "kyocera", "canon", "hp", "pisac"]):
-            continue
-        if is_toner or is_printer:
-            if is_toner:
-                for m in toneri_pat.findall(tekst_orig):
-                    toneri_lista.add(m)
-            if is_printer:
-                for m in stampaci_pat.findall(tekst_orig):
-                    stampaci_lista.add(m)
+        # Detektuj šta ovaj zapis sadrži
+        has_printer = bool(printer_pat.search(tekst_orig))
+        has_toner = bool(toner_pat.search(tekst_orig))
+
+        if is_printer:
+            # Uzimamo SAMO ako zapis sadrži printer (ne toner)
+            if not has_printer:
+                continue
+            for m in printer_pat.findall(tekst_orig):
+                stampaci_lista.add(m.strip())
+        elif is_toner:
+            # Uzimamo SAMO ako zapis sadrži toner (ne printer)
+            if not has_toner:
+                continue
+            for m in toner_pat.findall(tekst_orig):
+                toneri_lista.add(m.strip())
 
     def dodaj_proizvodjaca(kod):
-        """Dodaje ime proizvođača ako nedostaje."""
-        if kod.startswith("TK-") or kod.startswith("tk-"):
+        if kod.upper().startswith("TK-"):
             return f"Kyocera {kod}"
-        if kod.startswith("CE"):
+        if kod.upper().startswith("CE"):
             return f"HP {kod}"
         return kod
 
@@ -302,6 +330,7 @@ def handle_oprema_specificno(upit):
             delovi.append(f"- {s}")
         return "\n".join(delovi), []
 
+    # Opšti upit — oba
     delovi = ["**Oprema u Birou:**", ""]
     if stampaci_lista:
         delovi.append("**Štampači:**")
@@ -351,27 +380,33 @@ def handle_dijagram(upit):
 
 
 def handle_clan(broj):
-    """Pravni član: skeniraj pravni_akt, nađi CEO clan N do sledećeg clana ili kraja."""
+    """Pravni član: skeniraj pravni_akt, nađi CEO clan N do sledećeg clana ili kraja.
+    Podržava: clan, clana, clanom, clanu, clane, cl., cln. (svi padeži)"""
     points = scroll_tip("pravni_akt", limit=500)
     pogodci = []
-    # Regex: "clan N" ... sve do sledećeg "clan M" ili kraja dokumenta
+    # Regex pokriva SVE padeže + skraćenice
     clan_pat = re.compile(
-        rf'(?:clan|cl\.?|cln\.?)\s*{re.escape(broj)}\b(.*?)(?=(?:clan|cl\.?|cln\.?)\s*\d+\b|$)',
+        rf'(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*{re.escape(broj)}\b(.*?)'
+        rf'(?=(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*\d+\b|$)',
         re.DOTALL | re.IGNORECASE
+    )
+    # Provera da li uopšte postoji bilo koja varijanta člana
+    clan_check = re.compile(
+        rf'(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*{re.escape(broj)}\b',
+        re.IGNORECASE
     )
 
     for p in points:
         payload = p.payload or {}
         tekst = payload.get("tekst", "") or ""
         tekst_norm = sredi_upit(tekst)
-        if f"clan {broj}" not in tekst_norm:
+        if not clan_check.search(tekst_norm):
             continue
         # Nađi SVE matcheve (član se može ponoviti u dokumentu)
         for m in clan_pat.finditer(tekst):
             clan_tekst = m.group(0).strip()
-            if len(clan_tekst) < 30:  # Prekratko, preskoči
+            if len(clan_tekst) < 30:
                 continue
-            # Limit na 4000 karaktera
             if len(clan_tekst) > 4000:
                 clan_tekst = clan_tekst[:4000] + "\n...[Skraćeno]"
             izvor = payload.get("izvor", "") or payload.get("naziv_dokumenta", "")
