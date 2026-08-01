@@ -265,29 +265,69 @@ def pronadji_osobu_po_imenu(ime_upita):
 
 
 def get_svi_zaposleni_sa_slikama():
-    """Direktno iz baze: svi zaposleni + slike gde postoje."""
-    # Skroluj SVE i filtriraj po tipu u Pythonu
+    """Direktno iz baze: svi zaposleni + slike gde postoje.
+    Ključno: NE duplira imena između kadrovskih i foto zapisa."""
     points = scroll_svi(
         tipovi={"kadrovski", "zaposleni", "osoblje", "kadrovska_struktura",
                 "kadrovski_podaci", "fotografija_profil", "biografija"},
         limit=1000,
     )
     imenik = {}
+
+    # Prvo prođi kroz FOTO zapise — tu su samo URL-ovi, ime se dobija iz naziva fajla
+    foto_po_imenu = {}  # kljuc_prezime -> url
     for p in points:
         payload = p.payload or {}
+        tip = payload.get("tip", "")
+        if "fotografija_profil" in tip or "biografija" in tip:
+            url = (payload.get("Link", "") or payload.get("slika_url", "") or
+                   payload.get("image_url", "") or payload.get("slika", ""))
+            izvor = (payload.get("naziv_dokumenta", "") or payload.get("file_name", "") or "")
+            if not url:
+                continue
+            # Pokušaj izvući ime iz naziva fajla (npr. "brano_vamovic.jpg" -> "Brano Vamovic")
+            if izvor:
+                ime_iz_fajla = re.sub(r'\.(jpg|jpeg|png|webp)$', '', izvor, flags=re.IGNORECASE)
+                ime_iz_fajla = ime_iz_fajla.replace("_", " ").replace("-", " ").strip()
+                # Samo ako liči na ime (2+ reči)
+                reci = ime_iz_fajla.split()
+                if len(reci) >= 2 and all(len(r) >= 2 for r in reci):
+                    # Proveri da li sadrži "Ime Prezime" placeholder
+                    if "Ime" in reci and "Prezime" in reci:
+                        continue
+                    kljuc = reci[-1].lower()  # prezime
+                    foto_po_imenu[kljuc] = (ime_iz_fajla.title(), url)
+
+    # Sada prođi kroz TEKSTUALNE kadrovske zapise — tu su imena
+    for p in points:
+        payload = p.payload or {}
+        tip = payload.get("tip", "")
+        # Preskoči foto zapise (već obrađeni)
+        if "fotografija_profil" in tip or "biografija" in tip:
+            continue
         text = payload.get("tekst", "") or ""
         izvor = (payload.get("naziv_dokumenta", "") or payload.get("file_name", "") or "")
-        url = (payload.get("Link", "") or payload.get("slika_url", "") or
-               payload.get("image_url", "") or payload.get("slika", ""))
+        if "Ime Prezime" in text:
+            continue
         imena = izvuci_imena_iz_teksta(text)
         for ime in imena:
+            # Očisti "Direktor" ili druge titule sa kraja
+            reci = ime.split()
+            ciste = [r for r in reci if r.lower() not in {"direktor", "rukovodilac", "sef", "šef", "pomoćnik"}]
+            if ciste and len(ciste) >= 2:
+                ime = " ".join(ciste)
             kljuc = ime.lower()
             if kljuc not in imenik:
                 imenik[kljuc] = {"ime": ime, "foto": "", "izvori": []}
-            if url and not imenik[kljuc]["foto"]:
-                imenik[kljuc]["foto"] = url
             if izvor and izvor not in imenik[kljuc]["izvori"]:
                 imenik[kljuc]["izvori"].append(izvor)
+
+    # Poveži sa slikama
+    for kljuc, entry in imenik.items():
+        prezime = entry["ime"].split()[-1].lower()
+        if prezime in foto_po_imenu:
+            entry["foto"] = foto_po_imenu[prezime][1]
+
     return sorted(imenik.values(), key=lambda x: x["ime"].split()[-1])
 
 
@@ -318,6 +358,10 @@ def detektuj_tip_upita(upit):
     if re.search(r'\b(stampac|stampaci|printer|toner|toneri|kertridz|oprema|stampa|pisač)\b', u):
         return "oprema"
 
+    # Pravni član
+    if re.search(r'\b(clan|član)\s*\d+', u):
+        return "clan"
+
     return "standard"
 
 
@@ -327,28 +371,35 @@ def detektuj_tip_upita(upit):
 def handle_direktor():
     """Direktno traži direktora u bazi, BEZ LLM-a.
     Ako nema eksplicitnog zapisa, traži sve osobe sa titulom 'dr'/'mr'."""
-    # Skroluj SVE i filtriraj po tipu u Pythonu
     points = scroll_svi(
         tipovi={"kadrovski", "zaposleni", "osoblje", "biografija",
                 "fotografija_profil", "kadrovska_struktura"},
         limit=1000,
     )
 
-    direktori_eksplicitni = []  # gde piše "direktor [Ime]"
-    sve_osobe_sa_titulom = []  # sve osobe sa "dr" / "mr"
+    direktori_eksplicitni = []
+    sve_osobe_sa_titulom = []
 
     for p in points:
         text = p.payload.get("tekst", "") or ""
         izvor = p.payload.get("naziv_dokumenta", "") or ""
-        # Normalizuj u latinicu za regex
         text_norm = sredi_upit(text)
 
-        # 1) Eksplicitno "direktor" u tekstu
+        # 1) Eksplicitno "direktor" — izvlači ime iz konteksta oko reči
         if re.search(r'\bdirektor\b', text_norm):
-            imena = izvuci_imena_iz_teksta(text)
-            for ime in imena:
-                if ime not in [d["ime"] for d in direktori_eksplicitni]:
-                    direktori_eksplicitni.append({"ime": ime, "izvor": izvor})
+            # Nađi okolinu reči "direktor" (50 karaktera levo i desno)
+            for m in re.finditer(r'.{0,80}\bdirektor\b.{0,80}', text):
+                imena = izvuci_imena_iz_teksta(m.group())
+                for ime in imena:
+                    # Očisti titule sa kraja
+                    reci = ime.split()
+                    ciste = [r for r in reci if r.lower() not in {
+                        "direktor", "rukovodilac", "šef", "sef", "pomoćnik", "pomoćnik"
+                    }]
+                    if ciste and len(ciste) >= 2:
+                        ime = " ".join(ciste)
+                    if ime not in [d["ime"] for d in direktori_eksplicitni]:
+                        direktori_eksplicitni.append({"ime": ime, "izvor": izvor})
 
         # 2) Sve osobe sa titulom (za fallback)
         if re.search(r'\b(dr|mr|prof|doc|ing|inž|dipl)\b', text_norm):
@@ -357,30 +408,28 @@ def handle_direktor():
                 if ime not in [d["ime"] for d in sve_osobe_sa_titulom]:
                     sve_osobe_sa_titulom.append({"ime": ime, "izvor": izvor})
 
-    # Prioritet: eksplicitni direktor
     if direktori_eksplicitni:
         if len(direktori_eksplicitni) == 1:
             d = direktori_eksplicitni[0]
             slike = []
-            foto_pogodci = pronadji_osobu_po_imenu(d["ime"])
-            for fp in foto_pogodci[:2]:
-                if fp["url"]:
-                    slike.append((fp["url"], f"Direktor: {fp['ime']}"))
+            try:
+                foto_pogodci = pronadji_osobu_po_imenu(d["ime"])
+                for fp in foto_pogodci[:2]:
+                    if fp["url"]:
+                        slike.append((fp["url"], f"Direktor: {fp['ime']}"))
+            except Exception:
+                pass
             return f"Direktor Biroa za planiranje je: **{d['ime']}**", slike
         imena = ", ".join([d["ime"] for d in direktori_eksplicitni])
         return f"Prema bazi, direktori su: {imena}", []
 
-    # Fallback: osobe sa titulom
     if sve_osobe_sa_titulom:
-        # Vrati prvih 3
         prvih = sve_osobe_sa_titulom[:3]
         imena = ", ".join([d["ime"] for d in prvih])
         return (f"⚠️ U bazi ne postoji eksplicitan zapis 'direktor je Ime Prezime'. "
-                f"Mogući kandidati sa titulom: {imena}. "
-                f"Ako znaš ko je direktor, dodaj taj podatak u bazu."), []
+                f"Mogući kandidati sa titulom: {imena}."), []
 
-    return ("⚠️ Nije pronađen nijedan zapis o direktoru u bazi. "
-            "Dodaj informaciju o direktoru u indeksirane dokumente."), []
+    return ("⚠️ Nije pronađen nijedan zapis o direktoru u bazi."), []
 
 
 def handle_lista_zaposlenih():
@@ -419,12 +468,37 @@ def handle_osoba_po_imenu(upit):
     return "### 👤 Pronađeno:\n\n" + "\n\n".join(delovi), slike[:6]
 
 
+def ocisti_tekst_opreme(text):
+    """Skrati i očisti tekst opreme od adresa, datuma, itd."""
+    # Izbaci redove sa adresama, telefonima, datumima
+    linije = text.split("\n")
+    ciste = []
+    skip_patterns = [
+        r"mihaila pupina", r"birčaninova", r"tel/fax", r"tel:", r"fax:",
+        r"\d{5,}\s+beograd", r"broj:", r"datum:", r"datum\s*\d",
+        r"javno preduzece", r"biro za planiranje", r"srbija",
+        r"potrebne su nam", r"trebovanje", r"\d{2}\.\d{2}\.\d{4}",
+        r"d\.o\.o\.", r"cara dušana", r"slovenska",
+    ]
+    for linija in linije:
+        ll = linija.lower().strip()
+        if not ll:
+            continue
+        if any(re.search(p, ll) for p in skip_patterns):
+            continue
+        ciste.append(linija.strip())
+    rez = " ".join(ciste)
+    # Skrati
+    if len(rez) > 300:
+        rez = rez[:300] + "..."
+    return rez.strip()
+
+
 def handle_oprema(upit):
     """Direktno prikaži opremu, BEZ LLM-a za listanje."""
     u = sredi_upit(upit)
-    # Skroluj SVE i filtriraj po tipu u Pythonu
     zeljeni_tipovi = []
-    if "toner" in u or "kertridz" in u or "kertridz" in u:
+    if "toner" in u or "kertridz" in u:
         zeljeni_tipovi = ["toner", "oprema", "kancelarijska_oprema"]
     else:
         zeljeni_tipovi = ["oprema", "kancelarijska_oprema", "inventar", "stampac"]
@@ -437,12 +511,49 @@ def handle_oprema(upit):
         izvor = hit.payload.get("naziv_dokumenta", "") or ""
         if "Ime Prezime" in text:
             continue
-        if len(text) > 400:
-            text = text[:400] + "..."
-        delovi.append(f"**[{izvor}]**\n{text}")
+        cist = ocisti_tekst_opreme(text)
+        if not cist or len(cist) < 20:
+            continue
+        delovi.append(f"**[{izvor}]**\n{cist}")
     if not delovi:
         return "⚠️ Nema pronađene opreme po tom upitu.", []
     return "### 🖨️ Pronađena oprema:\n\n" + "\n\n---\n\n".join(delovi[:10]), []
+
+
+def handle_clan(upit):
+    """Direktno traži pravni član u bazi, BEZ LLM-a."""
+    # Izvuci broj člana
+    u = sredi_upit(upit)
+    m = re.search(r'\bclan\s*(\d+)\b', u) or re.search(r'\bčlan\s*(\d+)\b', u)
+    if not m:
+        return "⚠️ Nisam pronašao broj člana u pitanju.", []
+    broj = m.group(1)
+
+    # Skroluj pravne akte
+    points = scroll_svi(
+        tipovi={"pravni_akt", "ugovor", "kolektivni_ugovor", "pravilnik", "zakon", "odluka"},
+        limit=2000,
+    )
+
+    pogodci = []
+    for p in points:
+        text = p.payload.get("tekst", "") or ""
+        izvor = p.payload.get("naziv_dokumenta", "") or ""
+        text_norm = sredi_upit(text)
+        # Traži "član 14" ili "clan 14" sa granicama
+        # Pattern: "član 14" + opciona tačka + tekst do sledećeg člana ili kraja
+        clan_pat = rf'\bclan\s*{broj}\b[^\n]*(?:\n(?!\bclan\s*\d).*)*'
+        for cm in re.finditer(clan_pat, text_norm, re.IGNORECASE):
+            pogodci.append({"tekst": cm.group()[:1500], "izvor": izvor})
+            break  # samo prvi pogodak po zapisu
+
+    if not pogodci:
+        return f"⚠️ Član {broj} nije pronađen u bazi pravnih akata.", []
+
+    delovi = []
+    for p in pogodci[:3]:
+        delovi.append(f"**[{p['izvor']}]**\n\n{p['tekst']}")
+    return f"### 📜 Član {broj}:\n\n" + "\n\n---\n\n".join(delovi), []
 
 
 def handle_standard(upit, istorija):
@@ -716,7 +827,7 @@ with st.sidebar:
     if st.button("🔄 Osveži bazu", use_container_width=True):
         get_tekstovi.clear()
         st.cache_data.clear()
-        st.success("✅ Keš obrisan.")
+        st.toast("✅ Keš obrisan — naredni upit će učitati sveže podatke", icon="✅")
         st.rerun()
 
 # Istorija
@@ -731,7 +842,7 @@ for msg in st.session_state.messages:
             cols = st.columns(min(3, len(msg["images"])))
             for idx, (url, cap) in enumerate(msg["images"]):
                 with cols[idx % 3]:
-                    st.image(url, caption=cap, use_container_width=True)
+                    st.image(url, caption=cap, width=250)
 
 # Input
 user_input = st.chat_input("Поставите питање...")
@@ -759,6 +870,8 @@ if user_input:
                     odgovor, slike = handle_osoba_po_imenu(user_input)
                 elif tip_upita == "oprema":
                     odgovor, slike = handle_oprema(user_input)
+                elif tip_upita == "clan":
+                    odgovor, slike = handle_clan(user_input)
                 else:
                     odgovor, slike, br_k, ukupno = handle_standard(
                         user_input, st.session_state.messages
@@ -771,7 +884,7 @@ if user_input:
                     cols = st.columns(min(3, len(slike)))
                     for idx, (url, cap) in enumerate(slike):
                         with cols[idx % 3]:
-                            st.image(url, caption=cap, use_container_width=True)
+                            st.image(url, caption=cap, width=280)
                     st.markdown("---")
 
                 st.markdown(odgovor + meta)
