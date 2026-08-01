@@ -1,13 +1,13 @@
 """
-app.py v5.0 — MINIMALNA verzija
-================================
-Bez specijalnih handlera. Samo:
-- Qdrant search (bez filtera)
-- Embed + LLM
-- Slike gde postoje
-- 6 quick prompt dugmadi
+app.py v6.0 — Koristi strukturirana polja baze
+================================================
+KLJUČNO: Sada koristimo postojeća polja u payload-u:
+  - fotografija_profil: "Funkcija" (direktor/zamenik/projektant)
+  - dijagram: "ocr_tekst" (sadrži "ruža vetrova" itd.)
+  - oprema: čist tekst tonera/štampača
+  - pravni_akt: Kolektivni ugovor sa "члана N"
 
-Ovo je vraćanje na osnove — verzija koja je radila pre svih dorada.
+BEZ HALUCIJACIJA — čitamo TAČNO ono što piše u bazi.
 """
 
 import os
@@ -30,8 +30,6 @@ SYSTEM_PROMPT = (
     "Odgovaraj ISKLJUČIVO na osnovu KONTEKSTA. "
     "Ako podatak nije u kontekstu, reci 'nije pronađeno'. "
     "Fokusiraj se na specifičan pojam iz pitanja. "
-    "Ne izvodi zaključke, ne pretpostavljaj. "
-    "Navedi imena zaposlenih SAMO ako su eksplicitno u kontekstu. "
     "Odgovaraj na srpskom, kratko i jasno."
 )
 
@@ -59,11 +57,217 @@ def embed_query(text):
     return list(embed_model.embed([text]))[0].tolist()
 
 
+def scroll_tip(tip, limit=200):
+    """Skroluje zapise sa datim tipom. Bez filtera u Qdrant (nema indeks)."""
+    svi = []
+    offset = None
+    while True:
+        records, next_offset = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=500,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for r in records:
+            if r.payload and r.payload.get("tip") == tip:
+                svi.append(r)
+        if next_offset is None or len(records) == 0:
+            break
+        offset = next_offset
+        if len(svi) >= limit:
+            break
+    return svi[:limit]
+
+
 # ============================================================
-# RAG — jednostavan
+# HANDLERI — direktno iz strukturiranih polja
+# ============================================================
+def handle_direktor():
+    """Direktor: skeniraj fotografija_profil, nađi onaj gde Funkcija='direktor'."""
+    points = scroll_tip("fotografija_profil", limit=100)
+    direktori = []
+    zamenici = []
+    for p in points:
+        payload = p.payload or {}
+        tekst = payload.get("tekst", "") or ""
+        url = payload.get("Link") or payload.get("slika_url", "")
+        funkcija = (payload.get("Funkcija", "") or "").lower()
+        # Izvuci ime iz "Fotografija [Ime Prezime], ..."
+        m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
+        if not m:
+            continue
+        ime = m.group(1)
+        if "zamenik" in funkcija:
+            zamenici.append((ime, url, payload.get("Funkcija", "")))
+        elif "direktor" in funkcija:
+            direktori.append((ime, url, payload.get("Funkcija", "")))
+
+    if not direktori and not zamenici:
+        return "⚠️ Nisu pronađeni direktor/zamenici u photo zapisima.", []
+
+    slike = []
+    delovi = []
+    if direktori:
+        ime = direktori[0][0]
+        url = direktori[0][1]
+        delovi.append(f"**Direktor:** {ime}")
+        if url:
+            slike.append((url, f"Direktor: {ime}"))
+    if zamenici:
+        imena = ", ".join([z[0] for z in zamenici[:3]])
+        delovi.append(f"**Zamenici direktora:** {imena}")
+        for ime, url, _ in zamenici[:3]:
+            if url:
+                slike.append((url, f"Zamenik: {ime}"))
+
+    return "\n\n".join(delovi), slike
+
+
+def handle_lista_zaposlenih():
+    """Lista: izvuci sva imena iz 'Fotografija [Ime], [funkcija]'."""
+    points = scroll_tip("fotografija_profil", limit=100)
+    zaposleni = []
+    for p in points:
+        payload = p.payload or {}
+        tekst = payload.get("tekst", "") or ""
+        url = payload.get("Link") or payload.get("slika_url", "")
+        funkcija = payload.get("Funkcija", "")
+        m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
+        if m:
+            ime = m.group(1)
+            zaposleni.append({"ime": ime, "url": url, "funkcija": funkcija})
+
+    if not zaposleni:
+        return "⚠️ Nisu pronađeni zaposleni u photo zapisima.", []
+
+    # Dedupe po imenu
+    seen = set()
+    uniq = []
+    for z in zaposleni:
+        if z["ime"].lower() not in seen:
+            seen.add(z["ime"].lower())
+            uniq.append(z)
+
+    imena_lista = "\n".join([f"• {z['ime']} — {z['funkcija']}" for z in uniq if z.get("funkcija")])
+    if not imena_lista:
+        imena_lista = "\n".join([f"• {z['ime']}" for z in uniq])
+
+    slike = [(z["url"], z["ime"]) for z in uniq if z.get("url")]
+    return f"**Запослени у Бироу ({len(uniq)}):**\n\n{imena_lista}", slike
+
+
+def handle_oprema_specificno(upit):
+    """Oprema: skeniraj 'oprema' tip, filtriraj po upitu."""
+    points = scroll_tip("oprema", limit=50)
+    u = upit.lower()
+    is_toner = "toner" in u or "kertridž" in u or "kertridz" in u
+    is_printer = "štampač" in u or "stampac" in u or "printer" in u
+
+    delovi = []
+    slike = []
+    for p in points:
+        payload = p.payload or {}
+        tekst = (payload.get("tekst", "") or "").lower()
+        izvor = payload.get("izvor", "") or payload.get("naziv_dokumenta", "")
+        url = payload.get("slika_url", "")
+
+        # Filtriranje
+        if is_toner and not ("toner" in tekst or "kertrid" in tekst):
+            continue
+        if is_printer and not any(kw in tekst for kw in ["štampač", "stampac", "printer", "kyocera", "canon", "hp"]):
+            continue
+
+        # Skrati tekst
+        cist = payload.get("tekst", "")
+        # Izbaci adrese
+        linije = []
+        for l in cist.split("\n"):
+            ll = l.lower()
+            if any(x in ll for x in ["mihaila pupina", "birčaninova", "tel/fax",
+                                      "javno preduzece", "trebovanje"]):
+                continue
+            if ll.strip():
+                linije.append(l.strip())
+        cist = " ".join(linije)[:300]
+
+        if cist:
+            delovi.append(f"**{izvor or 'Oprema'}:**\n{cist}")
+        if url:
+            slike.append((url, izvor or "Oprema"))
+
+    if not delovi:
+        return "⚠️ Nema pronađene opreme po tom upitu.", []
+    return "**Pronađena oprema:**\n\n" + "\n\n---\n\n".join(delovi[:10]), slike
+
+
+def handle_dijagram(upit):
+    """Dijagram: skeniraj dijagram tip, koristi ocr_tekst za pretragu."""
+    points = scroll_tip("dijagram", limit=200)
+    u = upit.lower()
+
+    delovi = []
+    slike = []
+    for p in points:
+        payload = p.payload or {}
+        tekst = (payload.get("tekst", "") or "").lower()
+        ocr = (payload.get("ocr_tekst", "") or "").lower()
+        izvor = payload.get("izvor", "") or ""
+        url = payload.get("Link", "") or payload.get("slika_url", "")
+
+        # Ako upit sadrži "ruža vetrova", filtriraj
+        if "vetrova" in u or "ruza" in u:
+            if not ("vetrova" in ocr or "vetrova" in tekst or "wind" in ocr or "ruza" in tekst):
+                continue
+
+        if url:
+            slike.append((url, izvor or "Dijagram"))
+        delovi.append(f"**{izvor or 'Dijagram'}**")
+
+    if not slike:
+        return "⚠️ Nema dijagrama koji odgovaraju tom upitu.", []
+    return f"**Pronađeno {len(slike)} dijagrama:**", slike[:6]
+
+
+def handle_clan(broj):
+    """Pravni član: skeniraj pravni_akt, nađi 'član N'."""
+    points = scroll_tip("pravni_akt", limit=500)
+    pogodci = []
+    for p in points:
+        payload = p.payload or {}
+        tekst = payload.get("tekst", "") or ""
+        tekst_norm = tekst.lower()
+        # Traži "члан N" ili "clan N"
+        if f"члан {broj}" in tekst_norm or f"clan {broj}" in tekst_norm:
+            # Izvuci oko člana
+            idx = max(tekst_norm.find(f"члан {broј}"), tekst_norm.find(f"clan {broj}"))
+            if idx < 0:
+                continue
+            start = max(0, idx - 50)
+            end = min(len(tekst), idx + 800)
+            izvor = payload.get("izvor", "") or payload.get("naziv_dokumenta", "")
+            pogodci.append({"tekst": tekst[start:end], "izvor": izvor})
+
+    if not pogodci:
+        return f"⚠️ Član {broj} nije pronađen u bazi pravnih akata.", []
+
+    # Dedupe
+    seen = set()
+    uniq = []
+    for p in pogodci:
+        kljuc = p["tekst"][:100].lower()
+        if kljuc not in seen:
+            seen.add(kljuc)
+            uniq.append(p)
+    p = uniq[0]
+    return f"**Члан {broj}** (izvor: {p['izvor']}):\n\n{p['tekst']}", []
+
+
+# ============================================================
+# STANDARDNI RAG
 # ============================================================
 def do_rag(query, top_k=10):
-    """Jednostavan RAG: Qdrant search + kontekst + slike."""
+    """Jednostavan RAG za opšta pitanja."""
     try:
         vec = embed_query(query)
         if hasattr(qdrant, "query_points"):
@@ -80,31 +284,25 @@ def do_rag(query, top_k=10):
                 limit=top_k,
             )
     except Exception as e:
-        return "", 0, [], f"Greška pri pretrazi: {e}"
+        return "", 0, [], f"Greška: {e}"
 
     delovi = []
     slike = []
     seen = set()
-
     for hit in points:
         if not hit.payload:
             continue
         text = hit.payload.get("tekst", "") or hit.payload.get("text", "") or ""
-        izvor = hit.payload.get("naziv_dokumenta", "") or hit.payload.get("file_name", "") or ""
+        izvor = hit.payload.get("naziv_dokumenta", "") or hit.payload.get("izvor", "") or ""
         url = (hit.payload.get("Link", "") or hit.payload.get("slika_url", "") or
                hit.payload.get("image_url", "") or hit.payload.get("slika", ""))
-
-        # Skrati tekst
         cist = re.sub(r'http[s]?://\S+', '', text).strip()
         cist = re.sub(r'\n{3,}', '\n\n', cist)
-        if "Ime Prezime" in cist:
-            cist = cist.replace("Ime Prezime", "[ime]")
-        if len(cist) > 600:
-            cist = cist[:600] + "..."
+        cist = cist.replace("Ime Prezime", "[ime]")
+        if len(cist) > 500:
+            cist = cist[:500] + "..."
         if cist:
             delovi.append(f"[{izvor}]\n{cist}")
-
-        # Slike
         if url and url.startswith("http") and url not in seen:
             slike.append((url, izvor or "Slika"))
             seen.add(url)
@@ -112,12 +310,11 @@ def do_rag(query, top_k=10):
     kontekst = "\n\n---\n\n".join(delovi)
     if len(kontekst) > 6000:
         kontekst = kontekst[:6000] + "\n[Skraćeno]"
-
     return kontekst, len(points), slike, ""
 
 
 def ask_llm(messages):
-    """Poziv LLM sa fallback-om na manji model."""
+    """Poziv LLM sa fallback."""
     try:
         resp = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -137,6 +334,36 @@ def ask_llm(messages):
             return resp.choices[0].message.content
         except Exception as e:
             return f"⚠️ Greška: {e}"
+
+
+# ============================================================
+# RUTIRANJE
+# ============================================================
+def detektuj_tip(upit):
+    u = upit.lower()
+    # Direktor
+    if "direktor" in u and "zamenik" not in u:
+        return "direktor"
+    if "ko je direktor" in u or "ko je novi direktor" in u:
+        return "direktor"
+    # Lista zaposlenih
+    if any(kw in u for kw in ["svi zaposleni", "lista zaposlenih", "spisak", "ko radi", "kadrovska"]):
+        return "lista_zaposlenih"
+    # Štampači/toneri
+    if "toner" in u or "kertrid" in u:
+        return "oprema"
+    if any(kw in u for kw in ["štampač", "stampac", "stampaci", "printer", "oprema"]):
+        return "oprema"
+    # Dijagram
+    if any(kw in u for kw in ["dijagram", "mapa", "karta", "ruža vetrova", "ruza vetrova",
+                                "vetrova", "grafikon", "šema", "shema", "tabela", "skica", "crtež"]):
+        return "dijagram"
+    # Pravni član
+    m = re.search(r"član\s*(\d+)|clan\s*(\d+)", u)
+    if m:
+        broj = m.group(1) or m.group(2)
+        return f"clan_{broj}"
+    return "standard"
 
 
 # ============================================================
@@ -169,7 +396,7 @@ QUICK = [
     "Који су штампачи у Бироу?",
     "Који тонeri се користе?",
     "Покажи дијаграм руже ветрова",
-    "Члан 14 колективног уговора",
+    "Члан 14",
 ]
 for i, label in enumerate(QUICK):
     with cols[i]:
@@ -223,38 +450,51 @@ if user_input:
     with st.chat_message("assistant"):
         with st.spinner("Тражим у бази..."):
             try:
-                kontekst, br_k, slike, err = do_rag(user_input)
-                if err:
-                    st.error(err)
-                    st.session_state.messages.append({
-                        "role": "assistant", "content": err, "images": []
-                    })
+                tip = detektuj_tip(user_input)
+                slike = []
+                meta = ""
+
+                if tip == "direktor":
+                    odgovor, slike = handle_direktor()
+                elif tip == "lista_zaposlenih":
+                    odgovor, slike = handle_lista_zaposlenih()
+                elif tip == "oprema":
+                    odgovor, slike = handle_oprema_specificno(user_input)
+                elif tip == "dijagram":
+                    odgovor, slike = handle_dijagram(user_input)
+                elif tip.startswith("clan_"):
+                    broj = tip.split("_")[1]
+                    odgovor, slike = handle_clan(broj)
                 else:
-                    messages = [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": f"KONTEKST:\n{kontekst}\n\nPitanje: {user_input}"},
-                    ]
-                    odgovor = ask_llm(messages)
+                    kontekst, br_k, slike, err = do_rag(user_input)
+                    if err:
+                        st.error(err)
+                        odgovor = err
+                    else:
+                        messages = [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": f"KONTEKST:\n{kontekst}\n\nPitanje: {user_input}"},
+                        ]
+                        odgovor = ask_llm(messages)
+                        meta = f"\n\n<sub>📊 Kandidati: {br_k}</sub>"
 
-                    # Slike
-                    if slike:
-                        st.markdown("---")
-                        img_cols = st.columns(min(3, len(slike)))
-                        for idx, (url, cap) in enumerate(slike):
-                            with img_cols[idx % 3]:
-                                st.image(url, caption=cap, width=250)
-                        st.markdown("---")
+                if slike:
+                    st.markdown("---")
+                    img_cols = st.columns(min(3, len(slike)))
+                    for idx, (url, cap) in enumerate(slike):
+                        with img_cols[idx % 3]:
+                            st.image(url, caption=cap, width=250)
+                    st.markdown("---")
 
-                    st.markdown(odgovor)
-                    st.caption(f"📊 Kandidati: {br_k}")
-
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": odgovor,
-                        "images": slike,
-                    })
+                st.markdown(odgovor + meta)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": odgovor + meta,
+                    "images": slike,
+                })
             except Exception as e:
                 st.error(f"⚠️ Greška: {e}")
                 st.session_state.messages.append({
-                    "role": "assistant", "content": f"⚠️ Greška: {e}", "images": []
+                    "role": "assistant",
+                    "content": f"⚠️ Greška: {e}", "images": []
                 })
