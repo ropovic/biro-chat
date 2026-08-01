@@ -164,47 +164,72 @@ def handle_lista_zaposlenih():
 
 
 def handle_oprema_specificno(upit):
-    """Oprema: skeniraj 'oprema' tip, filtriraj po upitu."""
+    """Oprema: skeniraj 'oprema' tip, prikaži čistu listu."""
     points = scroll_tip("oprema", limit=50)
     u = sredi_upit(upit)
     is_toner = "toner" in u or "kertridz" in u
     is_printer = any(kw in u for kw in ["stampac", "stampaci", "printer", "pisac"])
 
-    delovi = []
+    # Izvuci SAMO modele (npr. "Kyocera FS-9530dn", "HP C4844A")
+    import re as _re
+    stampaci_pat = _re.compile(r'\b(Kyocera|Canon|HP|Brother|Samsung|Epson|Lexmark|Xerox|OKI)\s+[A-Z0-9][A-Za-z0-9\-\.]{3,20}\b')
+    toneri_pat = _re.compile(r'\b(TK-[A-Z0-9]{3,5}|HP\s+[A-Z]?\d{3,4}[A-Z]?|Canon\s+[A-Z0-9]+|Kyocera\s+TK-\d+|CE\d{2,3}[A-Z]?)\b')
+
+    stampaci_lista = set()
+    toneri_lista = set()
+    svi_tekstovi = []
+
     for p in points:
         payload = p.payload or {}
         tekst_orig = payload.get("tekst", "") or ""
         tekst = sredi_upit(tekst_orig)
         izvor = payload.get("izvor", "") or payload.get("naziv_dokumenta", "")
 
-        # Filtriranje
-        if is_toner and not ("toner" in tekst or "kertridz" in tekst):
+        # Filtriranje po tipu upita
+        if is_toner and "toner" not in tekst and "kertridz" not in tekst:
             continue
         if is_printer and not any(kw in tekst for kw in ["stampac", "printer", "kyocera", "canon", "hp", "pisac"]):
             continue
-        if not is_toner and not is_printer:
-            # Opšti upit za opremu — prikaži sve
-            pass
 
-        # Skrati tekst, izbaci adrese
+        # Nađi modele
+        for m in stampaci_pat.findall(tekst_orig):
+            stampaci_lista.add(m)
+        for m in toneri_pat.findall(tekst_orig):
+            toneri_lista.add(m)
+
+        # Skrati tekst za kontekst
         linije = []
         for l in tekst_orig.split("\n"):
             ll = sredi_upit(l)
             if any(x in ll for x in ["mihaila pupina", "bircaninova", "tel/fax",
                                       "javno preduzece", "trebovanje", "srbija",
-                                      "d.o.o.", "cara dusana", "slovenska"]):
+                                      "d.o.o.", "cara dusana", "slovenska", "adresa"]):
                 continue
-            if ll.strip():
+            if ll.strip() and len(ll) < 200:
                 linije.append(l.strip())
-        cist = " ".join(linije)[:300]
+        if linije:
+            svi_tekstovi.append(" • ".join(linije[:5])[:400])
 
-        if cist:
-            delovi.append(f"**{izvor or 'Oprema'}:**\n{cist}")
+    # Formatiranje
+    delovi = []
+    if stampaci_lista:
+        delovi.append("Štampači u Birou:")
+        for s in sorted(stampaci_lista):
+            delovi.append(f"  • {s}")
+    if toneri_lista:
+        delovi.append("")
+        delovi.append("Toneri:")
+        for t in sorted(toneri_lista):
+            delovi.append(f"  • {t}")
+    if svi_tekstovi and not stampaci_lista and not toneri_lista:
+        # Nema specifičnih modela, vrati kontekst
+        delovi.append("Pojmovi iz baze:")
+        for t in svi_tekstovi[:5]:
+            delovi.append(f"  • {t}")
 
     if not delovi:
         return "⚠️ Nema pronađene opreme po tom upitu.", []
-    # Bez slika — oprema nema relevantne slike u bazi
-    return "**Pronađena oprema:**\n\n" + "\n\n---\n\n".join(delovi[:10]), []
+    return "**Pronađena oprema:**\n\n" + "\n".join(delovi), []
 
 
 def handle_dijagram(upit):
@@ -212,25 +237,31 @@ def handle_dijagram(upit):
     points = scroll_tip("dijagram", limit=200)
     u = sredi_upit(upit)
 
-    delovi = []
+    # Ako korisnik traži specifično (ruža vetrova), pokušaj prvo sa filterom
+    if any(kw in u for kw in ["vetrova", "ruza vetrova", "wind"]):
+        filtrirane = []
+        for p in points:
+            payload = p.payload or {}
+            tekst = sredi_upit(payload.get("tekst", "") or "")
+            ocr = sredi_upit(payload.get("ocr_tekst", "") or "")
+            url = payload.get("Link", "") or payload.get("slika_url", "")
+            if ("vetrova" in ocr or "vetrova" in tekst or "wind" in ocr
+                or "ruza" in tekst or "pravac" in tekst):
+                if url and url.startswith("http"):
+                    filtrirane.append((url, payload.get("izvor", "") or "Dijagram"))
+        if filtrirane:
+            return f"**Pronađeno {len(filtrirane)} dijagrama vetrova:**", filtrirane[:6]
+
+    # Ako nema specifičnog filtera, vrati sve dostupne dijagrame
     slike = []
     for p in points:
         payload = p.payload or {}
-        tekst = sredi_upit(payload.get("tekst", "") or "")
-        ocr = sredi_upit(payload.get("ocr_tekst", "") or "")
-        izvor = payload.get("izvor", "") or ""
         url = payload.get("Link", "") or payload.get("slika_url", "")
-
-        # Ako upit traži specifičan tip, filtriraj
-        if any(kw in u for kw in ["vetrova", "ruza vetrova", "wind"]):
-            if not ("vetrova" in ocr or "vetrova" in tekst or "wind" in ocr or "ruza" in tekst):
-                continue
-
         if url and url.startswith("http"):
-            slike.append((url, izvor or "Dijagram"))
+            slike.append((url, payload.get("izvor", "") or "Dijagram"))
 
     if not slike:
-        return "⚠️ Nema dijagrama koji odgovaraju tom upitu.", []
+        return "⚠️ Nema dijagrama u bazi.", []
     return f"**Pronađeno {len(slike)} dijagrama:**", slike[:6]
 
 
