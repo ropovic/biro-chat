@@ -351,34 +351,51 @@ def handle_dijagram(upit):
 
 
 def handle_clan(broj):
-    """Pravni član: skeniraj pravni_akt, nađi 'clan N' (ćirilica normalizovana)."""
+    """Pravni član: skeniraj pravni_akt, nađi CEO clan N do sledećeg clana ili kraja."""
     points = scroll_tip("pravni_akt", limit=500)
     pogodci = []
+    # Regex: "clan N" ... sve do "clan N+1" ili "clan M (bilo koji drugi)" ili kraja
+    clan_pat = _re.compile(
+        rf'(?:clan|cl\.?|cln\.?)\s*{re.escape(broj)}\b(.*?)(?=(?:clan|cl\.?|cln\.?)\s*\d+\b|$)',
+        _re.DOTALL | _re.IGNORECASE
+    )
+    # Bez _,re — koristimo običan re
+    import re as _re2
+    clan_pat = _re2.compile(
+        rf'(?:clan|cl\.?|cln\.?)\s*{_re2.escape(broj)}\b(.*?)(?=(?:clan|cl\.?|cln\.?)\s*\d+\b|$)',
+        _re2.DOTALL | _re2.IGNORECASE
+    )
+
     for p in points:
         payload = p.payload or {}
         tekst = payload.get("tekst", "") or ""
         tekst_norm = sredi_upit(tekst)
-        if f"clan {broj}" in tekst_norm:
-            # Nađi poziciju u ORIGINALNOM tekstu
-            idx = tekst_norm.find(f"clan {broj}")
-            if idx < 0:
+        if f"clan {broj}" not in tekst_norm:
+            continue
+        # Nađi SVE matcheve (član se može ponoviti u dokumentu)
+        for m in clan_pat.finditer(tekst):
+            clan_tekst = m.group(0).strip()
+            if len(clan_tekst) < 30:  # Prekratko, preskoči
                 continue
-            start = max(0, idx - 50)
-            end = min(len(tekst), idx + 800)
+            # Limit na 4000 karaktera
+            if len(clan_tekst) > 4000:
+                clan_tekst = clan_tekst[:4000] + "\n...[Skraćeno]"
             izvor = payload.get("izvor", "") or payload.get("naziv_dokumenta", "")
-            pogodci.append({"tekst": tekst[start:end], "izvor": izvor})
+            pogodci.append({"tekst": clan_tekst, "izvor": izvor, "duzina": len(clan_tekst)})
 
     if not pogodci:
         return f"⚠️ Član {broj} nije pronađen u bazi pravnih akata.", []
 
-    # Dedupe
+    # Dedupe + uzmi najduži (kompletniji)
     seen = set()
     uniq = []
     for p in pogodci:
-        kljuc = sredi_upit(p["tekst"][:100])
+        kljuc = sredi_upit(p["tekst"][:200])
         if kljuc not in seen:
             seen.add(kljuc)
             uniq.append(p)
+    # Sortiraj po dužini (najduži = najkompletniji)
+    uniq.sort(key=lambda x: -x["duzina"])
     p = uniq[0]
     return f"**Члан {broj}** (izvor: {p['izvor']}):\n\n{p['tekst']}", []
 
