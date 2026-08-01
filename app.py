@@ -411,6 +411,20 @@ def handle_clan(broj):
                 clan_tekst = clan_tekst[:4000] + "\n...[Skraćeno]"
             izvor = payload.get("izvor", "") or payload.get("naziv_dokumenta", "")
             pogodci.append({"tekst": clan_tekst, "izvor": izvor, "duzina": len(clan_tekst)})
+        # Ako clan_pat nije matchovao ali clan_check jeste, fallback
+        if not pogodci and clan_check.search(tekst_norm):
+            # Nađi poziciju i uzmi okolni tekst
+            for cm in clan_check.finditer(tekst_norm):
+                start_orig = max(0, cm.start() - 30)
+                end_orig = min(len(tekst), cm.end() + 3500)
+                clan_tekst = tekst[start_orig:end_orig].strip()
+                if len(clan_tekst) >= 30:
+                    pogodci.append({
+                        "tekst": clan_tekst,
+                        "izvor": payload.get("izvor", "") or payload.get("naziv_dokumenta", ""),
+                        "duzina": len(clan_tekst),
+                    })
+                    break
 
     if not pogodci:
         return f"⚠️ Član {broj} nije pronađen u bazi pravnih akata.", []
@@ -578,6 +592,11 @@ def sredi_upit(t):
 
 def detektuj_tip(upit):
     u = sredi_upit(upit)  # KLJUČNO: ćirilica → latinica
+
+    # Pravni član — PRVO! (pre "ima li" detekcije)
+    m = re.search(r'(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*(\d+)', u)
+    if m:
+        return f"clan_{m.group(1)}"
 
     # Direktor (pre liste, jer "direktor" sadrži specifičniji pojam)
     if "direktor" in u and "zamenik" not in u:
