@@ -1,17 +1,27 @@
 """
-app.py v7.0 — CLIP pretraga slika + poboljšano indeksiranje
-============================================================
-DODATO:
-- CLIP model za pretragu slika (dijagrami, fotografije)
-- search_images() funkcija
-- handle_dijagram() sada koristi CLIP umesto regexa
-- Vizuelna analiza (opciono, preko HF Inference API)
+app.py v8.0 — RAG chat za Biro za planiranje (PD Srbijašume)
+================================================================
+Koristi kolekciju: baza_cloud_v3 (indeksiranu sa ingest_biro.py)
+Podržava:
+  - Tekstualnu pretragu (MPNet)
+  - Pretragu slika (CLIP)
+  - Specijalne handler-e za:
+      * Direktor i zamenici (fotografija_profil)
+      * Spisak zaposlenih (fotografija_profil)
+      * Pretraga osobe po imenu
+      * Oprema (štampači, toneri)
+      * Dijagrami (pretraga slika)
+      * Članovi iz pravnih akata
+  - Eksternu pretragu (Tavily) za opšta pitanja
+  - Vizuelnu analizu slika (opciono, preko HuggingFace)
 
-SVE POSTOJEĆE FUNKCIJE (direktor, lista, oprema, član, osoba) OSTAJU ISTE.
+Sve promene su prilagođene novoj kolekciji i neimenovanim vektorima.
 """
 
 import os
 import re
+import time
+import uuid
 import streamlit as st
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
@@ -28,8 +38,8 @@ from PIL import Image
 # ============================================================
 EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 IMAGE_MODEL_NAME = "sentence-transformers/clip-ViT-B-32-multilingual-v1"
-COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "baza_cloud_v2")
-R2_PUBLIC_URL = "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev"
+COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "baza_cloud_v3")  # <- nova kolekcija
+R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL", "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev")
 LOGO_URL = f"{R2_PUBLIC_URL}/srbijasume_logo.jpg"
 
 SYSTEM_PROMPT = (
@@ -41,7 +51,7 @@ SYSTEM_PROMPT = (
 )
 
 # ============================================================
-# CLIENTS
+# CLIENTS (keširani)
 # ============================================================
 @st.cache_resource
 def get_clients():
@@ -51,7 +61,9 @@ def get_clients():
         check_compatibility=False,
     )
     groq = Groq(api_key=os.environ["GROQ_API_KEY"])
+    # Za tekst koristimo fastembed (lakši)
     embed_model = TextEmbedding(model_name=EMBEDDING_MODEL)
+    # Za slike koristimo sentence-transformers (CLIP)
     image_encoder = SentenceTransformer(IMAGE_MODEL_NAME)
     return qdrant, groq, embed_model, image_encoder
 
@@ -59,19 +71,23 @@ def get_clients():
 qdrant, groq_client, embed_model, image_encoder = get_clients()
 
 
+# ============================================================
+# POMOĆNE FUNKCIJE
+# ============================================================
 def embed_query(text):
+    """Tekstualni vektor za pretragu (MPNet)."""
     if "e5" in EMBEDDING_MODEL.lower():
         text = f"query: {text}"
     return list(embed_model.embed([text]))[0].tolist()
 
 
 def embed_image_query(text):
-    """Embeduje tekstualni upit za pretragu slika (CLIP)."""
+    """Vektor za pretragu slika (CLIP)."""
     return image_encoder.encode(text).tolist()
 
 
 def scroll_tip(tip, limit=200):
-    """Skroluje zapise sa datim tipom. Bez filtera u Qdrant (nema indeks)."""
+    """Skroluje zapise sa datim tipom (bez filtera u Qdrant)."""
     svi = []
     offset = None
     while True:
@@ -93,18 +109,44 @@ def scroll_tip(tip, limit=200):
     return svi[:limit]
 
 
-def search_images(query, top_k=6):
-    """Pretražuje slike u Qdrant-u koristeći CLIP."""
+def search_text(query, top_k=10, tip_filter=None):
+    """
+    Pretražuje tekstualne tačke u Qdrant-u.
+    Ako je tip_filter dat, filtrira po 'tip' polju.
+    """
+    vec = embed_query(query)
+    filter_cond = None
+    if tip_filter:
+        filter_cond = Filter(
+            must=[FieldCondition(key="tip", match=MatchValue(value=tip_filter))]
+        )
+    try:
+        response = qdrant.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=vec,  # neimenovani vektor
+            limit=top_k,
+            query_filter=filter_cond,
+            with_payload=True,
+        )
+        return response
+    except Exception as e:
+        st.error(f"Greška pri pretrazi teksta: {e}")
+        return []
+
+
+def search_images(query, top_k=6, tip_filter="dijagram"):
+    """
+    Pretražuje slike (tip='dijagram' ili 'fotografija_profil').
+    Podrazumevano traži dijagrame.
+    """
     vec = embed_image_query(query)
     filter_cond = Filter(
-        must=[
-            FieldCondition(key="tip", match=MatchValue(value="image"))
-        ]
+        must=[FieldCondition(key="tip", match=MatchValue(value=tip_filter))]
     )
     try:
         response = qdrant.search(
             collection_name=COLLECTION_NAME,
-            query_vector=("image", vec),  # ime vektorskog polja
+            query_vector=vec,
             limit=top_k,
             query_filter=filter_cond,
             with_payload=True,
@@ -116,19 +158,27 @@ def search_images(query, top_k=6):
 
 
 # ============================================================
-# HANDLERI — direktno iz strukturiranih polja
+# HANDLERI
 # ============================================================
+
 def handle_direktor():
-    """Direktor: skeniraj fotografija_profil, nađi onaj gde Funkcija='direktor'."""
+    """Direktor: traži fotografija_profil sa Funkcijom='direktor' ili 'zamenik'."""
     points = scroll_tip("fotografija_profil", limit=100)
     direktori = []
     zamenici = []
     for p in points:
         payload = p.payload or {}
         tekst = payload.get("tekst", "") or ""
-        url = payload.get("Link") or payload.get("slika_url", "")
+        url = payload.get("slika_url", "") or payload.get("Link", "")
         funkcija_raw = payload.get("Funkcija", "") or ""
+        # Ako nema Funkcija polje, probaj iz teksta
+        if not funkcija_raw:
+            # Pokušaj regex da izvuče funkciju iz teksta
+            m = re.search(r'(?:Funkcija|funkcija)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
+            if m:
+                funkcija_raw = m.group(1).strip()
         funkcija = funkcija_raw.lower()
+        # Izvuci ime iz teksta
         m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
         if not m:
             continue
@@ -139,14 +189,14 @@ def handle_direktor():
             zamenici.append((ime, url, funkcija_raw))
 
     if not direktori and not zamenici:
-        return "⚠️ Nisu pronađeni direktor/zamenici u photo zapisima.", []
+        return "⚠️ Nisu pronađeni direktor/zamenici u bazi.", []
 
     slike = []
     delovi = []
     if direktori:
         ime = direktori[0][0]
         url = direktori[0][1]
-        delovi.append(f"**Direktor Biroа:** {ime}")
+        delovi.append(f"**Direktor Biroa:** {ime}")
         if url:
             slike.append((url, f"Direktor: {ime}"))
     if zamenici:
@@ -163,22 +213,29 @@ def handle_direktor():
 
 
 def handle_lista_zaposlenih():
-    """Lista: izvuci sva imena iz 'Fotografija [Ime], [funkcija]'."""
+    """Lista zaposlenih iz fotografija profila."""
     points = scroll_tip("fotografija_profil", limit=100)
     zaposleni = []
     for p in points:
         payload = p.payload or {}
         tekst = payload.get("tekst", "") or ""
-        url = payload.get("Link") or payload.get("slika_url", "")
-        funkcija = payload.get("Funkcija", "")
+        url = payload.get("slika_url", "") or payload.get("Link", "")
+        # Probaj ime iz teksta
         m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
         if m:
             ime = m.group(1)
+            # Funkcija iz payload ili iz teksta
+            funkcija = payload.get("Funkcija", "")
+            if not funkcija:
+                fm = re.search(r'(?:Funkcija|funkcija)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
+                if fm:
+                    funkcija = fm.group(1).strip()
             zaposleni.append({"ime": ime, "url": url, "funkcija": funkcija})
 
     if not zaposleni:
-        return "⚠️ Nisu pronađeni zaposleni u photo zapisima.", []
+        return "⚠️ Nisu pronađeni zaposleni.", []
 
+    # Dedupe po imenu
     seen = set()
     uniq = []
     for z in zaposleni:
@@ -191,19 +248,21 @@ def handle_lista_zaposlenih():
         imena_lista = "\n".join([f"• {z['ime']}" for z in uniq])
 
     slike = [(z["url"], z["ime"]) for z in uniq if z.get("url")]
-    return f"**Запослени у Бироу ({len(uniq)}):**\n\n{imena_lista}", slike
+    return f"**Zaposleni u Birou ({len(uniq)}):**\n\n{imena_lista}", slike
 
 
 def handle_osoba_po_imenu(upit):
-    """Traži osobu po imenu u photo records."""
+    """Traži osobu po imenu u fotografijama profila."""
     import re as _re
     if not upit:
         return "⚠️ Prazno pitanje.", []
 
+    # Izvuci ime iz upita
     imena = _re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\s+[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\b', upit)
     if not imena:
         imena = _re.findall(r'\b[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ][а-яё]{2,}\b', upit)
     if not imena:
+        # Filtriraj stop reči
         stop_reci_ime = {"biro", "biroa", "srbijasume", "srbija", "suma", "sumama",
                          "baze", "birou", "kolektivni", "ugovor", "clan", "preduzece",
                          "firma", "kompanija", "pd", "jp",
@@ -237,9 +296,10 @@ def handle_osoba_po_imenu(upit):
         payload = p.payload or {}
         tekst = payload.get("tekst", "") or ""
         tekst_norm = sredi_upit(tekst)
-        url = payload.get("Link") or payload.get("slika_url", "")
+        url = payload.get("slika_url", "") or payload.get("Link", "")
 
         for ime_info in imena_za_pretragu:
+            # Provera da li svi delovi imena postoje u tekstu
             svi_delovi_prisutni = True
             for d in ime_info["delovi"]:
                 if not _re.search(rf'\b{_re.escape(d)}', tekst_norm):
@@ -254,6 +314,10 @@ def handle_osoba_po_imenu(upit):
             )
             ime_lepo = m.group(1) if m else ime_info["originalno"]
             funkcija = payload.get("Funkcija", "")
+            if not funkcija:
+                fm = _re.search(r'(?:Funkcija|funkcija)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
+                if fm:
+                    funkcija = fm.group(1).strip()
             kljuc = sredi_upit(ime_lepo)
             pogodci.append({
                 "ime": ime_lepo,
@@ -266,6 +330,7 @@ def handle_osoba_po_imenu(upit):
         imena_str = ", ".join([i["originalno"] for i in imena_za_pretragu])
         return f"⚠️ **{imena_str}** — nisam pronašao u bazi fotografija.", []
 
+    # Dedupe
     seen = set()
     uniq = []
     for p in pogodci:
@@ -273,6 +338,7 @@ def handle_osoba_po_imenu(upit):
             seen.add(p["kljuc"])
             uniq.append(p)
 
+    # Ako je traženo jedno ime, filtriraj samo tačne
     if len(imena_za_pretragu) == 1:
         target_norm = imena_za_pretragu[0]["norm"]
         filtered = []
@@ -293,11 +359,13 @@ def handle_osoba_po_imenu(upit):
 
 def handle_oprema_specificno(upit):
     """Oprema: skeniraj 'oprema' tip, prikaži čistu listu."""
-    points = scroll_tip("oprema", limit=50)
+    # Pretražujemo tačke sa tip='oprema' (iz indeksiranja)
+    points = scroll_tip("oprema", limit=100)
     u = sredi_upit(upit)
     is_toner = "toner" in u or "kertridz" in u
     is_printer = any(kw in u for kw in ["stampac", "stampaci", "printer", "pisac"])
 
+    # Regulari za prepoznavanje modela
     printer_pat = re.compile(
         r'\b(?:'
         r'Kyocera\s+(?:FS-\d+[a-z]*|M\d+[a-z]*|P\d+[a-z]*|TASKalfa\w*|ECOSYS\w*)'
@@ -325,26 +393,25 @@ def handle_oprema_specificno(upit):
     for p in points:
         payload = p.payload or {}
         tekst_orig = payload.get("tekst", "") or ""
-        tekst = sredi_upit(tekst_orig)
-
-        has_printer = bool(printer_pat.search(tekst_orig))
-        has_toner = bool(toner_pat.search(tekst_orig))
+        # Ponekad je tekst u chunkovima, ali dovoljno
 
         if is_printer:
-            if not has_printer:
-                continue
             for m in printer_pat.findall(tekst_orig):
                 stampaci_lista.add(m.strip())
         elif is_toner:
-            if not has_toner:
-                continue
+            for m in toner_pat.findall(tekst_orig):
+                toneri_lista.add(m.strip())
+        else:
+            # Opšti upit: prikazi oba
+            for m in printer_pat.findall(tekst_orig):
+                stampaci_lista.add(m.strip())
             for m in toner_pat.findall(tekst_orig):
                 toneri_lista.add(m.strip())
 
     def dodaj_proizvodjaca(kod):
         if kod.upper().startswith("TK-"):
             return f"Kyocera {kod}"
-        if kod.upper().startswith("CE"):
+        if kod.upper().startswith("CE") or kod.upper().startswith("HP"):
             return f"HP {kod}"
         return kod
 
@@ -364,6 +431,7 @@ def handle_oprema_specificno(upit):
             delovi.append(f"- {s}")
         return "\n".join(delovi), []
 
+    # Opšti
     delovi = ["**Oprema u Birou:**", ""]
     if stampaci_lista:
         delovi.append("**Štampači:**")
@@ -381,10 +449,9 @@ def handle_oprema_specificno(upit):
 
 def handle_dijagram(upit):
     """
-    Dijagram: pretražuje slike pomoću CLIP-a.
-    Sada radi mnogo bolje nego preko OCR regex-a.
+    Dijagram: pretražuje slike (tip='dijagram') pomoću CLIP-a.
     """
-    hits = search_images(upit, top_k=6)
+    hits = search_images(upit, top_k=6, tip_filter="dijagram")
     if not hits:
         return "⚠️ Nema pronađenih dijagrama/slika za ovaj upit.", []
     slike = []
@@ -392,9 +459,8 @@ def handle_dijagram(upit):
         payload = hit.payload
         url = payload.get("slika_url", "") or payload.get("Link", "")
         if url and url.startswith("http"):
-            naziv = payload.get("naziv_dokumenta", "") or payload.get("izvor", "") or "Slika"
+            naziv = payload.get("naziv_dokumenta", "") or payload.get("izvor", "") or "Dijagram"
             slike.append((url, naziv))
-        # Ako nema URL, možda je lokalna putanja – preskačemo za sada
     if not slike:
         return "⚠️ Pronađene slike nemaju javni URL (nisu na R2).", []
     return f"**Pronađeno {len(slike)} slika/dijagrama:**", slike[:6]
@@ -426,7 +492,7 @@ def handle_clan(broj):
                 continue
             if len(clan_tekst) > 4000:
                 clan_tekst = clan_tekst[:4000] + "\n...[Skraćeno]"
-            izvor = payload.get("izvor", "") or payload.get("naziv_dokumenta", "")
+            izvor = payload.get("naziv_dokumenta", "") or payload.get("izvor", "")
             pogodci.append({"tekst": clan_tekst, "izvor": izvor, "duzina": len(clan_tekst)})
         if not pogodci and clan_check.search(tekst_norm):
             for cm in clan_check.finditer(tekst_norm):
@@ -436,7 +502,7 @@ def handle_clan(broj):
                 if len(clan_tekst) >= 30:
                     pogodci.append({
                         "tekst": clan_tekst,
-                        "izvor": payload.get("izvor", "") or payload.get("naziv_dokumenta", ""),
+                        "izvor": payload.get("naziv_dokumenta", "") or payload.get("izvor", ""),
                         "duzina": len(clan_tekst),
                     })
                     break
@@ -444,6 +510,7 @@ def handle_clan(broj):
     if not pogodci:
         return f"⚠️ Član {broj} nije pronađen u bazi pravnih akata.", []
 
+    # Dedupe i uzmi najduži
     seen = set()
     uniq = []
     for p in pogodci:
@@ -453,79 +520,30 @@ def handle_clan(broj):
             uniq.append(p)
     uniq.sort(key=lambda x: -x["duzina"])
     p = uniq[0]
-    return f"**Члан {broj}** (izvor: {p['izvor']}):\n\n{p['tekst']}", []
+    return f"**Član {broj}** (izvor: {p['izvor']}):\n\n{p['tekst']}", []
 
 
 # ============================================================
-# VIZUELNA ANALIZA (opciono)
-# ============================================================
-def analyze_image_with_vision(image_url, question):
-    """
-    Šalje sliku i pitanje na HuggingFace Inference API.
-    Za korišćenje potreban vam je HF_API_TOKEN u .env.
-    """
-    api_token = os.environ.get("HF_API_TOKEN")
-    if not api_token:
-        return None
-    API_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen-VL-Chat"
-    headers = {"Authorization": f"Bearer {api_token}"}
-    try:
-        response = requests.get(image_url, timeout=10)
-        img = Image.open(io.BytesIO(response.content))
-        buffered = io.BytesIO()
-        img.save(buffered, format="PNG")
-        img_base64 = base64.b64encode(buffered.getvalue()).decode()
-        payload = {
-            "inputs": {
-                "image": img_base64,
-                "text": question,
-            }
-        }
-        resp = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-        if resp.status_code == 200:
-            return resp.json().get("generated_text", "Nema odgovora.")
-        else:
-            return None
-    except Exception:
-        return None
-
-
-# ============================================================
-# STANDARDNI RAG
+# RAG
 # ============================================================
 def do_rag(query, top_k=10):
-    """Jednostavan RAG za opšta pitanja."""
+    """Opšta RAG pretraga (tekstualna)."""
     try:
-        vec = embed_query(query)
-        if hasattr(qdrant, "query_points"):
-            response = qdrant.query_points(
-                collection_name=COLLECTION_NAME,
-                query=vec,
-                limit=top_k,
-            )
-            points = response.points
-        else:
-            points = qdrant.search(
-                collection_name=COLLECTION_NAME,
-                query_vector=vec,
-                limit=top_k,
-            )
+        hits = search_text(query, top_k=top_k)
     except Exception as e:
         return "", 0, [], f"Greška: {e}"
 
     delovi = []
     slike = []
     seen = set()
-    for hit in points:
+    for hit in hits:
         if not hit.payload:
             continue
-        text = hit.payload.get("tekst", "") or hit.payload.get("text", "") or ""
+        text = hit.payload.get("tekst", "") or ""
         izvor = hit.payload.get("naziv_dokumenta", "") or hit.payload.get("izvor", "") or ""
-        url = (hit.payload.get("Link", "") or hit.payload.get("slika_url", "") or
-               hit.payload.get("image_url", "") or hit.payload.get("slika", ""))
+        url = hit.payload.get("slika_url", "") or hit.payload.get("Link", "")
         cist = re.sub(r'http[s]?://\S+', '', text).strip()
         cist = re.sub(r'\n{3,}', '\n\n', cist)
-        cist = cist.replace("Ime Prezime", "[ime]")
         if len(cist) > 500:
             cist = cist[:500] + "..."
         if cist:
@@ -537,7 +555,7 @@ def do_rag(query, top_k=10):
     kontekst = "\n\n---\n\n".join(delovi)
     if len(kontekst) > 6000:
         kontekst = kontekst[:6000] + "\n[Skraćeno]"
-    return kontekst, len(points), slike, ""
+    return kontekst, len(hits), slike, ""
 
 
 def ask_llm(messages):
@@ -564,7 +582,7 @@ def ask_llm(messages):
 
 
 # ============================================================
-# EKSTERNI SEARCH (Tavily)
+# EKSTERNA PRETRAGA (Tavily)
 # ============================================================
 import requests as req
 
@@ -601,18 +619,8 @@ def external_search(query, max_results=3):
         return None
 
 
-def je_kontekst_dovoljan(kontekst):
-    if not kontekst or len(kontekst.strip()) < 100:
-        return False
-    niske_reci = ["nije pronađeno", "nema podatak", "podatak nije"]
-    tekst_lower = kontekst.lower()
-    if any(fraza in tekst_lower for fraza in niske_reci) and len(kontekst) < 300:
-        return False
-    return True
-
-
 # ============================================================
-# RUTIRANJE
+# POMOĆNE FUNKCIJE ZA RUTIRANJE
 # ============================================================
 def sredi_upit(t):
     if not t:
@@ -629,45 +637,77 @@ def sredi_upit(t):
     zamene_dij = {'č':'c', 'ć':'c', 'š':'s', 'ž':'z', 'đ':'d'}
     return "".join([zamene_dij.get(c, c) for c in s])
 
+def je_pitanje_za_eksterno(upit):
+    u = sredi_upit(upit)
+    ekstern_ključne = [
+        "ko je ministar", "ko je predsednik", "ko je direktor pd",
+        "ko je osnivac", "ko je osnovao", "ko je izumeo", "ko je napravio",
+        "sta je", "sta su", "sta znaci", "sta predstavlja",
+        "koji je", "koja je", "koje je",
+        "kako se zove", "gde se nalazi", "kada je",
+        "koliko kosta", "koliko je",
+        "pd srbijasume", "javno preduzece", "preduzece za gazdovanje",
+        "o kompaniji", "o firmi", "istorija", "kako posluje",
+        "sediste", "kontakt", "veb sajt", "web sajt", "sajt",
+    ]
+    return any(kw in u for kw in ekstern_ključne)
 
+def je_pitanje_o_kompaniji(upit):
+    u = sredi_upit(upit)
+    kompanija_ključne = [
+        "pd srbijasume", "javno preduzece", "preduzece", "firma",
+        "kompanija", "organizacija", "istorija", "delatnost",
+        "sediste", "veb sajt", "web sajt",
+    ]
+    return any(kw in u for kw in kompanija_ključne)
+
+
+# ============================================================
+# DETEKCIJA TIPA UPITA
+# ============================================================
 def detektuj_tip(upit):
     u = sredi_upit(upit)
 
-    # Vizuelna analiza (ako pita za opis slike)
+    # Vizuelna analiza
     if any(kw in u for kw in ["opiši sliku", "šta je na slici", "šta prikazuje", "opis slike", "analiziraj sliku"]):
         return "vizuelna_analiza"
 
+    # Pravni član
     m = re.search(r'(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*(\d+)', u)
     if m:
         return f"clan_{m.group(1)}"
 
+    # Direktor
     if "direktor" in u and "zamenik" not in u:
         return "direktor"
 
+    # Pretraga osobe po imenu
     if any(kw in u for kw in ["pronadi", "nadji", "nadjem",
-                                "ima li", "gde je", "ko je to", "sta je sa",
-                                "da li", "dal je", "dal i", "je li"]):
+                              "ima li", "gde je", "ko je to", "sta je sa",
+                              "da li", "dal je", "dal i", "je li"]):
         if "direktor" not in u and "zaposleni" not in u and "lista" not in u:
             return "osoba_ime"
 
+    # Lista zaposlenih
     if "zaposlen" in u:
         indikatori = ["svi", "lista", "spisak", "koji su", "ko je sve", "navedi",
                       "ko radi", "kadrov", "imena", "ljudi", "ko je", "tko je"]
         if any(ind in u for ind in indikatori):
             return "lista_zaposlenih"
 
+    # Oprema
     if "toner" in u or "kertrid" in u:
         return "oprema"
-
     if any(kw in u for kw in ["stampac", "stampaci", "printer", "pisač", "oprema", "racunar"]):
         return "oprema"
 
-    # DIJAGRAM sada ide preko CLIP-a
+    # Dijagrami
     if any(kw in u for kw in ["dijagram", "mapa", "karta", "ruza vetrova", "vetrova",
-                                "grafikon", "sema", "shema", "tabela", "skica",
-                                "crtez", "prikaz", "pokaz", "slika", "fotografija"]):
+                              "grafikon", "sema", "shema", "tabela", "skica",
+                              "crtez", "prikaz", "pokaz", "slika", "fotografija"]):
         return "dijagram"
 
+    # Pravni član (fallback)
     m = re.search(r"clan\s*(\d+)", u)
     if m:
         return f"clan_{m.group(1)}"
@@ -676,34 +716,66 @@ def detektuj_tip(upit):
 
 
 # ============================================================
-# UI
+# VIZUELNA ANALIZA (opciono)
 # ============================================================
-st.set_page_config(page_title="Биро асистент", page_icon="🌲", layout="wide")
+def analyze_image_with_vision(image_url, question):
+    api_token = os.environ.get("HF_API_TOKEN")
+    if not api_token:
+        return None
+    API_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen-VL-Chat"
+    headers = {"Authorization": f"Bearer {api_token}"}
+    try:
+        response = requests.get(image_url, timeout=10)
+        img = Image.open(io.BytesIO(response.content))
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        img_base64 = base64.b64encode(buffered.getvalue()).decode()
+        payload = {
+            "inputs": {
+                "image": img_base64,
+                "text": question,
+            }
+        }
+        resp = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+        if resp.status_code == 200:
+            return resp.json().get("generated_text", "Nema odgovora.")
+        else:
+            return None
+    except Exception:
+        return None
 
+
+# ============================================================
+# STREAMLIT UI
+# ============================================================
+st.set_page_config(page_title="🌲 Biro asistent", page_icon="🌲", layout="wide")
+
+# Header
 col_l, col_c, col_r = st.columns([1, 3, 1])
 with col_c:
     st.image(LOGO_URL, width=110)
     st.markdown(
-        "<h2 style='text-align: center; color: #1b4332; margin: 0;'>🌲 Биро асистент</h2>",
+        "<h2 style='text-align: center; color: #1b4332; margin: 0;'>🌲 Biro asistent</h2>",
         unsafe_allow_html=True,
     )
     st.markdown(
         "<p style='text-align: center; color: #52796f; margin: 0;'>"
-        "ПД „Србијашуме” • Биро за планирање</p>",
+        "PD „Srbijašume” • Biro za planiranje</p>",
         unsafe_allow_html=True,
     )
 
 st.markdown("---")
 
-st.markdown("##### 💡 Брза питања:")
+# Brza pitanja
+st.markdown("##### 💡 Brza pitanja:")
 cols = st.columns(6)
 QUICK = [
-    "Ко је директор Бироа?",
-    "Који су запослени у Бироу?",
-    "Који су штампачи у Бироу?",
-    "Који тонeri се користе?",
-    "Покажи дијаграм руже ветрова",
-    "Члан 14",
+    "Ko je direktor Biroa?",
+    "Koji su zaposleni u Biroa?",
+    "Koji su štampači u Biroa?",
+    "Koji toner se koristi?",
+    "Prikaži dijagram ruže vetrova",
+    "Član 14",
 ]
 for i, label in enumerate(QUICK):
     with cols[i]:
@@ -712,25 +784,28 @@ for i, label in enumerate(QUICK):
 
 st.markdown("---")
 
+# Sidebar
 with st.sidebar:
     st.image(LOGO_URL, width=80)
-    st.markdown("### 🌲 Биро")
+    st.markdown("### 🌲 Biro")
     st.caption(f"Kolekcija: {COLLECTION_NAME}")
     st.markdown("---")
-    if st.button("🧹 Обриши разговор", use_container_width=True):
+    if st.button("🧹 Obriši razgovor", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
-    if st.button("🔄 Освежи кеш", use_container_width=True):
+    if st.button("🔄 Osveži keš", use_container_width=True):
         st.cache_data.clear()
-        st.session_state.cache_msg = "Кеш података обрисан"
+        st.session_state.cache_msg = "Keš podataka obrisan"
         st.rerun()
     if st.session_state.get("cache_msg"):
         st.success(f"✅ {st.session_state.cache_msg}")
         del st.session_state.cache_msg
 
+# Inicijalizacija istorije
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Prikaz istorije
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -740,7 +815,8 @@ for msg in st.session_state.messages:
                 with img_cols[idx % 3]:
                     st.image(url, caption=cap, width=250)
 
-user_input = st.chat_input("Поставите питање...")
+# Input
+user_input = st.chat_input("Postavite pitanje...")
 if "pending" in st.session_state:
     user_input = st.session_state.pending
     del st.session_state.pending
@@ -751,7 +827,7 @@ if user_input:
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        with st.spinner("Тражим у бази..."):
+        with st.spinner("Tražim u bazi..."):
             try:
                 tip = detektuj_tip(user_input)
                 slike = []
@@ -771,8 +847,10 @@ if user_input:
                     broj = tip.split("_")[1]
                     odgovor, slike = handle_clan(broj)
                 elif tip == "vizuelna_analiza":
-                    # Prvo pronađi sliku, pa je analiziraj
-                    hits = search_images(user_input, top_k=1)
+                    # Pronađi sliku pa je analiziraj
+                    hits = search_images(user_input, top_k=1, tip_filter="dijagram")
+                    if not hits:
+                        hits = search_images(user_input, top_k=1, tip_filter="fotografija_profil")
                     if hits:
                         url = hits[0].payload.get("slika_url", "") or hits[0].payload.get("Link", "")
                         if url:
@@ -786,6 +864,7 @@ if user_input:
                     else:
                         odgovor = "⚠️ Nisam pronašao odgovarajuću sliku za analizu."
                 else:
+                    # Standardni RAG
                     kontekst, br_k, slike, err = do_rag(user_input)
                     if err:
                         st.error(err)
@@ -810,6 +889,7 @@ if user_input:
                             meta += " | 🌐 Eksterno"
                         meta += "</sub>"
 
+                # Prikaz
                 if slike:
                     st.markdown("---")
                     img_cols = st.columns(min(3, len(slike)))
@@ -830,30 +910,3 @@ if user_input:
                     "role": "assistant",
                     "content": f"⚠️ Greška: {e}", "images": []
                 })
-
-# ============================================================
-# POMOĆNE FUNKCIJE ZA DETEKCIJU EKSTERNIH PITANJA
-# ============================================================
-def je_pitanje_za_eksterno(upit):
-    u = sredi_upit(upit)
-    ekstern_ključne = [
-        "ko je ministar", "ko je predsednik", "ko je direktor pd",
-        "ko je osnivac", "ko je osnovao", "ko je izumeo", "ko je napravio",
-        "sta je", "sta su", "sta znaci", "sta predstavlja",
-        "koji je", "koja je", "koje je",
-        "kako se zove", "gde se nalazi", "kada je",
-        "koliko kosta", "koliko je",
-        "pd srbijasume", "javno preduzece", "preduzece za gazdovanje",
-        "o kompaniji", "o firmi", "istorija", "kako posluje",
-        "sediste", "kontakt", "veb sajt", "web sajt", "sajt",
-    ]
-    return any(kw in u for kw in ekstern_ključne)
-
-def je_pitanje_o_kompaniji(upit):
-    u = sredi_upit(upit)
-    kompanija_ključne = [
-        "pd srbijasume", "javno preduzece", "preduzece", "firma",
-        "kompanija", "organizacija", "istorija", "delatnost",
-        "sediste", "veb sajt", "web sajt",
-    ]
-    return any(kw in u for kw in kompanija_ključne)
