@@ -1,5 +1,5 @@
 """
-app.py v11 — konačna verzija sa svim ispravkama
+app.py v12 — kompatibilan sa Streamlit Cloud-om
 """
 
 import os
@@ -7,8 +7,7 @@ import re
 import time
 import uuid
 import streamlit as st
-from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue, PayloadFieldType
+from qdrant_client import QdrantClient, models
 from groq import Groq
 from fastembed import TextEmbedding
 from sentence_transformers import SentenceTransformer
@@ -51,16 +50,16 @@ def get_clients():
 qdrant, groq_client, embed_model = get_clients()
 
 # ============================================================
-# KREIRANJE PAYLOAD INDEXA (ako ne postoji)
+# KREIRANJE PAYLOAD INDEXA (ako ne postoji) – sa models.PayloadFieldType
 # ============================================================
 try:
     qdrant.create_payload_index(
         collection_name=COLLECTION_NAME,
         field_name="tip",
-        field_schema=PayloadFieldType.KEYWORD,
+        field_schema=models.PayloadFieldType.KEYWORD,
     )
 except Exception:
-    pass  # verovatno već postoji
+    pass  # verovatno već postoji ili nije podržano
 
 # ============================================================
 # POMOĆNE FUNKCIJE
@@ -113,7 +112,6 @@ def scroll_tip(tip, limit=200):
     return svi[:limit]
 
 def scroll_all(limit=500):
-    """Skroluje sve tačke (bez filtera)."""
     svi = []
     offset = None
     while True:
@@ -136,8 +134,8 @@ def search_text(query, top_k=10, tip_filter=None):
     vec = embed_query(query)
     filter_cond = None
     if tip_filter:
-        filter_cond = Filter(
-            must=[FieldCondition(key="tip", match=MatchValue(value=tip_filter))]
+        filter_cond = models.Filter(
+            must=[models.FieldCondition(key="tip", match=models.MatchValue(value=tip_filter))]
         )
     try:
         return qdrant_search(
@@ -260,16 +258,11 @@ def handle_lista_zaposlenih():
 
 
 def handle_osoba_po_imenu(upit):
-    """
-    Pretraga osoba po imenu.
-    Skrolujemo sve fotografije i filtriramo u Pythonu.
-    """
     if not upit:
         return "⚠️ Prazno pitanje.", []
 
-    # Izvuci ime iz upita (jedna ili dve reči)
+    # Izvuci ime iz upita
     words = upit.strip().split()
-    # Filtriraj kratke reči (stop reči)
     stop_words = {"biro", "biroa", "srbijasume", "srbija", "suma", "birou", "kolektivni", "ugovor",
                   "clan", "preduzece", "firma", "kompanija", "pd", "jp", "svi", "sve", "sva",
                   "kako", "sta", "koji", "koja", "koje", "gde", "kada", "imam", "imaju",
@@ -280,7 +273,6 @@ def handle_osoba_po_imenu(upit):
     if not clean_words:
         return "⚠️ Nisam pronašao ime u pitanju.", []
 
-    # Uzmi prvu reč kao ime (ako ima dve, to je puno ime)
     search_term = " ".join(clean_words)
 
     points = scroll_tip("fotografija_profil", limit=200)
@@ -295,7 +287,6 @@ def handle_osoba_po_imenu(upit):
         employee_name = payload.get("employee_name", "") or ""
         url = payload.get("slika_url", "") or payload.get("Link", "")
 
-        # Proveri employee_name (tačnije)
         if employee_name:
             if search_term_lower in employee_name.lower():
                 ime = employee_name
@@ -304,29 +295,27 @@ def handle_osoba_po_imenu(upit):
                     fm = re.search(r'(?:Funkcija|funkcija)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
                     if fm:
                         funkcija = fm.group(1).strip()
-                pogodci.append({"ime": ime, "url": url, "funkcija": funkcija})
+                if not any(p["ime"].lower() == ime.lower() for p in pogodci):
+                    pogodci.append({"ime": ime, "url": url, "funkcija": funkcija})
                 continue
 
-        # Proveri tekst (ako nema employee_name ili nije poklopljeno)
         if search_term_lower in tekst.lower():
             m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
             if m:
                 ime = m.group(1)
             else:
-                continue  # ne može da izvuče ime
+                continue
             funkcija = payload.get("Funkcija", "")
             if not funkcija:
                 fm = re.search(r'(?:Funkcija|funkcija)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
                 if fm:
                     funkcija = fm.group(1).strip()
-            # Proveri da li je već dodato (duplikat)
             if not any(p["ime"].lower() == ime.lower() for p in pogodci):
                 pogodci.append({"ime": ime, "url": url, "funkcija": funkcija})
 
     if not pogodci:
         return f"⚠️ **{search_term}** — nisam pronašao u bazi fotografija.", []
 
-    # Sortiraj po imenu
     pogodci.sort(key=lambda x: x["ime"])
     delovi_text = [f"**Pronađeno {len(pogodci)}:**", ""]
     for p in pogodci:
@@ -422,16 +411,10 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
-    """
-    Pretraga dijagrama – koristimo tekstualnu pretragu na 'tekst' polju,
-    jer tu imamo opis slike. Time izbegavamo CLIP dimenzionu grešku.
-    """
-    # Pretraži sve tačke sa tip='dijagram' ili 'image' (ako ih ima)
     hits = search_text(upit, top_k=10, tip_filter="dijagram")
     if not hits:
         hits = search_text(upit, top_k=10, tip_filter="image")
     if not hits:
-        # Ako nema, uzmi sve dijagrame iz baze (scroll)
         points = scroll_tip("dijagram", limit=10)
         if not points:
             points = scroll_tip("image", limit=10)
@@ -459,9 +442,6 @@ def handle_dijagram(upit):
 
 
 def handle_clan(broj):
-    """
-    Pretražuje sve tačke koje sadrže 'član X' (bez obzira na tip).
-    """
     all_points = scroll_all(limit=500)
     pogodci = []
     clan_pat = re.compile(
@@ -662,8 +642,6 @@ def detektuj_tip(upit):
         return f"clan_{m.group(1)}"
     if "direktor" in u and "zamenik" not in u:
         return "direktor"
-    # Pretraga osobe – ako upit sadrži ime (jednu ili dve reči) i nije oprema/direktor
-    # Ovo je grubo, ali radi
     words = u.split()
     if len(words) <= 3 and not any(kw in u for kw in ["stampac", "toner", "oprema", "dijagram", "mapa", "karta"]):
         return "osoba_ime"
