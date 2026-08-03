@@ -1,5 +1,5 @@
 """
-app.py v11 — finalna verzija sa svim ispravkama
+app.py v11 — konačna verzija sa svim ispravkama
 """
 
 import os
@@ -8,7 +8,7 @@ import time
 import uuid
 import streamlit as st
 from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue
+from qdrant_client.models import Filter, FieldCondition, MatchValue, PayloadFieldType
 from groq import Groq
 from fastembed import TextEmbedding
 from sentence_transformers import SentenceTransformer
@@ -49,6 +49,18 @@ def get_clients():
 
 
 qdrant, groq_client, embed_model = get_clients()
+
+# ============================================================
+# KREIRANJE PAYLOAD INDEXA (ako ne postoji)
+# ============================================================
+try:
+    qdrant.create_payload_index(
+        collection_name=COLLECTION_NAME,
+        field_name="tip",
+        field_schema=PayloadFieldType.KEYWORD,
+    )
+except Exception:
+    pass  # verovatno već postoji
 
 # ============================================================
 # POMOĆNE FUNKCIJE
@@ -100,17 +112,33 @@ def scroll_tip(tip, limit=200):
             break
     return svi[:limit]
 
+def scroll_all(limit=500):
+    """Skroluje sve tačke (bez filtera)."""
+    svi = []
+    offset = None
+    while True:
+        records, next_offset = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=500,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        svi.extend(records)
+        if next_offset is None or len(records) == 0:
+            break
+        offset = next_offset
+        if len(svi) >= limit:
+            break
+    return svi[:limit]
+
 def search_text(query, top_k=10, tip_filter=None):
     vec = embed_query(query)
     filter_cond = None
     if tip_filter:
-        # Pokušaj sa filterom, ali ako ne radi, ignoriši
-        try:
-            filter_cond = Filter(
-                must=[FieldCondition(key="tip", match=MatchValue(value=tip_filter))]
-            )
-        except:
-            filter_cond = None
+        filter_cond = Filter(
+            must=[FieldCondition(key="tip", match=MatchValue(value=tip_filter))]
+        )
     try:
         return qdrant_search(
             collection_name=COLLECTION_NAME,
@@ -120,70 +148,14 @@ def search_text(query, top_k=10, tip_filter=None):
             with_payload=True,
         )
     except Exception as e:
-        # Ako filter ne radi, probaj bez filtera
-        if "index required" in str(e).lower() or "bad request" in str(e).lower():
-            return qdrant_search(
-                collection_name=COLLECTION_NAME,
-                query_vector=vec,
-                limit=top_k,
-                query_filter=None,
-                with_payload=True,
-            )
         st.error(f"Greška pri pretrazi teksta: {e}")
         return []
-
-def search_images(query, top_k=6, tip_filter=None):
-    # Za slike koristimo tekstualnu pretragu po opisu (tekst polje)
-    # jer su slike indeksirane sa tekstualnim opisom (ne CLIP vektorima)
-    return search_text(query, top_k=top_k, tip_filter=tip_filter)
-
-# ============================================================
-# NORMALIZACIJA IMENA (uklanjanje padeža)
-# ============================================================
-def normalize_name(name: str) -> str:
-    """Uklanja padežne nastavke sa srpskih imena."""
-    name = name.strip()
-    # Genitiv: Bojane -> Bojana, Nenada -> Nenad
-    if name.endswith('e') and len(name) > 2:
-        # Bojane -> Bojana
-        if name[-2] in 'aeiou' and name[-3] not in 'aeiou':
-            name = name[:-1] + 'a'
-    if name.endswith('a') and len(name) > 2:
-        # Nenada -> Nenad (ukloni 'a' na kraju)
-        name = name[:-1]
-    return name
-
-def extract_names_from_query(query):
-    """Izvlači imena iz upita, normalizuje ih."""
-    import re as _re
-    # Pokušaj sa dva imena
-    names = _re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\s+[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\b', query)
-    if names:
-        return names
-    # Ćirilica
-    names = _re.findall(r'\b[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ][а-яё]{2,}\b', query)
-    if names:
-        return names
-    # Samo jedno ime (bilo koje padež)
-    single = _re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\b', query)
-    if single:
-        # Ukloni stop reči
-        stop = {"biro", "biroa", "srbijasume", "srbija", "suma", "sumama", "baze", "birou",
-                "kolektivni", "ugovor", "clan", "preduzece", "firma", "kompanija", "pd", "jp",
-                "svi", "sve", "sva", "kako", "sta", "koji", "koja", "koje", "gde", "kada",
-                "imam", "imaju", "postoji", "treba", "hocu", "ovaj", "taj", "ovo", "ta", "to",
-                "neka", "neko", "nesto", "moze", "molim", "zasto", "zbog", "prema", "preko"}
-        single = [n for n in single if n.lower() not in stop]
-        if single:
-            return single
-    return []
 
 # ============================================================
 # HANDLERI
 # ============================================================
 
 def handle_direktor():
-    # Prvo probaj fotografija_profil
     points = scroll_tip("fotografija_profil", limit=100)
     if not points:
         hits = search_text("direktor Biroa", top_k=5)
@@ -247,7 +219,7 @@ def handle_direktor():
 
 
 def handle_lista_zaposlenih():
-    points = scroll_tip("fotografija_profil", limit=200)
+    points = scroll_tip("fotografija_profil", limit=100)
     if not points:
         return "⚠️ Nisu pronađeni zaposleni.", []
 
@@ -288,81 +260,73 @@ def handle_lista_zaposlenih():
 
 
 def handle_osoba_po_imenu(upit):
-    import re as _re
+    """
+    Pretraga osoba po imenu.
+    Skrolujemo sve fotografije i filtriramo u Pythonu.
+    """
     if not upit:
         return "⚠️ Prazno pitanje.", []
 
-    # Izvuci imena iz upita
-    imena = extract_names_from_query(upit)
-    if not imena:
+    # Izvuci ime iz upita (jedna ili dve reči)
+    words = upit.strip().split()
+    # Filtriraj kratke reči (stop reči)
+    stop_words = {"biro", "biroa", "srbijasume", "srbija", "suma", "birou", "kolektivni", "ugovor",
+                  "clan", "preduzece", "firma", "kompanija", "pd", "jp", "svi", "sve", "sva",
+                  "kako", "sta", "koji", "koja", "koje", "gde", "kada", "imam", "imaju",
+                  "postoji", "treba", "hocu", "ovaj", "taj", "ovo", "ta", "to", "neka",
+                  "neko", "nesto", "moze", "molim", "zasto", "zbog", "prema", "preko",
+                  "ima", "li", "dal", "je", "da"}
+    clean_words = [w for w in words if w.lower() not in stop_words and len(w) > 2]
+    if not clean_words:
         return "⚠️ Nisam pronašao ime u pitanju.", []
 
-    # Normalizuj imena (ukloni padeže)
-    imena_normalizovana = []
-    for ime in imena:
-        ime_norm = normalize_name(ime)
-        imena_normalizovana.append({
-            "original": ime,
-            "norm": ime_norm,
-            "lower": ime_norm.lower()
-        })
+    # Uzmi prvu reč kao ime (ako ima dve, to je puno ime)
+    search_term = " ".join(clean_words)
 
-    points = scroll_tip("fotografija_profil", limit=100)
+    points = scroll_tip("fotografija_profil", limit=200)
+    if not points:
+        return f"⚠️ Nema fotografija u bazi.", []
+
     pogodci = []
+    search_term_lower = search_term.lower()
     for p in points:
         payload = p.payload or {}
         tekst = payload.get("tekst", "") or ""
+        employee_name = payload.get("employee_name", "") or ""
         url = payload.get("slika_url", "") or payload.get("Link", "")
-        employee_name = payload.get("employee_name", "")
 
-        for ime_info in imena_normalizovana:
-            found = False
-            ime_lepo = None
-            # Proveri employee_name
-            if employee_name:
-                emp_lower = employee_name.lower()
-                # Proveri da li se normalizovano ime pojavljuje u employee_name
-                if ime_info["norm"].lower() in emp_lower or ime_info["lower"] in emp_lower:
-                    found = True
-                    ime_lepo = employee_name
-            if not found:
-                # Proveri tekst
-                tekst_lower = tekst.lower()
-                if ime_info["norm"].lower() in tekst_lower or ime_info["lower"] in tekst_lower:
-                    found = True
-                    # Izvuci puno ime iz teksta
-                    m = _re.search(
-                        r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+(?:\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)?)',
-                        tekst
-                    )
-                    if m:
-                        ime_lepo = m.group(1)
-                    else:
-                        # Pokušaj da izvučeš employee_name ili bilo koje ime
-                        name_match = _re.search(r'\b([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)\b', tekst)
-                        if name_match:
-                            ime_lepo = name_match.group(1)
-                        else:
-                            ime_lepo = ime_info["original"]
-
-            if found and ime_lepo:
+        # Proveri employee_name (tačnije)
+        if employee_name:
+            if search_term_lower in employee_name.lower():
+                ime = employee_name
                 funkcija = payload.get("Funkcija", "")
                 if not funkcija:
-                    fm = _re.search(r'(?:Funkcija|funkcija)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
+                    fm = re.search(r'(?:Funkcija|funkcija)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
                     if fm:
                         funkcija = fm.group(1).strip()
-                kljuc = ime_lepo.lower()
-                if not any(p["kljuc"] == kljuc for p in pogodci):
-                    pogodci.append({
-                        "ime": ime_lepo,
-                        "url": url,
-                        "funkcija": funkcija,
-                        "kljuc": kljuc,
-                    })
+                pogodci.append({"ime": ime, "url": url, "funkcija": funkcija})
+                continue
+
+        # Proveri tekst (ako nema employee_name ili nije poklopljeno)
+        if search_term_lower in tekst.lower():
+            m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
+            if m:
+                ime = m.group(1)
+            else:
+                continue  # ne može da izvuče ime
+            funkcija = payload.get("Funkcija", "")
+            if not funkcija:
+                fm = re.search(r'(?:Funkcija|funkcija)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
+                if fm:
+                    funkcija = fm.group(1).strip()
+            # Proveri da li je već dodato (duplikat)
+            if not any(p["ime"].lower() == ime.lower() for p in pogodci):
+                pogodci.append({"ime": ime, "url": url, "funkcija": funkcija})
 
     if not pogodci:
-        return f"⚠️ **{', '.join(imena)}** — nisam pronašao u bazi fotografija.", []
+        return f"⚠️ **{search_term}** — nisam pronašao u bazi fotografija.", []
 
+    # Sortiraj po imenu
     pogodci.sort(key=lambda x: x["ime"])
     delovi_text = [f"**Pronađeno {len(pogodci)}:**", ""]
     for p in pogodci:
@@ -370,7 +334,7 @@ def handle_osoba_po_imenu(upit):
             delovi_text.append(f"- **{p['ime']}** — {p['funkcija']}")
         else:
             delovi_text.append(f"- **{p['ime']}**")
-    slike = [(p["url"], p["ime"]) for p in pogodci if p["url"]][:3]
+    slike = [(p["url"], p["ime"]) for p in pogodci if p["url"]][:5]
     return "\n".join(delovi_text), slike
 
 
@@ -458,11 +422,16 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
-    # Pretraži slike (koristi tekstualnu pretragu po opisu)
-    hits = search_images(upit, top_k=10, tip_filter="dijagram")
+    """
+    Pretraga dijagrama – koristimo tekstualnu pretragu na 'tekst' polju,
+    jer tu imamo opis slike. Time izbegavamo CLIP dimenzionu grešku.
+    """
+    # Pretraži sve tačke sa tip='dijagram' ili 'image' (ako ih ima)
+    hits = search_text(upit, top_k=10, tip_filter="dijagram")
     if not hits:
-        hits = search_images(upit, top_k=10, tip_filter=None)
+        hits = search_text(upit, top_k=10, tip_filter="image")
     if not hits:
+        # Ako nema, uzmi sve dijagrame iz baze (scroll)
         points = scroll_tip("dijagram", limit=10)
         if not points:
             points = scroll_tip("image", limit=10)
@@ -474,7 +443,7 @@ def handle_dijagram(upit):
                     naziv = p.payload.get("naziv_dokumenta", "") or "Dijagram"
                     slike.append((url, naziv))
             if slike:
-                return f"**Nema slika za 'ružu vetrova', ali evo drugih dijagrama:**", slike[:6]
+                return f"**Nema slika za '{upit}', ali evo drugih dijagrama:**", slike[:6]
         return "⚠️ Nema pronađenih dijagrama/slika za ovaj upit.", []
 
     slike = []
@@ -490,9 +459,11 @@ def handle_dijagram(upit):
 
 
 def handle_clan(broj):
-    # Prikupljanje svih delova člana
-    points = scroll_tip("pravni_akt", limit=500)
-    clanovi = []
+    """
+    Pretražuje sve tačke koje sadrže 'član X' (bez obzira na tip).
+    """
+    all_points = scroll_all(limit=500)
+    pogodci = []
     clan_pat = re.compile(
         rf'(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*{re.escape(broj)}\b(.*?)'
         rf'(?=(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*\d+\b|$)',
@@ -503,7 +474,7 @@ def handle_clan(broj):
         re.IGNORECASE
     )
 
-    for p in points:
+    for p in all_points:
         payload = p.payload or {}
         tekst = payload.get("tekst", "") or ""
         tekst_norm = sredi_upit(tekst)
@@ -513,18 +484,36 @@ def handle_clan(broj):
             clan_tekst = m.group(0).strip()
             if len(clan_tekst) < 30:
                 continue
+            if len(clan_tekst) > 8000:
+                clan_tekst = clan_tekst[:8000] + "\n...[Skraćeno]"
             izvor = payload.get("naziv_dokumenta", "") or payload.get("izvor", "")
-            clanovi.append({"tekst": clan_tekst, "izvor": izvor})
+            pogodci.append({"tekst": clan_tekst, "izvor": izvor, "duzina": len(clan_tekst)})
+        if not pogodci and clan_check.search(tekst_norm):
+            for cm in clan_check.finditer(tekst_norm):
+                start_orig = max(0, cm.start() - 30)
+                end_orig = min(len(tekst), cm.end() + 3500)
+                clan_tekst = tekst[start_orig:end_orig].strip()
+                if len(clan_tekst) >= 30:
+                    pogodci.append({
+                        "tekst": clan_tekst,
+                        "izvor": payload.get("naziv_dokumenta", "") or payload.get("izvor", ""),
+                        "duzina": len(clan_tekst),
+                    })
+                    break
 
-    if not clanovi:
-        return f"⚠️ Član {broj} nije pronađen u bazi pravnih akata.", []
+    if not pogodci:
+        return f"⚠️ Član {broj} nije pronađen u bazi.", []
 
-    # Spojevi sve delove člana
-    combined_text = "\n\n".join([c["tekst"] for c in clanovi])
-    if len(combined_text) > 10000:
-        combined_text = combined_text[:10000] + "\n...[Skraćeno]"
-    izvor = clanovi[0]["izvor"] if clanovi else ""
-    return f"**Član {broj}** (izvor: {izvor}):\n\n{combined_text}", []
+    seen = set()
+    uniq = []
+    for p in pogodci:
+        kljuc = sredi_upit(p["tekst"][:200])
+        if kljuc not in seen:
+            seen.add(kljuc)
+            uniq.append(p)
+    uniq.sort(key=lambda x: -x["duzina"])
+    p = uniq[0]
+    return f"**Član {broj}** (izvor: {p['izvor']}):\n\n{p['tekst']}", []
 
 
 # ============================================================
@@ -673,10 +662,11 @@ def detektuj_tip(upit):
         return f"clan_{m.group(1)}"
     if "direktor" in u and "zamenik" not in u:
         return "direktor"
-    if any(kw in u for kw in ["pronadi", "nadji", "nadjem", "ima li", "gde je", "ko je to", "sta je sa",
-                              "da li", "dal je", "dal i", "je li"]):
-        if "direktor" not in u and "zaposleni" not in u and "lista" not in u:
-            return "osoba_ime"
+    # Pretraga osobe – ako upit sadrži ime (jednu ili dve reči) i nije oprema/direktor
+    # Ovo je grubo, ali radi
+    words = u.split()
+    if len(words) <= 3 and not any(kw in u for kw in ["stampac", "toner", "oprema", "dijagram", "mapa", "karta"]):
+        return "osoba_ime"
     if "zaposlen" in u:
         indikatori = ["svi", "lista", "spisak", "koji su", "ko je sve", "navedi",
                       "ko radi", "kadrov", "imena", "ljudi", "ko je", "tko je"]
@@ -690,9 +680,6 @@ def detektuj_tip(upit):
                               "grafikon", "sema", "shema", "tabela", "skica",
                               "crtez", "prikaz", "pokaz", "slika", "fotografija"]):
         return "dijagram"
-    m = re.search(r"clan\s*(\d+)", u)
-    if m:
-        return f"clan_{m.group(1)}"
     return "standard"
 
 
@@ -747,7 +734,7 @@ st.markdown("##### 💡 Brza pitanja:")
 cols = st.columns(6)
 QUICK = [
     "Ko je direktor Biroa?",
-    "Koji su zaposleni u Birou?",
+    "Ko su zaposleni u Birou?",
     "Koji su štampači u Birou?",
     "Koji toner se koristi?",
     "Prikaži dijagram ruže vetrova",
@@ -819,9 +806,9 @@ if user_input:
                     broj = tip.split("_")[1]
                     odgovor, slike = handle_clan(broj)
                 elif tip == "vizuelna_analiza":
-                    hits = search_images(user_input, top_k=1, tip_filter="dijagram")
+                    hits = search_text(user_input, top_k=1, tip_filter="dijagram")
                     if not hits:
-                        hits = search_images(user_input, top_k=1, tip_filter="fotografija_profil")
+                        hits = search_text(user_input, top_k=1, tip_filter="fotografija_profil")
                     if hits:
                         url = hits[0].payload.get("slika_url", "") or hits[0].payload.get("Link", "")
                         if url:
