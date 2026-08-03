@@ -1,5 +1,5 @@
 """
-app.py v12 — kompatibilan sa Streamlit Cloud-om
+app.py v13 — bez Qdrant filtera (radi bez indeksa)
 """
 
 import os
@@ -50,18 +50,6 @@ def get_clients():
 qdrant, groq_client, embed_model = get_clients()
 
 # ============================================================
-# KREIRANJE PAYLOAD INDEXA (ako ne postoji) – sa models.PayloadFieldType
-# ============================================================
-try:
-    qdrant.create_payload_index(
-        collection_name=COLLECTION_NAME,
-        field_name="tip",
-        field_schema=models.PayloadFieldType.KEYWORD,
-    )
-except Exception:
-    pass  # verovatno već postoji ili nije podržano
-
-# ============================================================
 # POMOĆNE FUNKCIJE
 # ============================================================
 def embed_query(text):
@@ -69,49 +57,8 @@ def embed_query(text):
         text = f"query: {text}"
     return list(embed_model.embed([text]))[0].tolist()
 
-def qdrant_search(collection_name, query_vector, limit=10, query_filter=None, with_payload=True):
-    if hasattr(qdrant, 'search'):
-        return qdrant.search(
-            collection_name=collection_name,
-            query_vector=query_vector,
-            limit=limit,
-            query_filter=query_filter,
-            with_payload=with_payload,
-        )
-    elif hasattr(qdrant, 'query_points'):
-        response = qdrant.query_points(
-            collection_name=collection_name,
-            query=query_vector,
-            limit=limit,
-            query_filter=query_filter,
-            with_payload=with_payload,
-        )
-        return response.points
-    else:
-        raise Exception("Qdrant client nema ni 'search' ni 'query_points' metodu.")
-
-def scroll_tip(tip, limit=200):
-    svi = []
-    offset = None
-    while True:
-        records, next_offset = qdrant.scroll(
-            collection_name=COLLECTION_NAME,
-            limit=500,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False,
-        )
-        for r in records:
-            if r.payload and r.payload.get("tip") == tip:
-                svi.append(r)
-        if next_offset is None or len(records) == 0:
-            break
-        offset = next_offset
-        if len(svi) >= limit:
-            break
-    return svi[:limit]
-
-def scroll_all(limit=500):
+def scroll_all(limit=2000):
+    """Skroluje sve tačke (bez filtera)."""
     svi = []
     offset = None
     while True:
@@ -130,47 +77,45 @@ def scroll_all(limit=500):
             break
     return svi[:limit]
 
-def search_text(query, top_k=10, tip_filter=None):
+def search_text_no_filter(query, top_k=10):
+    """Pretraga teksta BEZ filtera."""
     vec = embed_query(query)
-    filter_cond = None
-    if tip_filter:
-        filter_cond = models.Filter(
-            must=[models.FieldCondition(key="tip", match=models.MatchValue(value=tip_filter))]
-        )
     try:
-        return qdrant_search(
-            collection_name=COLLECTION_NAME,
-            query_vector=vec,
-            limit=top_k,
-            query_filter=filter_cond,
-            with_payload=True,
-        )
+        if hasattr(qdrant, 'search'):
+            return qdrant.search(
+                collection_name=COLLECTION_NAME,
+                query_vector=vec,
+                limit=top_k,
+                with_payload=True,
+            )
+        elif hasattr(qdrant, 'query_points'):
+            response = qdrant.query_points(
+                collection_name=COLLECTION_NAME,
+                query=vec,
+                limit=top_k,
+                with_payload=True,
+            )
+            return response.points
+        else:
+            return []
     except Exception as e:
-        st.error(f"Greška pri pretrazi teksta: {e}")
+        st.error(f"Greška pri pretrazi: {e}")
         return []
 
 # ============================================================
-# HANDLERI
+# HANDLERI (svi rade bez filtera)
 # ============================================================
 
 def handle_direktor():
-    points = scroll_tip("fotografija_profil", limit=100)
-    if not points:
-        hits = search_text("direktor Biroa", top_k=5)
-        for hit in hits:
-            payload = hit.payload or {}
-            tekst = payload.get("tekst", "")
-            if "direktor" in tekst.lower():
-                m = re.search(r'direktor\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst, re.IGNORECASE)
-                if m:
-                    ime = m.group(1)
-                    return f"**Direktor Biroa:** {ime}", []
-        return "⚠️ Nisu pronađeni direktor/zamenici u bazi.", []
-
+    # Skroluj sve tačke, filtriraj u Pythonu
+    all_points = scroll_all(limit=500)
     direktori = []
     zamenici = []
-    for p in points:
+    for p in all_points:
         payload = p.payload or {}
+        tip = payload.get("tip", "")
+        if tip != "fotografija_profil":
+            continue
         tekst = payload.get("tekst", "") or ""
         url = payload.get("slika_url", "") or payload.get("Link", "")
         funkcija_raw = payload.get("Funkcija", "") or payload.get("employee_name", "")
@@ -193,6 +138,15 @@ def handle_direktor():
             zamenici.append((ime, url, funkcija_raw))
 
     if not direktori and not zamenici:
+        # Fallback pretraga teksta
+        hits = search_text_no_filter("direktor Biroa", top_k=5)
+        for hit in hits:
+            tekst = hit.payload.get("tekst", "")
+            if "direktor" in tekst.lower():
+                m = re.search(r'direktor\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst, re.IGNORECASE)
+                if m:
+                    ime = m.group(1)
+                    return f"**Direktor Biroa:** {ime}", []
         return "⚠️ Nisu pronađeni direktor/zamenici u bazi.", []
 
     slike = []
@@ -217,13 +171,13 @@ def handle_direktor():
 
 
 def handle_lista_zaposlenih():
-    points = scroll_tip("fotografija_profil", limit=100)
-    if not points:
-        return "⚠️ Nisu pronađeni zaposleni.", []
-
+    all_points = scroll_all(limit=500)
     zaposleni = []
-    for p in points:
+    for p in all_points:
         payload = p.payload or {}
+        tip = payload.get("tip", "")
+        if tip != "fotografija_profil":
+            continue
         tekst = payload.get("tekst", "") or ""
         url = payload.get("slika_url", "") or payload.get("Link", "")
         ime = payload.get("employee_name", "")
@@ -261,7 +215,6 @@ def handle_osoba_po_imenu(upit):
     if not upit:
         return "⚠️ Prazno pitanje.", []
 
-    # Izvuci ime iz upita
     words = upit.strip().split()
     stop_words = {"biro", "biroa", "srbijasume", "srbija", "suma", "birou", "kolektivni", "ugovor",
                   "clan", "preduzece", "firma", "kompanija", "pd", "jp", "svi", "sve", "sva",
@@ -274,30 +227,29 @@ def handle_osoba_po_imenu(upit):
         return "⚠️ Nisam pronašao ime u pitanju.", []
 
     search_term = " ".join(clean_words)
-
-    points = scroll_tip("fotografija_profil", limit=200)
-    if not points:
-        return f"⚠️ Nema fotografija u bazi.", []
-
-    pogodci = []
     search_term_lower = search_term.lower()
-    for p in points:
+
+    all_points = scroll_all(limit=500)
+    pogodci = []
+    for p in all_points:
         payload = p.payload or {}
+        tip = payload.get("tip", "")
+        if tip != "fotografija_profil":
+            continue
         tekst = payload.get("tekst", "") or ""
         employee_name = payload.get("employee_name", "") or ""
         url = payload.get("slika_url", "") or payload.get("Link", "")
 
-        if employee_name:
-            if search_term_lower in employee_name.lower():
-                ime = employee_name
-                funkcija = payload.get("Funkcija", "")
-                if not funkcija:
-                    fm = re.search(r'(?:Funkcija|funkcija)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
-                    if fm:
-                        funkcija = fm.group(1).strip()
-                if not any(p["ime"].lower() == ime.lower() for p in pogodci):
-                    pogodci.append({"ime": ime, "url": url, "funkcija": funkcija})
-                continue
+        if employee_name and search_term_lower in employee_name.lower():
+            ime = employee_name
+            funkcija = payload.get("Funkcija", "")
+            if not funkcija:
+                fm = re.search(r'(?:Funkcija|funkcija)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
+                if fm:
+                    funkcija = fm.group(1).strip()
+            if not any(p["ime"].lower() == ime.lower() for p in pogodci):
+                pogodci.append({"ime": ime, "url": url, "funkcija": funkcija})
+            continue
 
         if search_term_lower in tekst.lower():
             m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
@@ -328,7 +280,7 @@ def handle_osoba_po_imenu(upit):
 
 
 def handle_oprema_specificno(upit):
-    points = scroll_tip("oprema", limit=100)
+    all_points = scroll_all(limit=500)
     u = sredi_upit(upit)
     is_toner = "toner" in u or "kertridz" in u
     is_printer = any(kw in u for kw in ["stampac", "stampaci", "printer", "pisac"])
@@ -357,8 +309,11 @@ def handle_oprema_specificno(upit):
     stampaci_lista = set()
     toneri_lista = set()
 
-    for p in points:
+    for p in all_points:
         payload = p.payload or {}
+        tip = payload.get("tip", "")
+        if tip != "oprema":
+            continue
         tekst_orig = payload.get("tekst", "") or ""
         if is_printer:
             for m in printer_pat.findall(tekst_orig):
@@ -411,38 +366,40 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
-    hits = search_text(upit, top_k=10, tip_filter="dijagram")
-    if not hits:
-        hits = search_text(upit, top_k=10, tip_filter="image")
-    if not hits:
-        points = scroll_tip("dijagram", limit=10)
-        if not points:
-            points = scroll_tip("image", limit=10)
-        if points:
-            slike = []
-            for p in points:
-                url = p.payload.get("slika_url", "") or p.payload.get("Link", "")
-                if url and url.startswith("http"):
-                    naziv = p.payload.get("naziv_dokumenta", "") or "Dijagram"
-                    slike.append((url, naziv))
-            if slike:
-                return f"**Nema slika za '{upit}', ali evo drugih dijagrama:**", slike[:6]
-        return "⚠️ Nema pronađenih dijagrama/slika za ovaj upit.", []
-
+    # Prvo probaj tekstualnu pretragu (bez filtera)
+    hits = search_text_no_filter(upit, top_k=10)
     slike = []
     for hit in hits:
         payload = hit.payload
+        tip = payload.get("tip", "")
+        if tip not in ["dijagram", "image"]:
+            continue
         url = payload.get("slika_url", "") or payload.get("Link", "")
         if url and url.startswith("http"):
             naziv = payload.get("naziv_dokumenta", "") or payload.get("izvor", "") or "Dijagram"
             slike.append((url, naziv))
-    if not slike:
-        return "⚠️ Pronađene slike nemaju javni URL.", []
-    return f"**Pronađeno {len(slike)} slika/dijagrama:**", slike[:6]
+    if slike:
+        return f"**Pronađeno {len(slike)} slika/dijagrama:**", slike[:6]
+
+    # Ako nema, skroluj sve dijagrame
+    all_points = scroll_all(limit=500)
+    slike = []
+    for p in all_points:
+        payload = p.payload or {}
+        tip = payload.get("tip", "")
+        if tip not in ["dijagram", "image"]:
+            continue
+        url = payload.get("slika_url", "") or payload.get("Link", "")
+        if url and url.startswith("http"):
+            naziv = payload.get("naziv_dokumenta", "") or "Dijagram"
+            slike.append((url, naziv))
+    if slike:
+        return f"**Nema slika za '{upit}', ali evo drugih dijagrama:**", slike[:6]
+    return "⚠️ Nema pronađenih dijagrama/slika za ovaj upit.", []
 
 
 def handle_clan(broj):
-    all_points = scroll_all(limit=500)
+    all_points = scroll_all(limit=1000)
     pogodci = []
     clan_pat = re.compile(
         rf'(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*{re.escape(broj)}\b(.*?)'
@@ -501,7 +458,7 @@ def handle_clan(broj):
 # ============================================================
 def do_rag(query, top_k=10):
     try:
-        hits = search_text(query, top_k=top_k)
+        hits = search_text_no_filter(query, top_k=top_k)
     except Exception as e:
         return "", 0, [], f"Greška: {e}"
 
@@ -784,19 +741,14 @@ if user_input:
                     broj = tip.split("_")[1]
                     odgovor, slike = handle_clan(broj)
                 elif tip == "vizuelna_analiza":
-                    hits = search_text(user_input, top_k=1, tip_filter="dijagram")
-                    if not hits:
-                        hits = search_text(user_input, top_k=1, tip_filter="fotografija_profil")
-                    if hits:
-                        url = hits[0].payload.get("slika_url", "") or hits[0].payload.get("Link", "")
-                        if url:
+                    hits = search_text_no_filter(user_input, top_k=1)
+                    for hit in hits:
+                        url = hit.payload.get("slika_url", "") or hit.payload.get("Link", "")
+                        if url and url.startswith("http"):
                             analiza = analyze_image_with_vision(url, user_input)
                             if analiza:
                                 odgovor = f"**Analiza slike:**\n{analiza}"
-                            else:
-                                odgovor = "⚠️ Vizuelna analiza nije dostupna (nema HF tokena ili slika nije dostupna)."
-                        else:
-                            odgovor = "⚠️ Pronađena slika nema URL."
+                                break
                     else:
                         odgovor = "⚠️ Nisam pronašao odgovarajuću sliku za analizu."
                 else:
