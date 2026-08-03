@@ -1,5 +1,5 @@
 """
-app.py v13 — Bez filtera na tip, koristi scroll_tip za sve specifične pretrage
+app.py v14 — Konačna verzija sa svim ispravkama
 """
 
 import os
@@ -140,7 +140,6 @@ def search_text(query, top_k=10):
 def handle_direktor():
     points = scroll_tip("fotografija_profil", limit=100)
     if not points:
-        # fallback: pretraži opšti tekst
         hits = search_text("direktor Biroa", top_k=5)
         for hit in hits:
             payload = hit.payload or {}
@@ -162,7 +161,6 @@ def handle_direktor():
         ime = payload.get("employee_name", "")
         funkcija_raw = payload.get("Funkcija", "")
         if not ime:
-            # Pokušaj iz teksta
             m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
             if m:
                 ime = m.group(1)
@@ -203,7 +201,7 @@ def handle_direktor():
 
 
 def handle_lista_zaposlenih():
-    points = scroll_tip("fotografija_profil", limit=100)
+    points = scroll_tip("fotografija_profil", limit=200)
     if not points:
         return "⚠️ Nisu pronađeni zaposleni.", []
 
@@ -254,7 +252,7 @@ def handle_osoba_po_imenu(upit):
                   "kako", "sta", "koji", "koja", "koje", "gde", "kada", "imam", "imaju",
                   "postoji", "treba", "hocu", "ovaj", "taj", "ovo", "ta", "to", "neka",
                   "neko", "nesto", "moze", "molim", "zasto", "zbog", "prema", "preko",
-                  "ima", "li", "dal", "je", "da"}
+                  "ima", "li", "dal", "je", "da", "ima"}
     clean_words = [w for w in words if w.lower() not in stop_words and len(w) > 2]
     if not clean_words:
         return "⚠️ Nisam pronašao ime u pitanju.", []
@@ -275,6 +273,7 @@ def handle_osoba_po_imenu(upit):
 
         # 1. Proveri employee_name (tačno ili delimično)
         if employee_name:
+            # Pokušaj da upariš celu reč ili deo
             if search_term_lower in employee_name.lower():
                 ime = employee_name
                 funkcija = payload.get("Funkcija", "")
@@ -286,9 +285,12 @@ def handle_osoba_po_imenu(upit):
                     pogodci.append({"ime": ime, "url": url, "funkcija": funkcija})
                 continue  # ako je nađen u employee_name, preskoči tekst
 
-        # 2. Proveri tekst (ako još nije pronađen)
-        if search_term_lower in tekst.lower():
-            # Pokušaj da izvučeš ime iz teksta (dozvoli i jedno ime)
+        # 2. Proveri tekst – traži celo ime (sa word boundaries)
+        # Napravi regex za pretragu: ako je jedna reč, traži je kao celu reč; ako su dve, traži obe
+        pattern_parts = [re.escape(part) for part in clean_words]
+        pattern = r'\b' + r'\s+'.join(pattern_parts) + r'\b'
+        if re.search(pattern, tekst, re.IGNORECASE):
+            # Pokušaj da izvučeš ime iz teksta
             m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+(?:\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)?)', tekst)
             if m:
                 ime = m.group(1)
@@ -296,7 +298,13 @@ def handle_osoba_po_imenu(upit):
                 # Ako ne može da izvuče, uzmi prvu reč iz teksta koja liči na ime
                 possible_names = re.findall(r'\b[A-ZČĆŠĐŽ][a-zčćšđž]{2,}\b', tekst)
                 if possible_names:
-                    ime = possible_names[0]
+                    # Uzmi onu koja sadrži traženi termin
+                    for pname in possible_names:
+                        if search_term_lower in pname.lower():
+                            ime = pname
+                            break
+                    else:
+                        ime = possible_names[0]
                 else:
                     continue
             funkcija = payload.get("Funkcija", "")
@@ -322,7 +330,6 @@ def handle_osoba_po_imenu(upit):
 
 
 def handle_oprema_specificno(upit):
-    # Koristimo scroll_tip da izbegnemo filter
     points = scroll_tip("oprema", limit=100)
     u = sredi_upit(upit)
     is_toner = "toner" in u or "kertridz" in u
@@ -406,24 +413,37 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
-    # Koristimo scroll_tip da izbegnemo filter
+    # Prvo probaj pretragu teksta da nađe relevantne tačke
+    hits = search_text(upit, top_k=20)
+    # Filtriraj one sa tipom dijagram ili image
+    diag_hits = [h for h in hits if h.payload and h.payload.get("tip") in ["dijagram", "image"]]
+    if diag_hits:
+        slike = []
+        for hit in diag_hits[:6]:
+            payload = hit.payload
+            url = payload.get("slika_url", "") or payload.get("Link", "")
+            if url and url.startswith("http"):
+                naziv = payload.get("naziv_dokumenta", "") or payload.get("izvor", "") or "Dijagram"
+                slike.append((url, naziv))
+        if slike:
+            return f"**Pronađeno {len(slike)} slika/dijagrama:**", slike[:6]
+
+    # Ako nema, uzmi sve dijagrame iz baze (scroll)
     points = scroll_tip("dijagram", limit=20)
     if not points:
         points = scroll_tip("image", limit=20)
     if not points:
         return "⚠️ Nema pronađenih dijagrama/slika za ovaj upit.", []
 
-    # Filtriraj u Pythonu prema upitu (case-insensitive)
+    # Pokušaj da filtriraš po upitu (jednostavno substring)
     upit_lower = upit.lower()
     relevant = []
     for p in points:
-        payload = p.payload or {}
-        tekst = payload.get("tekst", "") or ""
-        if upit_lower in tekst.lower():
+        tekst = p.payload.get("tekst", "").lower()
+        if upit_lower in tekst:
             relevant.append(p)
     if not relevant:
-        # Ako nema relevantnih, prikaži sve dijagrame
-        relevant = points[:6]
+        relevant = points[:6]  # ako nema relevantnih, uzmi prvih 6
 
     slike = []
     for p in relevant[:6]:
@@ -437,7 +457,27 @@ def handle_dijagram(upit):
 
 
 def handle_clan(broj):
-    # Pretraži sve tačke
+    # Prvo pokušaj pretragom teksta
+    hits = search_text(f"član {broj}", top_k=10)
+    for hit in hits:
+        payload = hit.payload or {}
+        tekst = payload.get("tekst", "")
+        if re.search(rf'(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*{re.escape(broj)}\b', tekst, re.IGNORECASE):
+            # Pokušaj da izvučeš ceo član
+            clan_pat = re.compile(
+                rf'(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*{re.escape(broj)}\b(.*?)'
+                rf'(?=(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*\d+\b|$)',
+                re.DOTALL | re.IGNORECASE
+            )
+            m = clan_pat.search(tekst)
+            if m:
+                clan_tekst = m.group(0).strip()
+                if len(clan_tekst) > 8000:
+                    clan_tekst = clan_tekst[:8000] + "\n...[Skraćeno]"
+                izvor = payload.get("naziv_dokumenta", "") or payload.get("izvor", "")
+                return f"**Član {broj}** (izvor: {izvor}):\n\n{clan_tekst}", []
+
+    # Ako ne nađe, skroluj sve
     all_points = scroll_all(limit=500)
     pogodci = []
     clan_pat = re.compile(
@@ -497,7 +537,7 @@ def handle_clan(broj):
 # ============================================================
 def do_rag(query, top_k=10):
     try:
-        hits = search_text(query, top_k=top_k)  # bez filtera
+        hits = search_text(query, top_k=top_k)
     except Exception as e:
         return "", 0, [], f"Greška: {e}"
 
@@ -780,7 +820,6 @@ if user_input:
                     broj = tip.split("_")[1]
                     odgovor, slike = handle_clan(broj)
                 elif tip == "vizuelna_analiza":
-                    # Probaj da nađeš sliku
                     points = scroll_tip("dijagram", limit=5)
                     if not points:
                         points = scroll_tip("fotografija_profil", limit=5)
