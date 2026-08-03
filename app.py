@@ -1,5 +1,5 @@
 """
-app.py v15 — podrška za ćirilicu i bolje izvlačenje imena
+app.py v16 — Konačna verzija sa debug-om i poboljšanom pretragom
 """
 
 import os
@@ -132,34 +132,45 @@ def search_text(query, top_k=10):
         return []
 
 # ============================================================
-# POMOĆNE FUNKCIJE ZA IZVLAČENJE IMENA
+# IZVLAČENJE IMENA IZ TEKSTA (prošireno)
 # ============================================================
 def extract_name_from_text(tekst):
     """
-    Pokušava da izvuče ime i prezime iz teksta.
-    Podržava:
-      - "Zaposleni u Birou ...: Bojana Jelić"
-      - "Fotografija Bojana Jelić"
-      - "Bojana Jelić" na kraju ili početku
+    Pokušava da izvuče ime i prezime iz teksta na više načina.
     """
     if not tekst:
         return None
-    # Prvo probaj sa "Zaposleni ...: Ime Prezime"
+
+    # 1. "Zaposleni u Birou ...: Bojana Jelić"
     m = re.search(r'Zaposleni\s+u\s+Birou[^:]*:\s*([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst, re.IGNORECASE)
     if m:
         return m.group(1)
-    # Onda sa "Fotografija Ime Prezime"
+
+    # 2. "Fotografija Bojana Jelić"
     m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
     if m:
         return m.group(1)
-    # Onda bilo koje dve kapitalizovane reči na kraju
+
+    # 3. Bilo koje dve kapitalizovane reči na kraju teksta
     m = re.search(r'([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)\s*$', tekst)
     if m:
         return m.group(1)
-    # Na kraju, probaj jednu reč (ako nema dve)
-    m = re.search(r'\b([A-ZČĆŠĐŽ][a-zčćšđž]{2,})\b', tekst)
+
+    # 4. Bilo koje dve kapitalizovane reči bilo gde (ali samo ako nema drugih)
+    m = re.search(r'\b([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)\b', tekst)
+    if m:
+        # Proveri da nije deo dužeg teksta (npr. "Direktor Bojana Jelić" – to je OK)
+        return m.group(1)
+
+    # 5. Pokušaj sa ćirilicom
+    m = re.search(r'[Зз]апослени\s+у\s+Бироу[^:]*:\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)', tekst)
     if m:
         return m.group(1)
+
+    m = re.search(r'[Фф]отографиј[ае]\s+([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)', tekst)
+    if m:
+        return m.group(1)
+
     return None
 
 # ============================================================
@@ -168,11 +179,10 @@ def extract_name_from_text(tekst):
 
 def handle_direktor():
     # Prvo pretraži fotografije
-    points = scroll_tip("fotografija_profil", limit=100)
+    points = scroll_tip("fotografija_profil", limit=200)
     direktori = []
     zamenici = []
 
-    # Funkcija za proveru da li tekst sadrži reč direktor (latinica ili ćirilica)
     def is_direktor(text):
         if not text:
             return False
@@ -189,7 +199,6 @@ def handle_direktor():
         payload = p.payload or {}
         tekst = payload.get("tekst", "") or ""
         url = payload.get("slika_url", "") or payload.get("Link", "")
-        # Prvo employee_name
         ime = payload.get("employee_name", "")
         if not ime:
             ime = extract_name_from_text(tekst)
@@ -198,7 +207,6 @@ def handle_direktor():
 
         funkcija = payload.get("Funkcija", "")
         if not funkcija:
-            # Pokušaj iz teksta
             m = re.search(r'(?:Funkcija|funkcija|Функција)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
             if m:
                 funkcija = m.group(1).strip()
@@ -212,14 +220,12 @@ def handle_direktor():
         elif is_zamenik(tekst):
             zamenici.append((ime, url, funkcija))
 
-    # Ako nije pronađen u fotografijama, pretraži opšte tekstove
     if not direktori and not zamenici:
         hits = search_text("direktor", top_k=10)
         for hit in hits:
             payload = hit.payload or {}
             tekst = payload.get("tekst", "")
-            if is_direktor(tekst) and "direktor" in tekst.lower():
-                # Pokušaj da izvučeš ime
+            if is_direktor(tekst):
                 m = re.search(r'direktor\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst, re.IGNORECASE)
                 if not m:
                     m = re.search(r'директор\s+([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)', tekst)
@@ -252,13 +258,13 @@ def handle_direktor():
 
 
 def handle_lista_zaposlenih():
-    points = scroll_tip("fotografija_profil", limit=200)
-    if not points:
-        return "⚠️ Nisu pronađeni zaposleni.", []
-
+    # Koristimo scroll_all da budemo sigurni da uzimamo SVE tačke
+    all_points = scroll_all(limit=500)
     zaposleni = []
-    for p in points:
+    for p in all_points:
         payload = p.payload or {}
+        if payload.get("tip") != "fotografija_profil":
+            continue
         tekst = payload.get("tekst", "") or ""
         url = payload.get("slika_url", "") or payload.get("Link", "")
         ime = payload.get("employee_name", "")
@@ -270,14 +276,12 @@ def handle_lista_zaposlenih():
                 m = re.search(r'(?:Funkcija|funkcija|Функција)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
                 if m:
                     funkcija = m.group(1).strip()
-            # Spreči duplikate
             if not any(z["ime"].lower() == ime.lower() for z in zaposleni):
                 zaposleni.append({"ime": ime, "url": url, "funkcija": funkcija})
 
     if not zaposleni:
         return "⚠️ Nisu pronađeni zaposleni.", []
 
-    # Sortiraj po imenu
     zaposleni.sort(key=lambda x: x["ime"])
     imena_lista = "\n".join([f"• {z['ime']} — {z['funkcija']}" for z in zaposleni if z.get("funkcija")])
     if not imena_lista:
@@ -305,18 +309,16 @@ def handle_osoba_po_imenu(upit):
     search_term = " ".join(clean_words)
     search_term_lower = search_term.lower()
 
-    points = scroll_tip("fotografija_profil", limit=200)
-    if not points:
-        return f"⚠️ Nema fotografija u bazi.", []
-
+    all_points = scroll_all(limit=500)
     pogodci = []
-    for p in points:
+    for p in all_points:
         payload = p.payload or {}
+        if payload.get("tip") != "fotografija_profil":
+            continue
         tekst = payload.get("tekst", "") or ""
         employee_name = payload.get("employee_name", "") or ""
         url = payload.get("slika_url", "") or payload.get("Link", "")
 
-        # Proveri employee_name
         if employee_name and search_term_lower in employee_name.lower():
             ime = employee_name
             funkcija = payload.get("Funkcija", "")
@@ -328,7 +330,6 @@ def handle_osoba_po_imenu(upit):
                 pogodci.append({"ime": ime, "url": url, "funkcija": funkcija})
             continue
 
-        # Proveri tekst
         if search_term_lower in tekst.lower():
             ime = extract_name_from_text(tekst)
             if ime:
@@ -480,16 +481,14 @@ def handle_dijagram(upit):
 
 
 def handle_clan(broj):
-    # Pokušaj pretragom teksta (latinica i ćirilica)
-    # Prvo sa "član" (latinica) i "члан" (ćirilica)
+    # Prvo probaj sa search_text (brže)
     for term in [f"član {broj}", f"члан {broj}"]:
-        hits = search_text(term, top_k=10)
+        hits = search_text(term, top_k=20)
         for hit in hits:
             payload = hit.payload or {}
             tekst = payload.get("tekst", "")
-            # Proveri da li sadrži bilo koju varijantu
+            # Proveri da li sadrži član
             if re.search(rf'(?:član|clan|члан)\s*{re.escape(broj)}\b', tekst, re.IGNORECASE):
-                # Pokušaj da izvučeš ceo član
                 clan_pat = re.compile(
                     rf'(?:član|clan|члан)\s*{re.escape(broj)}\b(.*?)'
                     rf'(?=(?:član|clan|члан)\s*\d+\b|$)',
@@ -546,7 +545,6 @@ def handle_clan(broj):
     if not pogodci:
         return f"⚠️ Član {broj} nije pronađen u bazi.", []
 
-    # Dedupe
     seen = set()
     uniq = []
     for p in pogodci:
@@ -752,6 +750,17 @@ def analyze_image_with_vision(image_url, question):
 
 
 # ============================================================
+# DEBUG – prikazuje broj tačaka po tipu
+# ============================================================
+def get_point_count_by_tip():
+    all_points = scroll_all(limit=500)
+    counts = {}
+    for p in all_points:
+        tip = p.payload.get("tip", "unknown")
+        counts[tip] = counts.get(tip, 0) + 1
+    return counts
+
+# ============================================================
 # STREAMLIT UI
 # ============================================================
 st.set_page_config(page_title="🌲 Biro asistent", page_icon="🌲", layout="wide")
@@ -792,6 +801,17 @@ with st.sidebar:
     st.image(LOGO_URL, width=80)
     st.markdown("### 🌲 Biro")
     st.caption(f"Kolekcija: {COLLECTION_NAME}")
+    st.markdown("---")
+    
+    # DEBUG: Prikaz broja tačaka po tipu
+    with st.expander("🔍 Debug info (broj tačaka po tipu)"):
+        try:
+            counts = get_point_count_by_tip()
+            for tip, count in sorted(counts.items()):
+                st.write(f"• **{tip}**: {count}")
+        except Exception as e:
+            st.error(f"Greška pri debug-u: {e}")
+    
     st.markdown("---")
     if st.button("🧹 Obriši razgovor", use_container_width=True):
         st.session_state.messages = []
