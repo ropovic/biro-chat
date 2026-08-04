@@ -1,5 +1,5 @@
 """
-app.py v16 — Konačna verzija sa debug-om i poboljšanom pretragom
+app.py v18 — Popravljen scroll_all i scroll_tip za sve tačke
 """
 
 import os
@@ -19,7 +19,7 @@ from PIL import Image
 # CONFIG
 # ============================================================
 EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "baza_cloud_v3")
+COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "baza_cloud_v4")
 R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL", "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev")
 LOGO_URL = f"{R2_PUBLIC_URL}/srbijasume_logo.jpg"
 
@@ -49,7 +49,7 @@ def get_clients():
 qdrant, groq_client, embed_model = get_clients()
 
 # ============================================================
-# POMOĆNE FUNKCIJE
+# POMOĆNE FUNKCIJE (sa popravljenim scroll-om)
 # ============================================================
 def embed_query(text):
     if "e5" in EMBEDDING_MODEL.lower():
@@ -77,7 +77,8 @@ def qdrant_search(collection_name, query_vector, limit=10, query_filter=None, wi
     else:
         raise Exception("Qdrant client nema ni 'search' ni 'query_points' metodu.")
 
-def scroll_tip(tip, limit=200):
+def scroll_tip(tip, limit=10000):
+    """Skroluje sve tačke sa datim tipom (bez ograničenja)."""
     svi = []
     offset = None
     while True:
@@ -96,9 +97,10 @@ def scroll_tip(tip, limit=200):
         offset = next_offset
         if len(svi) >= limit:
             break
-    return svi[:limit]
+    return svi
 
-def scroll_all(limit=500):
+def scroll_all(limit=10000):
+    """Skroluje sve tačke (bez ograničenja)."""
     svi = []
     offset = None
     while True:
@@ -115,7 +117,7 @@ def scroll_all(limit=500):
         offset = next_offset
         if len(svi) >= limit:
             break
-    return svi[:limit]
+    return svi
 
 def search_text(query, top_k=10):
     vec = embed_query(query)
@@ -132,37 +134,28 @@ def search_text(query, top_k=10):
         return []
 
 # ============================================================
-# IZVLAČENJE IMENA IZ TEKSTA (prošireno)
+# IZVLAČENJE IMENA IZ TEKSTA
 # ============================================================
 def extract_name_from_text(tekst):
-    """
-    Pokušava da izvuče ime i prezime iz teksta na više načina.
-    """
     if not tekst:
         return None
 
-    # 1. "Zaposleni u Birou ...: Bojana Jelić"
     m = re.search(r'Zaposleni\s+u\s+Birou[^:]*:\s*([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst, re.IGNORECASE)
     if m:
         return m.group(1)
 
-    # 2. "Fotografija Bojana Jelić"
     m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
     if m:
         return m.group(1)
 
-    # 3. Bilo koje dve kapitalizovane reči na kraju teksta
     m = re.search(r'([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)\s*$', tekst)
     if m:
         return m.group(1)
 
-    # 4. Bilo koje dve kapitalizovane reči bilo gde (ali samo ako nema drugih)
     m = re.search(r'\b([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)\b', tekst)
     if m:
-        # Proveri da nije deo dužeg teksta (npr. "Direktor Bojana Jelić" – to je OK)
         return m.group(1)
 
-    # 5. Pokušaj sa ćirilicom
     m = re.search(r'[Зз]апослени\s+у\s+Бироу[^:]*:\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)', tekst)
     if m:
         return m.group(1)
@@ -178,8 +171,7 @@ def extract_name_from_text(tekst):
 # ============================================================
 
 def handle_direktor():
-    # Prvo pretraži fotografije
-    points = scroll_tip("fotografija_profil", limit=200)
+    points = scroll_tip("fotografija_profil")
     direktori = []
     zamenici = []
 
@@ -258,8 +250,7 @@ def handle_direktor():
 
 
 def handle_lista_zaposlenih():
-    # Koristimo scroll_all da budemo sigurni da uzimamo SVE tačke
-    all_points = scroll_all(limit=500)
+    all_points = scroll_all()
     zaposleni = []
     for p in all_points:
         payload = p.payload or {}
@@ -309,7 +300,7 @@ def handle_osoba_po_imenu(upit):
     search_term = " ".join(clean_words)
     search_term_lower = search_term.lower()
 
-    all_points = scroll_all(limit=500)
+    all_points = scroll_all()
     pogodci = []
     for p in all_points:
         payload = p.payload or {}
@@ -356,7 +347,7 @@ def handle_osoba_po_imenu(upit):
 
 
 def handle_oprema_specificno(upit):
-    points = scroll_tip("oprema", limit=100)
+    points = scroll_tip("oprema")
     u = sredi_upit(upit)
     is_toner = "toner" in u or "kertridz" in u
     is_printer = any(kw in u for kw in ["stampac", "stampaci", "printer", "pisac"])
@@ -439,7 +430,7 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
-    # Prvo pretraži tekst
+    # Prvo probaj pretragu teksta
     hits = search_text(upit, top_k=20)
     diag_hits = [h for h in hits if h.payload and h.payload.get("tip") in ["dijagram", "image"]]
     if diag_hits:
@@ -454,9 +445,9 @@ def handle_dijagram(upit):
             return f"**Pronađeno {len(slike)} slika/dijagrama:**", slike[:6]
 
     # Ako nema, uzmi sve dijagrame
-    points = scroll_tip("dijagram", limit=20)
+    points = scroll_tip("dijagram")
     if not points:
-        points = scroll_tip("image", limit=20)
+        points = scroll_tip("image")
     if not points:
         return "⚠️ Nema pronađenih dijagrama/slika za ovaj upit.", []
 
@@ -481,17 +472,16 @@ def handle_dijagram(upit):
 
 
 def handle_clan(broj):
-    # Prvo probaj sa search_text (brže)
+    # Prvo probaj sa search_text
     for term in [f"član {broj}", f"члан {broj}"]:
         hits = search_text(term, top_k=20)
         for hit in hits:
             payload = hit.payload or {}
             tekst = payload.get("tekst", "")
-            # Proveri da li sadrži član
-            if re.search(rf'(?:član|clan|члан)\s*{re.escape(broj)}\b', tekst, re.IGNORECASE):
+            if re.search(rf'(?:član|clan|члан)\s*{re.escape(broj)}[\s.,;:)]', tekst, re.IGNORECASE):
                 clan_pat = re.compile(
-                    rf'(?:član|clan|члан)\s*{re.escape(broj)}\b(.*?)'
-                    rf'(?=(?:član|clan|члан)\s*\d+\b|$)',
+                    rf'(?:član|clan|члан)\s*{re.escape(broj)}[\s.,;:)](.*?)'
+                    rf'(?=(?:član|clan|члан)\s*\d+[\s.,;:)]|$)',
                     re.DOTALL | re.IGNORECASE
                 )
                 m = clan_pat.search(tekst)
@@ -503,15 +493,15 @@ def handle_clan(broj):
                     return f"**Član {broj}** (izvor: {izvor}):\n\n{clan_tekst}", []
 
     # Ako ne nađe, skroluj sve tačke
-    all_points = scroll_all(limit=500)
+    all_points = scroll_all()
     pogodci = []
     clan_pat = re.compile(
-        rf'(?:član|clan|члан)\s*{re.escape(broj)}\b(.*?)'
-        rf'(?=(?:član|clan|члан)\s*\d+\b|$)',
+        rf'(?:član|clan|члан)\s*{re.escape(broj)}[\s.,;:)](.*?)'
+        rf'(?=(?:član|clan|члан)\s*\d+[\s.,;:)]|$)',
         re.DOTALL | re.IGNORECASE
     )
     clan_check = re.compile(
-        rf'(?:član|clan|члан)\s*{re.escape(broj)}\b',
+        rf'(?:član|clan|члан)\s*{re.escape(broj)}[\s.,;:)]',
         re.IGNORECASE
     )
 
@@ -529,7 +519,6 @@ def handle_clan(broj):
             izvor = payload.get("naziv_dokumenta", "") or payload.get("izvor", "")
             pogodci.append({"tekst": clan_tekst, "izvor": izvor, "duzina": len(clan_tekst)})
         if not pogodci:
-            # Pokušaj da nađeš samo deo
             for m in clan_check.finditer(tekst):
                 start = max(0, m.start() - 30)
                 end = min(len(tekst), m.end() + 3500)
@@ -749,16 +738,14 @@ def analyze_image_with_vision(image_url, question):
         return None
 
 
-# ============================================================
-# DEBUG – prikazuje broj tačaka po tipu
-# ============================================================
 def get_point_count_by_tip():
-    all_points = scroll_all(limit=500)
+    all_points = scroll_all()
     counts = {}
     for p in all_points:
         tip = p.payload.get("tip", "unknown")
         counts[tip] = counts.get(tip, 0) + 1
     return counts
+
 
 # ============================================================
 # STREAMLIT UI
@@ -803,7 +790,6 @@ with st.sidebar:
     st.caption(f"Kolekcija: {COLLECTION_NAME}")
     st.markdown("---")
     
-    # DEBUG: Prikaz broja tačaka po tipu
     with st.expander("🔍 Debug info (broj tačaka po tipu)"):
         try:
             counts = get_point_count_by_tip()
@@ -867,9 +853,9 @@ if user_input:
                     broj = tip.split("_")[1]
                     odgovor, slike = handle_clan(broj)
                 elif tip == "vizuelna_analiza":
-                    points = scroll_tip("dijagram", limit=5)
+                    points = scroll_tip("dijagram")
                     if not points:
-                        points = scroll_tip("fotografija_profil", limit=5)
+                        points = scroll_tip("fotografija_profil")
                     if points:
                         url = points[0].payload.get("slika_url", "") or points[0].payload.get("Link", "")
                         if url:
