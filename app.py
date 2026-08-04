@@ -1,5 +1,5 @@
 """
-app.py v18 — Popravljen scroll_all i scroll_tip za sve tačke
+app.py v19 — Prošireno izvlačenje imena za zaposlene
 """
 
 import os
@@ -49,7 +49,7 @@ def get_clients():
 qdrant, groq_client, embed_model = get_clients()
 
 # ============================================================
-# POMOĆNE FUNKCIJE (sa popravljenim scroll-om)
+# POMOĆNE FUNKCIJE
 # ============================================================
 def embed_query(text):
     if "e5" in EMBEDDING_MODEL.lower():
@@ -78,7 +78,6 @@ def qdrant_search(collection_name, query_vector, limit=10, query_filter=None, wi
         raise Exception("Qdrant client nema ni 'search' ni 'query_points' metodu.")
 
 def scroll_tip(tip, limit=10000):
-    """Skroluje sve tačke sa datim tipom (bez ograničenja)."""
     svi = []
     offset = None
     while True:
@@ -100,7 +99,6 @@ def scroll_tip(tip, limit=10000):
     return svi
 
 def scroll_all(limit=10000):
-    """Skroluje sve tačke (bez ograničenja)."""
     svi = []
     offset = None
     while True:
@@ -134,35 +132,62 @@ def search_text(query, top_k=10):
         return []
 
 # ============================================================
-# IZVLAČENJE IMENA IZ TEKSTA
+# PROŠIRENO IZVLAČENJE IMENA IZ TEKSTA
 # ============================================================
 def extract_name_from_text(tekst):
+    """
+    Pokušava da izvuče ime i prezime iz teksta na više načina.
+    Vraća None ako ne može da izvuče.
+    """
     if not tekst:
         return None
 
+    # 1. "Zaposleni u Birou ...: Bojana Jelić"
     m = re.search(r'Zaposleni\s+u\s+Birou[^:]*:\s*([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst, re.IGNORECASE)
     if m:
         return m.group(1)
 
+    # 2. "Fotografija Bojana Jelić"
     m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
     if m:
         return m.group(1)
 
+    # 3. Dve kapitalizovane reči na kraju (sa ili bez prefiksa)
     m = re.search(r'([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)\s*$', tekst)
     if m:
         return m.group(1)
 
+    # 4. Bilo koje dve kapitalizovane reči bilo gde
     m = re.search(r'\b([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)\b', tekst)
     if m:
         return m.group(1)
 
+    # 5. Ćirilica: "Запослени у Бироу ...: Бојана Јелић"
     m = re.search(r'[Зз]апослени\s+у\s+Бироу[^:]*:\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)', tekst)
     if m:
         return m.group(1)
 
+    # 6. Ćirilica: "Фотографија Бојана Јелић"
     m = re.search(r'[Фф]отографиј[ае]\s+([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)', tekst)
     if m:
         return m.group(1)
+
+    # 7. Ćirilica: dve kapitalizovane reči bilo gde
+    m = re.search(r'\b([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)\b', tekst)
+    if m:
+        return m.group(1)
+
+    # 8. FALLBACK: uzmi prvu kapitalizovanu reč (ako je duža od 2 slova)
+    # Ovo je opasno jer može da uhvati pogrešnu reč, ali bolje nego ništa
+    m = re.search(r'\b([A-ZČĆŠĐŽА-ЯЁ][a-zčćšđžа-яё]{2,})\b', tekst)
+    if m:
+        # Ako ima samo jedno ime, probaj da nađeš još jedno
+        first = m.group(1)
+        rest = tekst[m.end():]
+        m2 = re.search(r'\b([A-ZČĆŠĐŽА-ЯЁ][a-zčćšđžа-яё]{2,})\b', rest)
+        if m2:
+            return f"{first} {m2.group(1)}"
+        return first
 
     return None
 
@@ -252,23 +277,40 @@ def handle_direktor():
 def handle_lista_zaposlenih():
     all_points = scroll_all()
     zaposleni = []
+    
+    # Debug: broj fotografija
+    foto_count = 0
+    for p in all_points:
+        if p.payload and p.payload.get("tip") == "fotografija_profil":
+            foto_count += 1
+    
+    st.sidebar.write(f"📸 Ukupno fotografija u bazi: {foto_count}")
+    
     for p in all_points:
         payload = p.payload or {}
         if payload.get("tip") != "fotografija_profil":
             continue
         tekst = payload.get("tekst", "") or ""
         url = payload.get("slika_url", "") or payload.get("Link", "")
+        
+        # Prvo probaj employee_name
         ime = payload.get("employee_name", "")
         if not ime:
             ime = extract_name_from_text(tekst)
+        
         if ime:
             funkcija = payload.get("Funkcija", "")
             if not funkcija:
                 m = re.search(r'(?:Funkcija|funkcija|Функција)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
                 if m:
                     funkcija = m.group(1).strip()
+            # Spreči duplikate
             if not any(z["ime"].lower() == ime.lower() for z in zaposleni):
                 zaposleni.append({"ime": ime, "url": url, "funkcija": funkcija})
+        else:
+            # Debug: prikaži tekst za koje nismo uspeli da izvučemo ime
+            if len(tekst) > 10:
+                st.sidebar.write(f"⚠️ Ne mogu da izvučem ime iz: {tekst[:80]}...")
 
     if not zaposleni:
         return "⚠️ Nisu pronađeni zaposleni.", []
@@ -430,7 +472,6 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
-    # Prvo probaj pretragu teksta
     hits = search_text(upit, top_k=20)
     diag_hits = [h for h in hits if h.payload and h.payload.get("tip") in ["dijagram", "image"]]
     if diag_hits:
@@ -444,7 +485,6 @@ def handle_dijagram(upit):
         if slike:
             return f"**Pronađeno {len(slike)} slika/dijagrama:**", slike[:6]
 
-    # Ako nema, uzmi sve dijagrame
     points = scroll_tip("dijagram")
     if not points:
         points = scroll_tip("image")
@@ -472,7 +512,6 @@ def handle_dijagram(upit):
 
 
 def handle_clan(broj):
-    # Prvo probaj sa search_text
     for term in [f"član {broj}", f"члан {broj}"]:
         hits = search_text(term, top_k=20)
         for hit in hits:
@@ -492,7 +531,6 @@ def handle_clan(broj):
                     izvor = payload.get("naziv_dokumenta", "") or payload.get("izvor", "")
                     return f"**Član {broj}** (izvor: {izvor}):\n\n{clan_tekst}", []
 
-    # Ako ne nađe, skroluj sve tačke
     all_points = scroll_all()
     pogodci = []
     clan_pat = re.compile(
