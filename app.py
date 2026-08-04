@@ -19,7 +19,7 @@ from PIL import Image
 # CONFIG
 # ============================================================
 EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "baza_cloud_v4")
+COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "baza_cloud_v5")
 R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL", "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev")
 LOGO_URL = f"{R2_PUBLIC_URL}/srbijasume_logo.jpg"
 
