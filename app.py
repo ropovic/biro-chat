@@ -1,5 +1,5 @@
 """
-app.py v19 — Prošireno izvlačenje imena za zaposlene
+app.py v20 — Poboljšano izvlačenje imena, veći limit za član, debug
 """
 
 import os
@@ -132,7 +132,7 @@ def search_text(query, top_k=10):
         return []
 
 # ============================================================
-# PROŠIRENO IZVLAČENJE IMENA IZ TEKSTA
+# PROŠIRENO IZVLAČENJE IMENA IZ TEKSTA (v2)
 # ============================================================
 def extract_name_from_text(tekst):
     """
@@ -157,10 +157,12 @@ def extract_name_from_text(tekst):
     if m:
         return m.group(1)
 
-    # 4. Bilo koje dve kapitalizovane reči bilo gde
+    # 4. Bilo koje dve kapitalizovane reči bilo gde (ali ne ako su deo "PD Srbijašume" i sl.)
     m = re.search(r'\b([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)\b', tekst)
     if m:
-        return m.group(1)
+        # Proveri da nije "PD Srbijašume" ili slično
+        if m.group(1) not in ["PD Srbijašume", "Srbijašume"]:
+            return m.group(1)
 
     # 5. Ćirilica: "Запослени у Бироу ...: Бојана Јелић"
     m = re.search(r'[Зз]апослени\s+у\s+Бироу[^:]*:\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)', tekst)
@@ -178,15 +180,15 @@ def extract_name_from_text(tekst):
         return m.group(1)
 
     # 8. FALLBACK: uzmi prvu kapitalizovanu reč (ako je duža od 2 slova)
-    # Ovo je opasno jer može da uhvati pogrešnu reč, ali bolje nego ništa
+    # Ovo je opasno ali korisno za slučajeve gde ime nije u očekivanom formatu
     m = re.search(r'\b([A-ZČĆŠĐŽА-ЯЁ][a-zčćšđžа-яё]{2,})\b', tekst)
     if m:
-        # Ako ima samo jedno ime, probaj da nađeš još jedno
         first = m.group(1)
         rest = tekst[m.end():]
         m2 = re.search(r'\b([A-ZČĆŠĐŽА-ЯЁ][a-zčćšđžа-яё]{2,})\b', rest)
         if m2:
             return f"{first} {m2.group(1)}"
+        # Ako ima samo jedno ime, vrati ga (možda je ime bez prezimena)
         return first
 
     return None
@@ -277,40 +279,38 @@ def handle_direktor():
 def handle_lista_zaposlenih():
     all_points = scroll_all()
     zaposleni = []
-    
-    # Debug: broj fotografija
-    foto_count = 0
-    for p in all_points:
-        if p.payload and p.payload.get("tip") == "fotografija_profil":
-            foto_count += 1
-    
-    st.sidebar.write(f"📸 Ukupno fotografija u bazi: {foto_count}")
-    
+    debug_texts = []  # za prikaz u sidebar-u
+
     for p in all_points:
         payload = p.payload or {}
         if payload.get("tip") != "fotografija_profil":
             continue
         tekst = payload.get("tekst", "") or ""
         url = payload.get("slika_url", "") or payload.get("Link", "")
-        
+
         # Prvo probaj employee_name
         ime = payload.get("employee_name", "")
         if not ime:
             ime = extract_name_from_text(tekst)
-        
+            if not ime:
+                # Ako nije uspeo, sačuvaj tekst za debug
+                debug_texts.append(tekst[:100])
         if ime:
             funkcija = payload.get("Funkcija", "")
             if not funkcija:
                 m = re.search(r'(?:Funkcija|funkcija|Функција)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
                 if m:
                     funkcija = m.group(1).strip()
-            # Spreči duplikate
             if not any(z["ime"].lower() == ime.lower() for z in zaposleni):
                 zaposleni.append({"ime": ime, "url": url, "funkcija": funkcija})
-        else:
-            # Debug: prikaži tekst za koje nismo uspeli da izvučemo ime
-            if len(tekst) > 10:
-                st.sidebar.write(f"⚠️ Ne mogu da izvučem ime iz: {tekst[:80]}...")
+
+    # Prikaži debug info u sidebar-u
+    st.sidebar.write(f"📸 Ukupno fotografija u bazi: {len([p for p in all_points if p.payload.get('tip') == 'fotografija_profil'])}")
+    st.sidebar.write(f"✅ Uspešno izvučeno imena: {len(zaposleni)}")
+    if debug_texts:
+        st.sidebar.write("⚠️ Tekstovi iz kojih NIJE izvučeno ime (prvih 5):")
+        for t in debug_texts[:5]:
+            st.sidebar.write(f"- {t}...")
 
     if not zaposleni:
         return "⚠️ Nisu pronađeni zaposleni.", []
@@ -472,6 +472,7 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
+    # Prvo probaj pretragu teksta
     hits = search_text(upit, top_k=20)
     diag_hits = [h for h in hits if h.payload and h.payload.get("tip") in ["dijagram", "image"]]
     if diag_hits:
@@ -485,6 +486,7 @@ def handle_dijagram(upit):
         if slike:
             return f"**Pronađeno {len(slike)} slika/dijagrama:**", slike[:6]
 
+    # Ako nema, uzmi sve dijagrame i filtriraj
     points = scroll_tip("dijagram")
     if not points:
         points = scroll_tip("image")
@@ -526,8 +528,8 @@ def handle_clan(broj):
                 m = clan_pat.search(tekst)
                 if m:
                     clan_tekst = m.group(0).strip()
-                    if len(clan_tekst) > 8000:
-                        clan_tekst = clan_tekst[:8000] + "\n...[Skraćeno]"
+                    if len(clan_tekst) > 12000:  # povećano na 12000
+                        clan_tekst = clan_tekst[:12000] + "\n...[Skraćeno]"
                     izvor = payload.get("naziv_dokumenta", "") or payload.get("izvor", "")
                     return f"**Član {broj}** (izvor: {izvor}):\n\n{clan_tekst}", []
 
@@ -552,8 +554,8 @@ def handle_clan(broj):
             clan_tekst = m.group(0).strip()
             if len(clan_tekst) < 30:
                 continue
-            if len(clan_tekst) > 8000:
-                clan_tekst = clan_tekst[:8000] + "\n...[Skraćeno]"
+            if len(clan_tekst) > 12000:
+                clan_tekst = clan_tekst[:12000] + "\n...[Skraćeno]"
             izvor = payload.get("naziv_dokumenta", "") or payload.get("izvor", "")
             pogodci.append({"tekst": clan_tekst, "izvor": izvor, "duzina": len(clan_tekst)})
         if not pogodci:
