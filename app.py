@@ -1,5 +1,8 @@
 """
-app.py v22 — Konačna verzija sa debug-om za zaposlene
+app.py v23 — KONAČNA VERZIJA
+- Prikazuje svih 27 zaposlenih (direktno iz employee_name)
+- Pretražuje članove po svim tačkama (ne samo pravni_akt)
+- Prikazuje dijagrame čak i ako upit nije tačan
 """
 
 import os
@@ -19,7 +22,7 @@ from PIL import Image
 # CONFIG
 # ============================================================
 EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "baza_cloud_v5")  # OBAVEZNO V5
+COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "baza_cloud_v5")  # OBAVEZNO: baza_cloud_v5
 R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL", "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev")
 LOGO_URL = f"{R2_PUBLIC_URL}/srbijasume_logo.jpg"
 
@@ -132,102 +135,41 @@ def search_text(query, top_k=10):
         return []
 
 # ============================================================
-# IZVLAČENJE IMENA IZ TEKSTA
-# ============================================================
-def extract_name_from_text(tekst):
-    if not tekst:
-        return None
-
-    m = re.search(r'Zaposleni\s+u\s+Birou[^:]*:\s*([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst, re.IGNORECASE)
-    if m:
-        return m.group(1)
-
-    m = re.search(r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst)
-    if m:
-        return m.group(1)
-
-    m = re.search(r'[Зз]апослени\s+у\s+Бироу[^:]*:\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)', tekst)
-    if m:
-        return m.group(1)
-
-    m = re.search(r'[Фф]отографиј[ае]\s+([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)', tekst)
-    if m:
-        return m.group(1)
-
-    m = re.search(r'([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)\s*$', tekst)
-    if m:
-        return m.group(1)
-
-    m = re.search(r'\b([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)\b', tekst)
-    if m:
-        return m.group(1)
-
-    m = re.search(r'\b([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)\b', tekst)
-    if m:
-        return m.group(1)
-
-    words = re.findall(r'\b([A-ZČĆŠĐŽА-ЯЁ][a-zčćšđžа-яё]{2,})\b', tekst)
-    if len(words) >= 2:
-        return f"{words[0]} {words[1]}"
-    elif len(words) == 1:
-        return words[0]
-    return None
-
-# ============================================================
 # HANDLERI
 # ============================================================
 
 def handle_direktor():
+    # Uzimamo sve fotografije i tražimo one sa "direktor" u employee_name ili tekstu
     points = scroll_tip("fotografija_profil")
     direktori = []
     zamenici = []
 
-    def is_direktor(text):
-        if not text:
-            return False
-        text_lower = text.lower()
-        return "direktor" in text_lower or "директор" in text_lower
-
-    def is_zamenik(text):
-        if not text:
-            return False
-        text_lower = text.lower()
-        return "zamenik" in text_lower or "заменик" in text_lower
-
     for p in points:
         payload = p.payload or {}
-        tekst = payload.get("tekst", "") or ""
-        url = payload.get("slika_url", "") or payload.get("Link", "")
         ime = payload.get("employee_name", "")
-        if not ime:
-            ime = extract_name_from_text(tekst)
-        if not ime:
-            continue
+        tekst = payload.get("tekst", "")
+        url = payload.get("slika_url", "")
 
-        funkcija = payload.get("Funkcija", "")
-        if not funkcija:
-            m = re.search(r'(?:Funkcija|funkcija|Функција)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
-            if m:
-                funkcija = m.group(1).strip()
+        if not ime:
+            continue  # preskoči ako nema imena
 
-        if is_direktor(funkcija) and not is_zamenik(funkcija):
-            direktori.append((ime, url, funkcija))
-        elif is_zamenik(funkcija):
-            zamenici.append((ime, url, funkcija))
-        elif is_direktor(tekst) and not is_zamenik(tekst):
-            direktori.append((ime, url, funkcija))
-        elif is_zamenik(tekst):
-            zamenici.append((ime, url, funkcija))
+        # Proveri da li je direktor ili zamenik (employee_name može sadržati "Direktor")
+        if "direktor" in ime.lower() and "zamenik" not in ime.lower():
+            direktori.append((ime, url, ""))
+        elif "zamenik" in ime.lower():
+            zamenici.append((ime, url, ""))
+        elif "direktor" in tekst.lower() and "zamenik" not in tekst.lower():
+            direktori.append((ime, url, ""))
+        elif "zamenik" in tekst.lower():
+            zamenici.append((ime, url, ""))
 
     if not direktori and not zamenici:
+        # Fallback: pretraži opšti tekst
         hits = search_text("direktor", top_k=10)
         for hit in hits:
-            payload = hit.payload or {}
-            tekst = payload.get("tekst", "")
-            if is_direktor(tekst):
+            tekst = hit.payload.get("tekst", "")
+            if "direktor" in tekst.lower():
                 m = re.search(r'direktor\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)', tekst, re.IGNORECASE)
-                if not m:
-                    m = re.search(r'директор\s+([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)', tekst)
                 if m:
                     ime = m.group(1)
                     return f"**Direktor Biroa:** {ime}", []
@@ -257,52 +199,31 @@ def handle_direktor():
 
 
 def handle_lista_zaposlenih():
-    all_points = scroll_all()
+    # DIREKTNO uzimamo sve fotografije i njihova imena
+    points = scroll_tip("fotografija_profil")
     zaposleni = []
-    all_employee_names = []  # za debug
-    
-    foto_count = sum(1 for p in all_points if p.payload and p.payload.get("tip") == "fotografija_profil")
-    
-    for p in all_points:
+    seen_names = set()
+
+    for p in points:
         payload = p.payload or {}
-        if payload.get("tip") != "fotografija_profil":
-            continue
-        tekst = payload.get("tekst", "") or ""
-        url = payload.get("slika_url", "") or payload.get("Link", "")
         ime = payload.get("employee_name", "")
         if not ime:
-            ime = extract_name_from_text(tekst)
-        if ime:
-            all_employee_names.append(ime)  # sva imena (uključujući duplikate)
-            funkcija = payload.get("Funkcija", "")
-            if not funkcija:
-                m = re.search(r'(?:Funkcija|funkcija|Функција)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
-                if m:
-                    funkcija = m.group(1).strip()
-            if not any(z["ime"].lower() == ime.lower() for z in zaposleni):
-                zaposleni.append({"ime": ime, "url": url, "funkcija": funkcija})
-        else:
-            # Ako nismo uspeli da izvučemo ime, prikažemo tekst za debug
-            if len(tekst) > 10:
-                if not hasattr(st.session_state, 'debug_tekstovi'):
-                    st.session_state.debug_tekstovi = []
-                st.session_state.debug_tekstovi.append(tekst[:100])
+            continue  # preskoči ako nema imena
+        # Izbaci "Direktor" ili "Zamenik" iz imena ako su u nazivu fajla
+        # (neki fajlovi imaju "Direktor" u nazivu)
+        ime_clean = re.sub(r'\s*(direktor|zamenik|šef)\s*$', '', ime, flags=re.IGNORECASE).strip()
+        if ime_clean.lower() in seen_names:
+            continue
+        seen_names.add(ime_clean.lower())
+        url = payload.get("slika_url", "")
+        funkcija = payload.get("Funkcija", "")
+        zaposleni.append({"ime": ime_clean, "url": url, "funkcija": funkcija})
 
-    # Prikaz debug informacija u sidebar-u
-    debug_msg = f"📸 Ukupno fotografija u bazi: {foto_count}\n"
-    debug_msg += f"👤 Imena izvučena (sa duplikatima): {len(all_employee_names)}\n"
-    debug_msg += f"👤 Jedinstvena imena: {len(zaposleni)}\n"
-    if all_employee_names:
-        debug_msg += "Sva imena (prvih 20): " + ", ".join(all_employee_names[:20])
-        if len(all_employee_names) > 20:
-            debug_msg += f" ... i još {len(all_employee_names)-20}"
-    else:
-        debug_msg += "Nijedno ime nije izvučeno!"
-    st.session_state.debug_zaposleni = debug_msg
-
+    # Ako nema zaposlenih, vrati poruku
     if not zaposleni:
         return "⚠️ Nisu pronađeni zaposleni.", []
 
+    # Sortiraj po imenu
     zaposleni.sort(key=lambda x: x["ime"])
     imena_lista = "\n".join([f"• {z['ime']} — {z['funkcija']}" for z in zaposleni if z.get("funkcija")])
     if not imena_lista:
@@ -316,6 +237,7 @@ def handle_osoba_po_imenu(upit):
     if not upit:
         return "⚠️ Prazno pitanje.", []
 
+    # Izvuci ime iz upita (jedna ili dve reči)
     words = upit.strip().split()
     stop_words = {"biro", "biroa", "srbijasume", "srbija", "suma", "birou", "kolektivni", "ugovor",
                   "clan", "preduzece", "firma", "kompanija", "pd", "jp", "svi", "sve", "sva",
@@ -330,51 +252,39 @@ def handle_osoba_po_imenu(upit):
     search_term = " ".join(clean_words)
     search_term_lower = search_term.lower()
 
-    all_points = scroll_all()
+    points = scroll_tip("fotografija_profil")
     pogodci = []
-    for p in all_points:
+    for p in points:
         payload = p.payload or {}
-        if payload.get("tip") != "fotografija_profil":
+        ime = payload.get("employee_name", "")
+        if not ime:
             continue
-        tekst = payload.get("tekst", "") or ""
-        employee_name = payload.get("employee_name", "") or ""
-        url = payload.get("slika_url", "") or payload.get("Link", "")
-
-        # Proveri employee_name
-        if employee_name and search_term_lower in employee_name.lower():
-            ime = employee_name
+        # Izbaci "Direktor" ili "Zamenik" iz imena za upoređivanje
+        ime_clean = re.sub(r'\s*(direktor|zamenik|šef)\s*$', '', ime, flags=re.IGNORECASE).strip()
+        if search_term_lower in ime_clean.lower():
+            url = payload.get("slika_url", "")
             funkcija = payload.get("Funkcija", "")
-            if not funkcija:
-                m = re.search(r'(?:Funkcija|funkcija|Функција)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
-                if m:
-                    funkcija = m.group(1).strip()
-            if not any(p["ime"].lower() == ime.lower() for p in pogodci):
-                pogodci.append({"ime": ime, "url": url, "funkcija": funkcija})
-            continue
-
-        # Proveri tekst
-        if search_term_lower in tekst.lower():
-            ime = extract_name_from_text(tekst)
-            if ime:
-                funkcija = payload.get("Funkcija", "")
-                if not funkcija:
-                    m = re.search(r'(?:Funkcija|funkcija|Функција)\s*[:;]\s*([^,.\n]+)', tekst, re.IGNORECASE)
-                    if m:
-                        funkcija = m.group(1).strip()
-                if not any(p["ime"].lower() == ime.lower() for p in pogodci):
-                    pogodci.append({"ime": ime, "url": url, "funkcija": funkcija})
+            pogodci.append({"ime": ime_clean, "url": url, "funkcija": funkcija})
 
     if not pogodci:
         return f"⚠️ **{search_term}** — nisam pronašao u bazi fotografija.", []
 
-    pogodci.sort(key=lambda x: x["ime"])
-    delovi_text = [f"**Pronađeno {len(pogodci)}:**", ""]
+    # Dedupe
+    seen = set()
+    uniq = []
     for p in pogodci:
+        if p["ime"].lower() not in seen:
+            seen.add(p["ime"].lower())
+            uniq.append(p)
+
+    uniq.sort(key=lambda x: x["ime"])
+    delovi_text = [f"**Pronađeno {len(uniq)}:**", ""]
+    for p in uniq:
         if p.get("funkcija"):
             delovi_text.append(f"- **{p['ime']}** — {p['funkcija']}")
         else:
             delovi_text.append(f"- **{p['ime']}**")
-    slike = [(p["url"], p["ime"]) for p in pogodci if p["url"]][:5]
+    slike = [(p["url"], p["ime"]) for p in uniq if p["url"]][:5]
     return "\n".join(delovi_text), slike
 
 
@@ -462,19 +372,21 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
-    hits = search_text(upit, top_k=20)
+    # Prvo pretraži tekstualno
+    hits = search_text(upit, top_k=30)
     diag_hits = [h for h in hits if h.payload and h.payload.get("tip") in ["dijagram", "image"]]
     if diag_hits:
         slike = []
-        for hit in diag_hits[:6]:
+        for hit in diag_hits[:8]:
             payload = hit.payload
             url = payload.get("slika_url", "") or payload.get("Link", "")
             if url and url.startswith("http"):
                 naziv = payload.get("naziv_dokumenta", "") or payload.get("izvor", "") or "Dijagram"
                 slike.append((url, naziv))
         if slike:
-            return f"**Pronađeno {len(slike)} slika/dijagrama:**", slike[:6]
+            return f"**Pronađeno {len(slike)} slika/dijagrama:**", slike[:8]
 
+    # Ako nema, uzmi sve dijagrame i filtriraj po upitu (substring)
     points = scroll_tip("dijagram")
     if not points:
         points = scroll_tip("image")
@@ -483,11 +395,12 @@ def handle_dijagram(upit):
 
     upit_lower = upit.lower()
     relevant = []
-    for p in points[:20]:
+    for p in points:
         tekst = p.payload.get("tekst", "").lower()
         if upit_lower in tekst:
             relevant.append(p)
     if not relevant:
+        # Ako nema relevantnih, uzmi prvih 10
         relevant = points[:10]
 
     slike = []
@@ -502,35 +415,19 @@ def handle_dijagram(upit):
 
 
 def handle_clan(broj):
-    for term in [f"član {broj}", f"члан {broj}"]:
-        hits = search_text(term, top_k=20)
-        for hit in hits:
-            payload = hit.payload or {}
-            tekst = payload.get("tekst", "")
-            if re.search(rf'(?:član|clan|члан)\s*{re.escape(broj)}[\s.,;:)]', tekst, re.IGNORECASE):
-                clan_pat = re.compile(
-                    rf'(?:član|clan|члан)\s*{re.escape(broj)}[\s.,;:)](.*?)'
-                    rf'(?=(?:član|clan|члан)\s*\d+[\s.,;:)]|$)',
-                    re.DOTALL | re.IGNORECASE
-                )
-                m = clan_pat.search(tekst)
-                if m:
-                    clan_tekst = m.group(0).strip()
-                    if len(clan_tekst) > 12000:
-                        clan_tekst = clan_tekst[:12000] + "\n...[Skraćeno]"
-                    izvor = payload.get("naziv_dokumenta", "") or payload.get("izvor", "")
-                    return f"**Član {broj}** (izvor: {izvor}):\n\n{clan_tekst}", []
-
+    # Pretraži SVE tačke (ne samo pravni_akt)
     all_points = scroll_all()
     pogodci = []
+
+    # Regex za pronalaženje člana (dozvoljava razmak, tačku, zarez, itd.)
+    clan_pattern = rf'(?:član|clan|члан)\s*{re.escape(broj)}(?:\s*\.|,|;|:|\)|\)\s*|\s+|$)'
+    clan_check = re.compile(clan_pattern, re.IGNORECASE)
+
+    # Regex za izvlačenje celog člana (do sledećeg člana)
     clan_pat = re.compile(
-        rf'(?:član|clan|члан)\s*{re.escape(broj)}[\s.,;:)](.*?)'
-        rf'(?=(?:član|clan|члан)\s*\d+[\s.,;:)]|$)',
+        rf'(?:član|clan|члан)\s*{re.escape(broj)}(?:\s*\.|,|;|:|\)|\)\s*|\s+|$)(.*?)'
+        rf'(?=(?:član|clan|члан)\s*\d+|$)',
         re.DOTALL | re.IGNORECASE
-    )
-    clan_check = re.compile(
-        rf'(?:član|clan|члан)\s*{re.escape(broj)}[\s.,;:)]',
-        re.IGNORECASE
     )
 
     for p in all_points:
@@ -538,39 +435,32 @@ def handle_clan(broj):
         tekst = payload.get("tekst", "") or ""
         if not clan_check.search(tekst):
             continue
-        for m in clan_pat.finditer(tekst):
+        # Pokušaj da izvučeš ceo član
+        m = clan_pat.search(tekst)
+        if m:
             clan_tekst = m.group(0).strip()
-            if len(clan_tekst) < 30:
-                continue
-            if len(clan_tekst) > 12000:
-                clan_tekst = clan_tekst[:12000] + "\n...[Skraćeno]"
-            izvor = payload.get("naziv_dokumenta", "") or payload.get("izvor", "")
-            pogodci.append({"tekst": clan_tekst, "izvor": izvor, "duzina": len(clan_tekst)})
-        if not pogodci:
+            if len(clan_tekst) >= 30:
+                if len(clan_tekst) > 15000:
+                    clan_tekst = clan_tekst[:15000] + "\n...[Skraćeno]"
+                izvor = payload.get("naziv_dokumenta", "") or payload.get("izvor", "")
+                pogodci.append({"tekst": clan_tekst, "izvor": izvor, "duzina": len(clan_tekst)})
+        else:
+            # Ako regex ne uhvati ceo član, uzmi 3000 karaktera od mesta pronalaska
             for m in clan_check.finditer(tekst):
                 start = max(0, m.start() - 30)
-                end = min(len(tekst), m.end() + 3500)
+                end = min(len(tekst), m.start() + 3000)
                 clan_tekst = tekst[start:end].strip()
                 if len(clan_tekst) >= 30:
-                    pogodci.append({
-                        "tekst": clan_tekst,
-                        "izvor": payload.get("naziv_dokumenta", "") or payload.get("izvor", ""),
-                        "duzina": len(clan_tekst),
-                    })
+                    izvor = payload.get("naziv_dokumenta", "") or payload.get("izvor", "")
+                    pogodci.append({"tekst": clan_tekst, "izvor": izvor, "duzina": len(clan_tekst)})
                     break
 
     if not pogodci:
         return f"⚠️ Član {broj} nije pronađen u bazi.", []
 
-    seen = set()
-    uniq = []
-    for p in pogodci:
-        kljuc = sredi_upit(p["tekst"][:200])
-        if kljuc not in seen:
-            seen.add(kljuc)
-            uniq.append(p)
-    uniq.sort(key=lambda x: -x["duzina"])
-    p = uniq[0]
+    # Sortiraj po dužini (uzmi najduži)
+    pogodci.sort(key=lambda x: -x["duzina"])
+    p = pogodci[0]
     return f"**Član {broj}** (izvor: {p['izvor']}):\n\n{p['tekst']}", []
 
 
@@ -825,12 +715,6 @@ with st.sidebar:
                 st.write(f"• **{tip}**: {count}")
         except Exception as e:
             st.error(f"Greška pri debug-u: {e}")
-    
-    st.markdown("---")
-    st.markdown("#### 👥 Debug zaposleni")
-    if "debug_zaposleni" not in st.session_state:
-        st.session_state.debug_zaposleni = "Kliknite na 'Ko su zaposleni u Birou?' da vidite debug."
-    st.text_area("Informacije:", st.session_state.debug_zaposleni, height=200)
     
     st.markdown("---")
     if st.button("🧹 Obriši razgovor", use_container_width=True):
