@@ -257,13 +257,28 @@ def handle_osoba_po_imenu(upit):
 
     # KLJUČNO: Ako je samo jedno ime traženo, vrati SAMO njegove slike
     # (ne i slike drugih koji su možda slučajno matchovali)
+    # TOLERIŠE PADEŽE: "Bojana" matchuje "Bojane" (prvih 4+ slova)
     if len(imena_za_pretragu) == 1:
-        target_norm = imena_za_pretragu[0]["norm"]
-        # Filtriraj SAMO one čije ime zaista sadrži target
+        target_parts = imena_za_pretragu[0]["delovi"]
         filtered = []
         for p in uniq:
-            # Da li ime_lepo sadrži sve delove targeta?
-            if all(d in p["kljuc"] for d in imena_za_pretragu[0]["delovi"]):
+            # Za svaki deo traženog imena, proveri da li postoji reč u ime_lepo
+            # koja počinje sa prva 4+ slova
+            words = p["kljuc"].split()
+            all_match = True
+            for d in target_parts:
+                if len(d) < 4:
+                    # Kratka reč — tačno podudaranje
+                    if not any(w == d for w in words):
+                        all_match = False
+                        break
+                else:
+                    # Duga reč — podudaranje po prefiksu (4+ slova)
+                    prefiks = d[:max(4, len(d) - 1)]
+                    if not any(w.startswith(prefiks) for w in words):
+                        all_match = False
+                        break
+            if all_match:
                 filtered.append(p)
         uniq = filtered if filtered else uniq
 
@@ -670,7 +685,9 @@ def detektuj_tip(upit):
     # Traženje osobe po imenu: "pronađi [Ime]", "nađi [Ime]", "ima li [Ime]"
     if any(kw in u for kw in ["pronadi", "nadji", "nadjem",
                                 "ima li", "gde je", "ko je to", "sta je sa",
-                                "da li", "dal je", "dal i", "je li"]):
+                                "da li", "dal je", "dal i", "je li",
+                                "ko je ", "koja je ", "koje je ",
+                                "radi li", "kako se zove", "kako se zovu"]):
         # Ali NE ako je o direktoru ili listi zaposlenih
         if "direktor" not in u and "zaposleni" not in u and "lista" not in u:
             return "osoba_ime"
