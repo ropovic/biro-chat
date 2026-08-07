@@ -432,40 +432,39 @@ def handle_dijagram(upit):
     points = scroll_tip("dijagram", limit=200)
     u = sredi_upit(upit)
 
-    # Helper: da li je zapis LOGO ili čist dokument
-    def je_logo_ili_dokument(payload):
+    # Helper: da li je zapis LOGO (ne dokument — dokumenti mogu imati slike)
+    def je_logo(payload):
         tekst = (payload.get("tekst", "") or payload.get("Objekat", "") or "").lower()
         izvor = (payload.get("izvor", "") or "").lower()
         naziv = (payload.get("naziv_dokumenta", "") or "").lower()
         opis = (payload.get("vizuel_opis", "") or "").lower()
+        # Samo logo/fotobaza se preskače
         if "logo" in tekst[:200] or "logo" in izvor or "logo" in naziv:
             return True
         if "fotobaza" in izvor or "fotobaza" in naziv:
             return True
-        # Samo AKO nema vizuel_opis ILI opis kaže "dokument"
-        if not opis:
-            return True
-        # Ako opis jasno kaže da je to narudžbenica/dokument
-        if "narudzben" in opis:
+        # Ako opis kaže "Ovo je logo" ili "Logo"
+        if opis and ("ovo je logo" in opis or "logo" == opis[:20]):
             return True
         return False
 
-    # Svi dostupni dijagrami (bez logo/dokumenata)
+    # Svi dostupni dijagrami (bez logo)
     svi_dijagrami = []
     for p in points:
         payload = p.payload or {}
-        if je_logo_ili_dokument(payload):
+        if je_logo(payload):
             continue
         url = payload.get("Link", "") or payload.get("slika_url", "")
         if not url or not url.startswith("http"):
             continue
         opis = payload.get("vizuel_opis", "")
         izvor = payload.get("izvor", "") or "Dijagram"
+        # Caption: opis ako postoji, inače izvor
         caption = opis[:80] if opis else izvor
         svi_dijagrami.append((url, caption, opis.lower(), izvor.lower()))
 
     if not svi_dijagrami:
-        return "⚠️ Nema dijagrama u bazi (svi su logo/dokumenti).", []
+        return "⚠️ Nema dijagrama u bazi.", []
 
     # 1. Pretraga po tipu (ruža vetrova, klimatski, mapa)
     specificni_kw = ["vetrova", "ruza vetrova", "wind", "klimatski", "klimadijagram",
@@ -656,8 +655,9 @@ def ask_llm(messages):
 # ============================================================
 import requests
 
-def external_search(query, max_results=3):
+def external_search(query, max_results=5):
     """Tavily pretraga. Vraća formatiran tekst ili None ako ne radi.
+    Bez AI sažetka (izbegavamo halucinacije) — samo čisti rezultati pretrage.
     Besplatno: 1000 pretraga/mesec. signup: https://tavily.com"""
     api_key = os.environ.get("TAVILY_API_KEY", "")
     if not api_key:
@@ -669,8 +669,9 @@ def external_search(query, max_results=3):
                 "api_key": api_key,
                 "query": query,
                 "max_results": max_results,
-                "include_answer": True,
+                "include_answer": False,  # NE koristimo AI sažetak (halucinira)
                 "search_depth": "basic",
+                "include_raw_content": False,
             },
             timeout=10,
         )
@@ -678,15 +679,18 @@ def external_search(query, max_results=3):
             return None
         data = r.json()
         delovi = []
-        if data.get("answer"):
-            delovi.append(f"**Sažetak:** {data['answer']}\n")
         for res in data.get("results", []):
+            title = res.get("title", "")
+            url = res.get("url", "")
+            content = res.get("content", "")[:300]
             delovi.append(
-                f"**{res.get('title', '')}**\n"
-                f"  URL: {res.get('url', '')}\n"
-                f"  {res.get('content', '')[:400]}"
+                f"📄 **{title}**\n"
+                f"   🔗 {url}\n"
+                f"   {content}"
             )
-        return "\n\n".join(delovi) if delovi else None
+        if not delovi:
+            return "Nema rezultata za ovaj upit."
+        return "\n\n".join(delovi)
     except Exception:
         return None
 
