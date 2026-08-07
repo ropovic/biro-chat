@@ -427,35 +427,54 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
-    """Dijagram: skeniraj dijagram tip, koristi ocr_tekst za pretragu."""
+    """Dijagram: skeniraj dijagram tip, koristi ocr_tekst za pretragu.
+    Filtrira logo zapise (nemaju dijagram sa dijagram kao temom)."""
     points = scroll_tip("dijagram", limit=200)
     u = sredi_upit(upit)
 
+    # Helper: da li je zapis LOGO (treba ga preskočiti)
+    def je_logo(payload):
+        tekst = (payload.get("tekst", "") or payload.get("Objekat", "") or "").lower()
+        izvor = (payload.get("izvor", "") or "").lower()
+        naziv = (payload.get("naziv_dokumenta", "") or "").lower()
+        # Logo indikatori
+        if "logo" in tekst[:200] or "logo" in izvor or "logo" in naziv:
+            return True
+        if "fotobaza" in izvor or "fotobaza" in naziv:
+            return True
+        return False
+
     # Ako korisnik traži specifično (ruža vetrova), pokušaj prvo sa filterom
-    if any(kw in u for kw in ["vetrova", "ruza vetrova", "wind"]):
+    if any(kw in u for kw in ["vetrova", "ruza vetrova", "wind", "klimatski"]):
         filtrirane = []
         for p in points:
             payload = p.payload or {}
+            if je_logo(payload):
+                continue  # preskoči logo
             tekst = sredi_upit(payload.get("tekst", "") or "")
             ocr = sredi_upit(payload.get("ocr_tekst", "") or "")
             url = payload.get("Link", "") or payload.get("slika_url", "")
             if ("vetrova" in ocr or "vetrova" in tekst or "wind" in ocr
-                or "ruza" in tekst or "pravac" in tekst):
+                or "ruza" in tekst or "pravac" in tekst or "klim" in tekst):
                 if url and url.startswith("http"):
                     filtrirane.append((url, payload.get("izvor", "") or "Dijagram"))
         if filtrirane:
             return f"**Pronađeno {len(filtrirane)} dijagrama vetrova:**", filtrirane[:6]
+        # Ako nema specifičnih, vrati poruku
+        return "⚠️ Nema dijagrama ruže vetrova u bazi. Probaj drugi tip dijagrama.", []
 
-    # Ako nema specifičnog filtera, vrati sve dostupne dijagrame
+    # Filtriraj logo zapise
     slike = []
     for p in points:
         payload = p.payload or {}
+        if je_logo(payload):
+            continue  # preskoči logo
         url = payload.get("Link", "") or payload.get("slika_url", "")
         if url and url.startswith("http"):
             slike.append((url, payload.get("izvor", "") or "Dijagram"))
 
     if not slike:
-        return "⚠️ Nema dijagrama u bazi.", []
+        return "⚠️ Nema dijagrama u bazi (samo logo zapisi pronađeni).", []
     return f"**Pronađeno {len(slike)} dijagrama:**", slike[:6]
 
 
@@ -678,6 +697,31 @@ def detektuj_tip(upit):
     if m:
         return f"clan_{m.group(1)}"
 
+    # EKSTERNO — pitanja o poznatim ličnostima (pre person routing)
+    # "Ko je ministar", "Ko je predsednik" itd. — nisu naši zaposleni
+    ekstern_licnosti = [
+        "ministar", "predsednik", "premijer", "vladar", "kralj",
+        "kraljica", "generalni sekretar", "guverner", "ambasador",
+        "predsedavajuci", "potpredsednik", "selo",
+    ]
+    if any(kw in u for kw in ekstern_licnosti):
+        # Samo ako NIJE pitanje o našem direktoru
+        if "direktor" not in u and "zamenik" not in u and "biro" not in u:
+            return "eksterno"
+
+    # Opšta eksterna pitanja (pre person routing)
+    ekstern_opste = [
+        "sta je", "sta znaci", "sta predstavlja",
+        "kako se zove", "kako se zovu",
+        "gde se nalazi", "koliko kosta", "koliko je",
+    ]
+    if any(kw in u for kw in ekstern_opste):
+        # Ali ne za naše ljude
+        if "zaposlen" not in u and "biro" not in u and "srbija" not in u and "ministar" not in u and "predsednik" not in u:
+            # Specifično za "Ko je" + opšta pitanja
+            if "ko je" in u and not any(im in u for im in [" vamovic", " caldovic", " mihajlovic", " bojana", " darko", " arsenije", " aleksandra", " bosko", " malesevic"]):
+                return "eksterno"
+
     # Direktor (pre liste, jer "direktor" sadrži specifičniji pojam)
     if "direktor" in u and "zamenik" not in u:
         return "direktor"
@@ -823,6 +867,16 @@ if user_input:
                 elif tip.startswith("clan_"):
                     broj = tip.split("_")[1]
                     odgovor, slike = handle_clan(broj)
+                elif tip == "eksterno":
+                    # Direktno idi na Tavily — ne tražimo u bazi
+                    ext = external_search(user_input)
+                    if ext:
+                        odgovor = f"🌐 **Spoljni izvori:**\n\n{ext}"
+                        meta = "\n\n<sub>🌐 Eksterni search (Tavily)</sub>"
+                    else:
+                        odgovor = "⚠️ Nemam pristup eksternim izvorima (Tavily ključ?)."
+                        meta = ""
+                    slike = []
                 else:
                     kontekst, br_k, slike, err = do_rag(user_input)
                     if err:
