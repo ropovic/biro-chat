@@ -428,7 +428,7 @@ def handle_oprema_specificno(upit):
 
 def handle_dijagram(upit):
     """Dijagram: skroluje dijagram tip, koristi vizuel_opis/ocr_tekst za pretragu.
-    Filtrira logo zapise. Koristi vizuel_opis ako postoji (Vision/heuristika)."""
+    Filtrira logo zapise. Ako nema specifičnog matcha, vraća dostupne dijagrame."""
     points = scroll_tip("dijagram", limit=200)
     u = sredi_upit(upit)
 
@@ -441,52 +441,44 @@ def handle_dijagram(upit):
             return True
         if "fotobaza" in izvor or "fotobaza" in naziv:
             return True
+        # Dokumenti (narudžbenice, admin) — preskoči
+        opis = (payload.get("vizuel_opis", "") or "").lower()
+        if "narudzben" in opis or "dokument sadrzi" in opis or "administrativn" in opis:
+            return True
         return False
 
-    # Ako korisnik traži specifično (ruža vetrova, klimatski, mapa)
-    specificni_kw = ["vetrova", "ruza vetrova", "wind", "klimatski", "klimadijagram",
-                     "temperatura", "padavine", "mapa", "karta"]
-    if any(kw in u for kw in specificni_kw):
-        filtrirane = []
-        for p in points:
-            payload = p.payload or {}
-            if je_logo(payload):
-                continue
-            tekst = sredi_upit(payload.get("tekst", "") or "")
-            ocr = sredi_upit(payload.get("ocr_tekst", "") or "")
-            opis = sredi_upit(payload.get("vizuel_opis", "") or "")
-            url = payload.get("Link", "") or payload.get("slika_url", "")
-            izvor = payload.get("izvor", "") or "Dijagram"
-
-            # Pretraga po svim tekstualnim poljima
-            full_text = f"{ocr} {tekst} {opis} {izvor}"
-            if ("vetrova" in full_text or "wind" in full_text
-                or "klim" in full_text or "mapa" in full_text or "karta" in full_text):
-                if url and url.startswith("http"):
-                    caption = opis[:80] if opis else izvor
-                    filtrirane.append((url, caption))
-        if filtrirane:
-            return f"**Pronađeno {len(filtrirane)} dijagrama:**", filtrirane[:6]
-
-    # Filtriraj logo zapise
-    slike = []
+    # Svi dostupni dijagrami (bez logo/dokumenata)
+    svi_dijagrami = []
     for p in points:
         payload = p.payload or {}
         if je_logo(payload):
             continue
         url = payload.get("Link", "") or payload.get("slika_url", "")
-        if url and url.startswith("http"):
-            opis = payload.get("vizuel_opis", "")
-            izvor = payload.get("izvor", "") or "Dijagram"
-            caption = opis[:80] if opis else izvor
-            slike.append((url, caption))
+        if not url or not url.startswith("http"):
+            continue
+        opis = payload.get("vizuel_opis", "")
+        izvor = payload.get("izvor", "") or "Dijagram"
+        caption = opis[:80] if opis else izvor
+        svi_dijagrami.append((url, caption, opis.lower(), izvor.lower()))
 
-    if not slike:
-        return "⚠️ Nema dijagrama u bazi (samo logo zapisi pronađeni).", []
+    if not svi_dijagrami:
+        return "⚠️ Nema dijagrama u bazi (samo logo/dokumenti).", []
 
-    # Ako korisnik pita za lokaciju (npr. "dijagram za Crni Vrh"), filtriraj
+    # 1. Pretraga po tipu (ruža vetrova, klimatski, mapa)
+    specificni_kw = ["vetrova", "ruza vetrova", "wind", "klimatski", "klimadijagram",
+                     "temperatura", "padavine", "mapa", "karta"]
+    if any(kw in u for kw in specificni_kw):
+        filtrirane = []
+        for url, cap, opis_l, izvor_l in svi_dijagrami:
+            if (any(kw in opis_l for kw in specificni_kw)
+                or any(kw in izvor_l for kw in specificni_kw)):
+                filtrirane.append((url, cap))
+        if filtrirane:
+            return f"**Pronađeno {len(filtrirane)} dijagrama po tipu:**", filtrirane[:6]
+
+    # 2. Pretraga po lokaciji
     lokacije = ["crni vrh", "stig", "vranjaca", "donji pek", "beograd", "kucevo",
-                "timoska", "banat", "backa", "srem"]
+                "timoska", "banat", "backa", "srem", "vojvodina", "sumadija"]
     target_lok = None
     for lok in lokacije:
         if lok in u:
@@ -495,13 +487,28 @@ def handle_dijagram(upit):
 
     if target_lok:
         filtrirane = []
-        for url, cap in slike:
-            if target_lok in cap.lower() or target_lok in u:
+        for url, cap, opis_l, izvor_l in svi_dijagrami:
+            if target_lok in opis_l or target_lok in izvor_l:
                 filtrirane.append((url, cap))
         if filtrirane:
             return f"**Pronađeno {len(filtrirane)} dijagrama za '{target_lok}':**", filtrirane[:6]
 
-    return f"**Pronađeno {len(slike)} dijagrama:**", slike[:6]
+    # 3. Ako korisnik traži "dijagram za X" — probaj X kao termin
+    m = re.search(r"dijagram\s+(?:za|od|iz|u|na)\s+(\w+)", u)
+    if m:
+        termin = m.group(1)
+        filtrirane = []
+        for url, cap, opis_l, izvor_l in svi_dijagrami:
+            if termin in opis_l or termin in izvor_l:
+                filtrirane.append((url, cap))
+        if filtrirane:
+            return f"**Pronađeno {len(filtrirane)} dijagrama za '{termin}':**", filtrirane[:6]
+
+    # 4. Ako korisnik pita "Pokaži dijagram" (bez specifičnosti), vrati sve dostupne
+    if "dijagram" in u or "sliku" in u or "prikaz" in u or "pokaz" in u:
+        return f"**Pronađeno {len(svi_dijagrami)} dijagrama (prvih 6):**", [(u, c) for u, c, _, _ in svi_dijagrami[:6]]
+
+    return f"**Pronađeno {len(svi_dijagrama)} dijagrama:**", [(u, c) for u, c, _, _ in svi_dijagrami[:6]]
 
 
 def handle_clan(broj):
@@ -724,29 +731,37 @@ def detektuj_tip(upit):
         return f"clan_{m.group(1)}"
 
     # EKSTERNO — pitanja o poznatim ličnostima (pre person routing)
-    # "Ko je ministar", "Ko je predsednik" itd. — nisu naši zaposleni
     ekstern_licnosti = [
         "ministar", "predsednik", "premijer", "vladar", "kralj",
         "kraljica", "generalni sekretar", "guverner", "ambasador",
         "predsedavajuci", "potpredsednik", "selo",
     ]
     if any(kw in u for kw in ekstern_licnosti):
-        # Samo ako NIJE pitanje o našem direktoru
         if "direktor" not in u and "zamenik" not in u and "biro" not in u:
             return "eksterno"
 
-    # Opšta eksterna pitanja (pre person routing)
+    # Opšta eksterna pitanja — pre person routing
     ekstern_opste = [
-        "sta je", "sta znaci", "sta predstavlja",
+        "sta je", "sta su", "sta znaci", "sta predstavlja",
         "kako se zove", "kako se zovu",
-        "gde se nalazi", "koliko kosta", "koliko je",
+        "gde se nalazi", "gde se desava", "gde se dogadja", "gde se", "gde je",
+        "koliko kosta", "koliko je", "koliko ima",
+        "koja je adresa", "koja adresa", "adresa",
+        "kada se", "kada je", "kada su",
+        "kako da", "kako se",
+        "zasto", "zasto je", "zasto se",
+        "sta ima u", "sta se desava",
     ]
+    # Ako je pitanje opšte, ne o zaposlenima u Birou, ne o članu — eksterno
     if any(kw in u for kw in ekstern_opste):
-        # Ali ne za naše ljude
-        if "zaposlen" not in u and "biro" not in u and "srbija" not in u and "ministar" not in u and "predsednik" not in u:
-            # Specifično za "Ko je" + opšta pitanja
-            if "ko je" in u and not any(im in u for im in [" vamovic", " caldovic", " mihajlovic", " bojana", " darko", " arsenije", " aleksandra", " bosko", " malesevic"]):
-                return "eksterno"
+        nije_nas = not any(im in u for im in [
+            " vamovic", " caldovic", " mihajlovic", " bojana", " darko",
+            " arsenije", " aleksandra", " bosko", " malesevic", " zivanovic",
+            " jelic", " simic", " katic", "projektant", "biro za planiranje",
+            " clan ", "clan", " ugovor", " zakon", "faktura", "stampac",
+        ])
+        if nije_nas:
+            return "eksterno"
 
     # Direktor (pre liste, jer "direktor" sadrži specifičniji pojam)
     if "direktor" in u and "zamenik" not in u:
