@@ -427,10 +427,40 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
-    """Dijagram: skroluje dijagram + vizuel tip (hybrid ih je preimenovao),
-    koristi vizuel_opis/ocr_tekst za pretragu. Filtrira logo zapise."""
-    # Hybrid skripta je neke "dijagram" preimenovala u "vizuel" — gledamo oba
-    points = scroll_tip("dijagram", limit=200) + scroll_tip("vizuel", limit=200)
+    """Dijagram: skroluje SVE zapise sa slikom, filtrira logo/foto."""
+    # Skroluj sve zapise i uzmi one sa slikom (ne zavisimo od tip polja)
+    points = []
+    offset = None
+    while True:
+        try:
+            records, next_offset = qdrant.scroll(
+                collection_name=COLLECTION_NAME,
+                limit=500,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as e:
+            return f"⚠️ Greška: {e}", []
+
+        for r in records:
+            if not r.payload:
+                continue
+            url = (r.payload.get("Link", "") or
+                   r.payload.get("slika_url", "") or
+                   r.payload.get("URL", "") or
+                   r.payload.get("image", "") or "")
+            if url and isinstance(url, str) and url.startswith("http"):
+                # Preskoči fotografije zaposlenih
+                if r.payload.get("Funkcija") or r.payload.get("Objekat"):
+                    if "Fotografij" in (r.payload.get("Objekat", "") or "") or "direktor" in (r.payload.get("Funkcija", "") or "").lower():
+                        continue
+                points.append(r)
+
+        if next_offset is None or len(records) == 0:
+            break
+        offset = next_offset
+
     u = sredi_upit(upit)
 
     # Helper: da li je zapis LOGO (ne dokument — dokumenti mogu imati slike)
