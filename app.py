@@ -432,18 +432,21 @@ def handle_dijagram(upit):
     points = scroll_tip("dijagram", limit=200)
     u = sredi_upit(upit)
 
-    # Helper: da li je zapis LOGO
-    def je_logo(payload):
+    # Helper: da li je zapis LOGO ili čist dokument
+    def je_logo_ili_dokument(payload):
         tekst = (payload.get("tekst", "") or payload.get("Objekat", "") or "").lower()
         izvor = (payload.get("izvor", "") or "").lower()
         naziv = (payload.get("naziv_dokumenta", "") or "").lower()
+        opis = (payload.get("vizuel_opis", "") or "").lower()
         if "logo" in tekst[:200] or "logo" in izvor or "logo" in naziv:
             return True
         if "fotobaza" in izvor or "fotobaza" in naziv:
             return True
-        # Dokumenti (narudžbenice, admin) — preskoči
-        opis = (payload.get("vizuel_opis", "") or "").lower()
-        if "narudzben" in opis or "dokument sadrzi" in opis or "administrativn" in opis:
+        # Samo AKO nema vizuel_opis ILI opis kaže "dokument"
+        if not opis:
+            return True
+        # Ako opis jasno kaže da je to narudžbenica/dokument
+        if "narudzben" in opis:
             return True
         return False
 
@@ -451,7 +454,7 @@ def handle_dijagram(upit):
     svi_dijagrami = []
     for p in points:
         payload = p.payload or {}
-        if je_logo(payload):
+        if je_logo_ili_dokument(payload):
             continue
         url = payload.get("Link", "") or payload.get("slika_url", "")
         if not url or not url.startswith("http"):
@@ -462,7 +465,7 @@ def handle_dijagram(upit):
         svi_dijagrami.append((url, caption, opis.lower(), izvor.lower()))
 
     if not svi_dijagrami:
-        return "⚠️ Nema dijagrama u bazi (samo logo/dokumenti).", []
+        return "⚠️ Nema dijagrama u bazi (svi su logo/dokumenti).", []
 
     # 1. Pretraga po tipu (ruža vetrova, klimatski, mapa)
     specificni_kw = ["vetrova", "ruza vetrova", "wind", "klimatski", "klimadijagram",
@@ -731,12 +734,8 @@ def detektuj_tip(upit):
         return f"clan_{m.group(1)}"
 
     # EKSTERNO — pitanja o poznatim ličnostima (pre person routing)
-    ekstern_licnosti = [
-        "ministar", "predsednik", "premijer", "vladar", "kralj",
-        "kraljica", "generalni sekretar", "guverner", "ambasador",
-        "predsedavajuci", "potpredsednik", "selo",
-    ]
-    if any(kw in u for kw in ekstern_licnosti):
+    # Koristimo regex za pokrivanje svih padeža i množine
+    if re.search(r'\b(minist|predsed|premijer|vladar|kralj|guverne|ambasad|potpredsed)', u):
         if "direktor" not in u and "zamenik" not in u and "biro" not in u:
             return "eksterno"
 
