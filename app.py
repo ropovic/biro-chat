@@ -427,9 +427,10 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
-    """Dijagram: skroluje dijagram tip, koristi vizuel_opis/ocr_tekst za pretragu.
-    Filtrira logo zapise. Ako nema specifičnog matcha, vraća dostupne dijagrame."""
-    points = scroll_tip("dijagram", limit=200)
+    """Dijagram: skroluje dijagram + vizuel tip (hybrid ih je preimenovao),
+    koristi vizuel_opis/ocr_tekst za pretragu. Filtrira logo zapise."""
+    # Hybrid skripta je neke "dijagram" preimenovala u "vizuel" — gledamo oba
+    points = scroll_tip("dijagram", limit=200) + scroll_tip("vizuel", limit=200)
     u = sredi_upit(upit)
 
     # Helper: da li je zapis LOGO (ne dokument — dokumenti mogu imati slike)
