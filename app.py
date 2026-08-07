@@ -427,54 +427,80 @@ def handle_oprema_specificno(upit):
 
 
 def handle_dijagram(upit):
-    """Dijagram: skeniraj dijagram tip, koristi ocr_tekst za pretragu.
-    Filtrira logo zapise (nemaju dijagram sa dijagram kao temom)."""
+    """Dijagram: skroluje dijagram tip, koristi vizuel_opis/ocr_tekst za pretragu.
+    Filtrira logo zapise. Koristi vizuel_opis ako postoji (Vision/heuristika)."""
     points = scroll_tip("dijagram", limit=200)
     u = sredi_upit(upit)
 
-    # Helper: da li je zapis LOGO (treba ga preskočiti)
+    # Helper: da li je zapis LOGO
     def je_logo(payload):
         tekst = (payload.get("tekst", "") or payload.get("Objekat", "") or "").lower()
         izvor = (payload.get("izvor", "") or "").lower()
         naziv = (payload.get("naziv_dokumenta", "") or "").lower()
-        # Logo indikatori
         if "logo" in tekst[:200] or "logo" in izvor or "logo" in naziv:
             return True
         if "fotobaza" in izvor or "fotobaza" in naziv:
             return True
         return False
 
-    # Ako korisnik traži specifično (ruža vetrova), pokušaj prvo sa filterom
-    if any(kw in u for kw in ["vetrova", "ruza vetrova", "wind", "klimatski"]):
+    # Ako korisnik traži specifično (ruža vetrova, klimatski, mapa)
+    specificni_kw = ["vetrova", "ruza vetrova", "wind", "klimatski", "klimadijagram",
+                     "temperatura", "padavine", "mapa", "karta"]
+    if any(kw in u for kw in specificni_kw):
         filtrirane = []
         for p in points:
             payload = p.payload or {}
             if je_logo(payload):
-                continue  # preskoči logo
+                continue
             tekst = sredi_upit(payload.get("tekst", "") or "")
             ocr = sredi_upit(payload.get("ocr_tekst", "") or "")
+            opis = sredi_upit(payload.get("vizuel_opis", "") or "")
             url = payload.get("Link", "") or payload.get("slika_url", "")
-            if ("vetrova" in ocr or "vetrova" in tekst or "wind" in ocr
-                or "ruza" in tekst or "pravac" in tekst or "klim" in tekst):
+            izvor = payload.get("izvor", "") or "Dijagram"
+
+            # Pretraga po svim tekstualnim poljima
+            full_text = f"{ocr} {tekst} {opis} {izvor}"
+            if ("vetrova" in full_text or "wind" in full_text
+                or "klim" in full_text or "mapa" in full_text or "karta" in full_text):
                 if url and url.startswith("http"):
-                    filtrirane.append((url, payload.get("izvor", "") or "Dijagram"))
+                    caption = opis[:80] if opis else izvor
+                    filtrirane.append((url, caption))
         if filtrirane:
-            return f"**Pronađeno {len(filtrirane)} dijagrama vetrova:**", filtrirane[:6]
-        # Ako nema specifičnih, vrati poruku
-        return "⚠️ Nema dijagrama ruže vetrova u bazi. Probaj drugi tip dijagrama.", []
+            return f"**Pronađeno {len(filtrirane)} dijagrama:**", filtrirane[:6]
 
     # Filtriraj logo zapise
     slike = []
     for p in points:
         payload = p.payload or {}
         if je_logo(payload):
-            continue  # preskoči logo
+            continue
         url = payload.get("Link", "") or payload.get("slika_url", "")
         if url and url.startswith("http"):
-            slike.append((url, payload.get("izvor", "") or "Dijagram"))
+            opis = payload.get("vizuel_opis", "")
+            izvor = payload.get("izvor", "") or "Dijagram"
+            caption = opis[:80] if opis else izvor
+            slike.append((url, caption))
 
     if not slike:
         return "⚠️ Nema dijagrama u bazi (samo logo zapisi pronađeni).", []
+
+    # Ako korisnik pita za lokaciju (npr. "dijagram za Crni Vrh"), filtriraj
+    lokacije = ["crni vrh", "stig", "vranjaca", "donji pek", "beograd", "kucevo",
+                "timoska", "banat", "backa", "srem"]
+    target_lok = None
+    for lok in lokacije:
+        if lok in u:
+            target_lok = lok
+            break
+
+    if target_lok:
+        filtrirane = []
+        for url, cap in slike:
+            if target_lok in cap.lower() or target_lok in u:
+                filtrirane.append((url, cap))
+        if filtrirane:
+            return f"**Pronađeno {len(filtrirane)} dijagrama za '{target_lok}':**", filtrirane[:6]
+
     return f"**Pronađeno {len(slike)} dijagrama:**", slike[:6]
 
 
