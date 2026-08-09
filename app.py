@@ -62,6 +62,19 @@ def get_qdrant():
         ensure_collections(q, COLLECTION_PREFIX, text_dim=1024)
     except Exception as e:
         print(f"ensure_collections: {e}")
+    # Osiguraj `tip` index i na STAROJ bazi (baza_cloud_v2_e5)
+    try:
+        for field in ("tip", "filename", "source", "Funkcija"):
+            try:
+                q.create_payload_index(
+                    collection_name=LEGACY_COLLECTION,
+                    field_name=field,
+                    field_schema="keyword",
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"legacy index: {e}")
     return q
 
 
