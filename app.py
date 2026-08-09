@@ -280,41 +280,90 @@ def _parse_ime(tekst: str):
     return None
 
 
+# Kompletna mapa imena: genitiv → nominativ (na osnovu korisničkih ispravki)
+IMENA_MAP = {
+    # Ime + Prezime
+    "Aleksandre Katić": "Aleksandra Katić",
+    "Aleksandre Katića": "Aleksandra Katić",
+    "Arsenija Simića": "Arsenije Simić",
+    "Biljane Mirković": "Biljana Mirković",
+    "Biljane Mirkovića": "Biljana Mirković",
+    "Bojane Jelić": "Bojana Jelić",
+    "Bojane Jelića": "Bojana Jelić",
+    "Boška Maleševića": "Boško Malešević",
+    "Brane Vamovića": "Brano Vamović",
+    "Darka Živanovića": "Darko Živanović",
+    "Dragane Miladinović": "Dragana Miladinović",
+    "Dragane Miladinovića": "Dragana Miladinović",
+    "Gorana Ćaldovića": "Goran Ćaldović",
+    "Marine Đukelić": "Marina Đukelić",
+    "Marine Đukelića": "Marina Đukelić",
+    "Mirka Kovačevića": "Mirko Kovačević",
+    "Mirka Simonovića": "Mirko Simonović",
+    "Nebojše Ivoševića": "Nebojša Ivošević",
+    "Nenada Vamovića": "Nenad Vamović",
+    "Nenada Vereša": "Nenad Vereš",
+    "Predraga Dedijera": "Predrag Dedijer",
+    "Radoja Ščekića": "Radoje Ščekić",
+    "Saše Perduha": "Saša Perduh",
+    "Snežane Dubovac": "Snežana Dubovac",
+    "Snežane Dubovca": "Snežana Dubovac",
+    "Svetlane Mihajlović": "Svetlana Mihajlović",
+    "Svetlane Mihajlovića": "Svetlana Mihajlović",
+    "Vedrane Miljković": "Vedrana Miljković",
+    "Vedrane Miljkovića": "Vedrana Miljković",
+    "Vladimira Milovanovića": "Vladimir Milovanović",
+    "Vuka Čeperkovića": "Vuk Čeperković",
+    "Zorana Petrovića": "Zoran Petrović",
+    "Čede Vukovića": "Čedomir Vuković",
+    # Varijante bez prezimena
+    "Aleksandre": "Aleksandra",
+    "Arsenija": "Arsenije",
+    "Biljane": "Biljana",
+    "Bojane": "Bojana",
+    "Boška": "Boško",
+    "Brane": "Brano",
+    "Darka": "Darko",
+    "Dragane": "Dragana",
+    "Gorana": "Goran",
+    "Marine": "Marina",
+    "Mirka": "Mirko",
+    "Nebojše": "Nebojša",
+    "Nenada": "Nenad",
+    "Predraga": "Predrag",
+    "Radoja": "Radoje",
+    "Saše": "Saša",
+    "Snežane": "Snežana",
+    "Svetlane": "Svetlana",
+    "Vedrane": "Vedrana",
+    "Vladimira": "Vladimir",
+    "Vuka": "Vuk",
+    "Zorana": "Zoran",
+    "Čede": "Čedomir",
+}
+
+
 def _gen2nom(ime_gen: str) -> str:
-    """Konverzija iz genitiva u nominativ.
-    Popravlja SAMO prezime (skida genitivno -a), ime ostaje kako je.
-    Time dobijamo 'Predrag Dedijer' umesto 'Predrag Dedijera'."""
+    """Konverzija iz genitiva u nominativ preko IMENA_MAP, sa fallback heuristikom."""
+    if not ime_gen:
+        return ime_gen
+    # Tačan match
+    if ime_gen in IMENA_MAP:
+        return IMENA_MAP[ime_gen]
+    # Case-insensitive match
+    for k, v in IMENA_MAP.items():
+        if k.lower() == ime_gen.lower():
+            return v
+    # Fallback: skini -a sa prezimena
     reci = ime_gen.split()
     if len(reci) < 2:
         return ime_gen
     ime = reci[0]
     prezime = " ".join(reci[1:])
-
-    # Specifični izuzeci za imena
-    IZUZECI = {
-        "Brana": "Brano",
-        "Vuko": "Vuk",
-        "Mirka": "Mirko",
-        "Nebojše": "Nebojša",
-        "Aleksandre": "Aleksandra",
-        "Svetlane": "Svetlana",
-        "Vladimira": "Vladimir",
-        "Dragane": "Dragana",
-        "Marine": "Marina",
-        "Vedrane": "Vedrana",
-        "Snežane": "Snežana",
-        "Biljane": "Biljana",
-        "Bojane": "Bojana",
-        "Čede": "Čedomir",  # ili samo "Čedomir"
-    }
-    ime_nom = IZUZECI.get(ime, ime)
-
-    # Prezime: -a na kraju je gen → skini ga
     prezime_nom = prezime
     if prezime.endswith('a') and len(prezime) > 3:
         prezime_nom = prezime[:-1]
-
-    return f"{ime_nom} {prezime_nom}"
+    return f"{ime} {prezime_nom}"
 
 
 def _parse_pozicija(tekst: str):
@@ -553,9 +602,13 @@ def handle_dijagram(upit: str):
 
     if not relevantni:
         if trazim_wind_rose:
-            # Nema wind rose specifično, prikaži svih 88 ali sa obaveštenjem
             relevantni = svi_docs[:5]
-            info = f"⚠️ Nema wind rose (ruže vetrova) specifično u bazi. Pronađeno {len(svi_docs)} drugih dijagrama, evo prvih {len(relevantni)}:\n\n"
+            info = (
+                f"⚠️ **Nema dijagrama ruže vetrova** specifično u bazi.\n\n"
+                f"Pronađeno je {len(svi_docs)} drugih dijagrama u bazi "
+                f"(uglavnom projektne dokumentacije). Evo prvih {len(relevantni)}:\n\n"
+                f"💡 Savet: probaj 'dijagram projekta', 'shema gazdovanja' ili konkretnu godišnju osnovu."
+            )
         else:
             relevantni = svi_docs[:5]
             info = f"⚠️ Nema specifičnog '{upit}', ali evo {len(relevantni)} dijagrama iz baze:\n\n"
@@ -639,7 +692,20 @@ def handle_clan(broj: str):
                         pogodci.append({"tekst": clan_tekst, "izvor": d.get("filename", "")})
 
     if not pogodci:
-        return f"⚠️ Član {broj} nije pronađen. Probaj: 'pravilnik o radu', 'ugovor o radu clan 14', ili pitaj koji dokumenti postoje.", []
+        # Pokušaj da nađeš bilo šta slično
+        hint_dokumenti = set()
+        for d in retrieve_legacy(tip="pravni_akt", k=200):
+            izvor = d.get("izvor", "")
+            if izvor and "pravil" in izvor.lower():
+                hint_dokumenti.add(izvor)
+
+        hint = f"⚠️ Član {broj} nije pronađen u bazi."
+        if hint_dokumenti:
+            hint += f"\n\n💡 Dostupni pravni akti:\n"
+            for h in sorted(hint_dokumenti)[:5]:
+                hint += f"  - {h}\n"
+            hint += f"\nProbaj specifičniji upit: 'pravilnik o radu', 'kolektivni ugovor', ili pitaj 'koji pravilnici postoje'."
+        return hint, []
 
     pogodci.sort(key=lambda x: -len(x["tekst"]))
     p = pogodci[0]
