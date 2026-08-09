@@ -96,18 +96,22 @@ def sredi_upit(text: str) -> str:
 # ============================================================
 # RETRIEVER (optimizovan)
 # ============================================================
-def retrieve(query: str, k: int = 10, tip_filter: str = None) -> List[dict]:
-    """Semantic search sa opcionalnim filterom po tipu."""
+LEGACY_COLLECTION = "baza_cloud_v2_e5"  # stara baza, 768d, klasifikovana
+
+
+def retrieve(query: str, k: int = 10, tip_filter: str = None, source: str = None) -> List[dict]:
+    """Semantic search u NOVOJ bazi (biro_v2_text, 1024d)."""
     embeddings = get_embeddings()
     qdrant = get_qdrant()
 
     q_vec = embeddings.embed_query(query)
 
-    search_filter = None
+    must = []
     if tip_filter:
-        search_filter = models.Filter(
-            must=[models.FieldCondition(key="tip", match=models.MatchValue(value=tip_filter))]
-        )
+        must.append(models.FieldCondition(key="tip", match=models.MatchValue(value=tip_filter)))
+    if source:
+        must.append(models.FieldCondition(key="source", match=models.MatchValue(value=source)))
+    search_filter = models.Filter(must=must) if must else None
 
     try:
         results = qdrant.query_points(
@@ -123,11 +127,49 @@ def retrieve(query: str, k: int = 10, tip_filter: str = None) -> List[dict]:
                 "text": payload.get("text", ""),
                 "filename": payload.get("filename", ""),
                 "tip": payload.get("tip", ""),
+                "source": payload.get("source", ""),
+                "Funkcija": payload.get("Funkcija", ""),
+                "Link": payload.get("Link", ""),
                 "score": point.score,
             })
         return docs
     except Exception as e:
         st.error(f"Greška pri pretrazi: {e}")
+        return []
+
+
+def retrieve_legacy(tip: str = None, k: int = 100) -> List[dict]:
+    """Scroll sa filterom u STAROJ bazi (baza_cloud_v2_e5, 768d).
+    Koristi se za specifične upite gde `tip` polje već postoji."""
+    qdrant = get_qdrant()
+
+    must = []
+    if tip:
+        must.append(models.FieldCondition(key="tip", match=models.MatchValue(value=tip)))
+    scroll_filter = models.Filter(must=must) if must else None
+
+    try:
+        results, _ = qdrant.scroll(
+            collection_name=LEGACY_COLLECTION,
+            limit=k,
+            scroll_filter=scroll_filter,
+            with_payload=True,
+            with_vectors=False,
+        )
+        docs = []
+        for r in results:
+            payload = r.payload or {}
+            docs.append({
+                "text": payload.get("text", ""),
+                "filename": payload.get("filename", ""),
+                "tip": payload.get("tip", ""),
+                "source": payload.get("source", ""),
+                "Funkcija": payload.get("Funkcija", ""),
+                "Link": payload.get("Link", ""),
+            })
+        return docs
+    except Exception as e:
+        st.error(f"Greška u legacy pretraga: {e}")
         return []
 
 
@@ -210,9 +252,8 @@ def detektuj_tip(upit: str) -> str:
 # HANDLERI
 # ============================================================
 def handle_direktor():
-    """Traži direktora u foto zapisima."""
-    # Koristimo semantic search sa specifičnim upitom
-    docs = retrieve("direktor Biro za planiranje", k=30)
+    """Traži direktora u legacy bazi (gde je `tip=fotografija_profil`)."""
+    docs = retrieve_legacy(tip="fotografija_profil", k=200)
 
     direktori = []
     zamenici = []
@@ -228,12 +269,29 @@ def handle_direktor():
         if m and m.group(1) not in seen:
             ime = m.group(1)
             seen.add(ime)
-            # Odredi funkciju iz teksta
             text_lower = text.lower()
             if "zamenik" in text_lower and "direktor" in text_lower:
                 zamenici.append(ime)
             elif "direktor" in text_lower:
                 direktori.append(ime)
+
+    # Fallback: probaj i u novoj bazi
+    if not direktori and not zamenici:
+        novi = retrieve("direktor Biro za planiranje", k=50)
+        for d in novi:
+            text = d.get("text", "")
+            for m in re.finditer(
+                r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)',
+                text
+            ):
+                ime = m.group(1)
+                if ime not in seen and len(ime) > 5:
+                    seen.add(ime)
+                    text_lower = text.lower()
+                    if "zamenik" in text_lower:
+                        zamenici.append(ime)
+                    elif "direktor" in text_lower:
+                        direktori.append(ime)
 
     output = ""
     if direktori:
@@ -247,15 +305,14 @@ def handle_direktor():
 
 
 def handle_lista_zaposlenih():
-    """Svi zaposleni iz foto zapisa."""
-    docs = retrieve("zaposleni Biro za planiranje", k=50)
+    """Svi zaposleni iz legacy baze."""
+    docs = retrieve_legacy(tip="fotografija_profil", k=200)
 
     zaposleni = []
     seen = set()
 
     for d in docs:
         text = d.get("text", "")
-        # Nađi SVA imena u tekstu
         for m in re.finditer(
             r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)',
             text
@@ -264,6 +321,20 @@ def handle_lista_zaposlenih():
             if ime not in seen and len(ime) > 5:
                 seen.add(ime)
                 zaposleni.append(ime)
+
+    # Fallback: probaj u novoj bazi
+    if not zaposleni:
+        novi = retrieve("zaposleni Biro za planiranje lista", k=100)
+        for d in novi:
+            text = d.get("text", "")
+            for m in re.finditer(
+                r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđž]+\s+[A-ZČĆŠĐŽ][a-zčćšđž]+)',
+                text
+            ):
+                ime = m.group(1)
+                if ime not in seen and len(ime) > 5:
+                    seen.add(ime)
+                    zaposleni.append(ime)
 
     if not zaposleni:
         return "⚠️ Nisu pronađeni zaposleni u bazi.", []
@@ -275,35 +346,43 @@ def handle_lista_zaposlenih():
 
 
 def handle_oprema(upit: str):
-    """Oprema - razdvaja štampače od tonera prema upitu."""
+    """Oprema - koristi legacy bazu (gde je `tip=oprema`)."""
     u = upit.lower()
     samo_toner = any(kw in u for kw in ["toner", "kertrid", "kertridž", "cartridge"])
     samo_stampac = any(kw in u for kw in ["stampac", "štampac", "štampač", "printer"])
     samo_racunar = any(kw in u for kw in ["racun", "račun", "kompjut", "laptop", "monitor", "skener"])
 
+    # Probaj prvo legacy (gde je oprema klasifikovana)
     svi_docs = []
     seen_ids = set()
 
-    if samo_toner:
-        queries = ["toner kertridž TK- PFI CL- zamena", "toner model TK-"]
-    elif samo_stampac:
-        queries = ["štampač printer model Kyocera TASKalfa ECOSYS HP Canon"]
-    elif samo_racunar:
-        queries = ["računar IT oprema laptop monitor skener", "računarski sistem"]
-    else:
-        queries = [
-            "štampač printer model Kyocera TASKalfa ECOSYS HP Canon",
-            "toner kertridž TK- PFI CL- zamena",
-            "IT oprema računar monitor skener laptop",
-        ]
+    legacy_docs = retrieve_legacy(tip="oprema", k=500)
+    for d in legacy_docs:
+        key = d.get("text", "")[:100]
+        if key not in seen_ids:
+            seen_ids.add(key)
+            svi_docs.append(d)
 
-    for q in queries:
-        docs = retrieve(q, k=15)
-        for d in docs:
-            key = d.get("text", "")[:100]
-            if key not in seen_ids:
-                seen_ids.add(key)
-                svi_docs.append(d)
+    # Ako nema dovoljno, probaj i embedding search u obe baze
+    if len(svi_docs) < 5:
+        if samo_toner:
+            queries = ["toner kertridž TK- PFI CL- zamena", "toner model TK-"]
+        elif samo_stampac:
+            queries = ["štampač printer model Kyocera TASKalfa ECOSYS HP Canon"]
+        elif samo_racunar:
+            queries = ["računar IT oprema laptop monitor skener", "računarski sistem"]
+        else:
+            queries = [
+                "štampač printer model Kyocera TASKalfa ECOSYS HP Canon",
+                "toner kertridž TK- PFI CL- zamena",
+                "IT oprema računar monitor skener laptop",
+            ]
+        for q in queries:
+            for d in retrieve(q, k=15):
+                key = d.get("text", "")[:100]
+                if key not in seen_ids:
+                    seen_ids.add(key)
+                    svi_docs.append(d)
 
     printer_pat = re.compile(
         r'\b(?:Kyocera\s+[\w-]+|HP\s+(?:LaserJet|OfficeJet|PageWide|Designjet)\s+[\w]+|'
@@ -325,21 +404,18 @@ def handle_oprema(upit: str):
 
     output = ""
     if samo_toner:
-        # Samo toneri
         if toneri:
             output = f"**Toneri ({len(toneri)}):**\n"
             output += "\n".join(f"- {t}" for t in sorted(toneri))
         else:
             output = "⚠️ Nema tonera u bazi."
     elif samo_stampac:
-        # Samo štampači
         if stampaci:
             output = f"**Štampači ({len(stampaci)}):**\n"
             output += "\n".join(f"- {s}" for s in sorted(stampaci))
         else:
             output = "⚠️ Nema štampača u bazi."
     else:
-        # Sve
         if stampaci:
             output += f"**Štampači ({len(stampaci)}):**\n"
             output += "\n".join(f"- {s}" for s in sorted(stampaci)) + "\n\n"
@@ -353,14 +429,30 @@ def handle_oprema(upit: str):
 
 
 def handle_dijagram(upit: str):
-    """Dijagram - koristi semantic search za dijagrame."""
+    """Dijagram - koristi legacy bazu (`tip=dijagram`)."""
     # Specifičan upit za wind rose
     q = "wind rose dijagram ruža vetrova klima grafikon"
-    docs = retrieve(q, k=10)
 
-    # Filtriraj zapise koji imaju vizuel_opis ili specifične ključne reči
+    svi_docs = []
+    seen_ids = set()
+
+    # 1. Legacy baza (dijagram klasa)
+    for d in retrieve_legacy(tip="dijagram", k=500):
+        key = d.get("text", "")[:100]
+        if key not in seen_ids:
+            seen_ids.add(key)
+            svi_docs.append(d)
+
+    # 2. Embedding search u obe baze
+    for d in retrieve(q, k=15):
+        key = d.get("text", "")[:100]
+        if key not in seen_ids:
+            seen_ids.add(key)
+            svi_docs.append(d)
+
+    # Filtriraj zapise koji imaju relevantne ključne reči
     relevantni = []
-    for d in docs:
+    for d in svi_docs:
         text = d.get("text", "").lower()
         if any(kw in text for kw in ["wind", "rose", "ruza", "vetrova", "vetar",
                                       "klimatski", "dijagram", "grafikon"]):
@@ -379,10 +471,7 @@ def handle_dijagram(upit: str):
 
 
 def handle_clan(broj: str):
-    """Pravni član - koristi semantic search za pravne akte."""
-    # Pretraži pravne akte sa filterom
-    docs = retrieve(f"clan {broj} ugovor zakon pravilnik", k=30, tip_filter="pravni_akt")
-
+    """Pravni član - koristi legacy bazu (`tip=pravni_akt`)."""
     pattern = re.compile(
         rf'(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*{re.escape(broj)}\b(.*?)'
         rf'(?=(?:clan|clana|clanom|clanu|clane|cl\.|cln\.)\s*\d+\b|$)',
@@ -390,49 +479,59 @@ def handle_clan(broj: str):
     )
 
     pogodci = []
-    for d in docs:
+    seen = set()
+
+    # 1. Legacy baza sa filterom
+    for d in retrieve_legacy(tip="pravni_akt", k=1000):
         text = d.get("text", "")
         for m in pattern.finditer(text):
             clan_tekst = m.group(0).strip()
             if 30 < len(clan_tekst) < 4000:
-                pogodci.append({
-                    "tekst": clan_tekst,
-                    "izvor": d.get("filename", ""),
-                })
+                k = sredi_upit(clan_tekst[:200])
+                if k not in seen:
+                    seen.add(k)
+                    pogodci.append({"tekst": clan_tekst, "izvor": d.get("filename", "")})
 
+    # 2. Fallback: embedding search u obe baze
     if not pogodci:
-        # Bez filtera
-        docs = retrieve(f"clan {broj} pravo", k=30)
-        for d in docs:
+        for d in retrieve(f"clan {broj} ugovor zakon pravilnik", k=30):
             text = d.get("text", "")
             for m in pattern.finditer(text):
                 clan_tekst = m.group(0).strip()
                 if 30 < len(clan_tekst) < 4000:
-                    pogodci.append({"tekst": clan_tekst, "izvor": d.get("filename", "")})
+                    k = sredi_upit(clan_tekst[:200])
+                    if k not in seen:
+                        seen.add(k)
+                        pogodci.append({"tekst": clan_tekst, "izvor": d.get("filename", "")})
 
     if not pogodci:
         return f"⚠️ Član {broj} nije pronađen.", []
 
-    seen = set()
-    uniq = []
-    for p in pogodci:
-        k = sredi_upit(p["tekst"][:200])
-        if k not in seen:
-            seen.add(k)
-            uniq.append(p)
-    uniq.sort(key=lambda x: -len(x["tekst"]))
-    p = uniq[0]
+    pogodci.sort(key=lambda x: -len(x["tekst"]))
+    p = pogodci[0]
     return f"**Члан {broj}** (izvor: {p['izvor']}):\n\n{p['tekst']}", []
 
 
 def handle_osoba_po_imenu(upit: str):
-    """Pretraga po imenu."""
-    docs = retrieve(upit, k=15)
-    if not docs:
+    """Pretraga po imenu — kombinacija obe baze."""
+    svi_docs = []
+    seen = set()
+    for d in retrieve(upit, k=15):
+        key = d.get("text", "")[:100]
+        if key not in seen:
+            seen.add(key)
+            svi_docs.append(d)
+    for d in retrieve_legacy(tip="fotografija_profil", k=50):
+        key = d.get("text", "")[:100]
+        if key not in seen:
+            seen.add(key)
+            svi_docs.append(d)
+
+    if not svi_docs:
         return "Nema rezultata.", []
 
-    output = f"Pronađeno {len(docs)} rezultata:\n\n"
-    for i, d in enumerate(docs[:5]):
+    output = f"Pronađeno {len(svi_docs)} rezultata:\n\n"
+    for i, d in enumerate(svi_docs[:5]):
         text = d.get("text", "")[:200]
         output += f"**[{i+1}]** {d.get('filename', '')}\n{text}...\n\n"
     return output, []
