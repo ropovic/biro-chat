@@ -1,5 +1,5 @@
 """
-biro_app_v7.py — LangChain Streamlit aplikacija
+app.py — LangChain Streamlit aplikacija
 =================================================
 Kompletna RAG aplikacija sa:
 - LangChain za orkestraciju
@@ -16,10 +16,11 @@ Env varijable:
     COLLECTION_PREFIX (default: biro_v2)
 
 Pokretanje:
-    streamlit run biro_app_v7.py
+    streamlit run app.py
 """
 
 import os
+COLLECTION_PREFIX = os.environ.get("COLLECTION_PREFIX", "biro_v2")
 import sys
 import re
 import time
