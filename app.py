@@ -21,7 +21,7 @@ from qdrant_client import models
 from langchain_core.documents import Document
 from langchain_groq import ChatGroq
 
-from biro_chain import BiroEmbeddings, get_qdrant_client
+from biro_chain import BiroEmbeddings, get_qdrant_client, ensure_collections
 
 
 # ============================================================
@@ -56,7 +56,13 @@ def get_embeddings():
 
 @st.cache_resource
 def get_qdrant():
-    return get_qdrant_client()
+    q = get_qdrant_client()
+    # Osiguraj da kolekcije i indeksi postoje (za stare i nove)
+    try:
+        ensure_collections(q, COLLECTION_PREFIX, text_dim=1024)
+    except Exception as e:
+        print(f"ensure_collections: {e}")
+    return q
 
 
 @st.cache_resource
@@ -269,20 +275,27 @@ def handle_lista_zaposlenih():
 
 
 def handle_oprema(upit: str):
-    """Oprema - koristi semantic search sa specifičnim upitom."""
-    # Pretraži sa više upita da pokrijemo sve
+    """Oprema - razdvaja štampače od tonera prema upitu."""
+    u = upit.lower()
+    samo_toner = any(kw in u for kw in ["toner", "kertrid", "kertridž", "cartridge"])
+    samo_stampac = any(kw in u for kw in ["stampac", "štampac", "štampač", "printer"])
+    samo_racunar = any(kw in u for kw in ["racun", "račun", "kompjut", "laptop", "monitor", "skener"])
+
     svi_docs = []
     seen_ids = set()
 
-    queries = [
-        "štampač printer Kyocera TASKalfa ECOSYS HP Canon",
-        "toner kertridž TK- PFI CL-",
-        "IT oprema računar monitor skener laptop"
-    ]
-    if "toner" in upit.lower() or "kertrid" in upit.lower():
-        queries = ["toner kertridž TK- PFI CL-", "toner zamena"]
-    elif "racun" in upit.lower():
-        queries = ["računar IT oprema", "računar laptop"]
+    if samo_toner:
+        queries = ["toner kertridž TK- PFI CL- zamena", "toner model TK-"]
+    elif samo_stampac:
+        queries = ["štampač printer model Kyocera TASKalfa ECOSYS HP Canon"]
+    elif samo_racunar:
+        queries = ["računar IT oprema laptop monitor skener", "računarski sistem"]
+    else:
+        queries = [
+            "štampač printer model Kyocera TASKalfa ECOSYS HP Canon",
+            "toner kertridž TK- PFI CL- zamena",
+            "IT oprema računar monitor skener laptop",
+        ]
 
     for q in queries:
         docs = retrieve(q, k=15)
@@ -292,7 +305,6 @@ def handle_oprema(upit: str):
                 seen_ids.add(key)
                 svi_docs.append(d)
 
-    # Regex za specifične modele
     printer_pat = re.compile(
         r'\b(?:Kyocera\s+[\w-]+|HP\s+(?:LaserJet|OfficeJet|PageWide|Designjet)\s+[\w]+|'
         r'Canon\s+(?:imageRUNNER|PIXMA|TX-\d+)|TASKalfa\s+[\w-]+|ECOSYS\s+[\w-]+|'
@@ -312,14 +324,32 @@ def handle_oprema(upit: str):
             toneri.add(m.strip())
 
     output = ""
-    if stampaci:
-        output += f"**Štampači ({len(stampaci)}):**\n"
-        output += "\n".join(f"- {s}" for s in sorted(stampaci)) + "\n\n"
-    if toneri:
-        output += f"**Toneri ({len(toneri)}):**\n"
-        output += "\n".join(f"- {t}" for t in sorted(toneri))
+    if samo_toner:
+        # Samo toneri
+        if toneri:
+            output = f"**Toneri ({len(toneri)}):**\n"
+            output += "\n".join(f"- {t}" for t in sorted(toneri))
+        else:
+            output = "⚠️ Nema tonera u bazi."
+    elif samo_stampac:
+        # Samo štampači
+        if stampaci:
+            output = f"**Štampači ({len(stampaci)}):**\n"
+            output += "\n".join(f"- {s}" for s in sorted(stampaci))
+        else:
+            output = "⚠️ Nema štampača u bazi."
+    else:
+        # Sve
+        if stampaci:
+            output += f"**Štampači ({len(stampaci)}):**\n"
+            output += "\n".join(f"- {s}" for s in sorted(stampaci)) + "\n\n"
+        if toneri:
+            output += f"**Toneri ({len(toneri)}):**\n"
+            output += "\n".join(f"- {t}" for t in sorted(toneri))
+        if not output:
+            output = "⚠️ Nema specifične opreme u bazi (probaj drugi upit)."
 
-    return output or "Nema specifične opreme u bazi (probaj drugi upit).", []
+    return output, []
 
 
 def handle_dijagram(upit: str):

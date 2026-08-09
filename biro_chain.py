@@ -428,20 +428,17 @@ def ensure_collections(qdrant: QdrantClient, collection_prefix: str = "biro", te
             collection_name=text_col,
             vectors_config=VectorParams(size=text_dim, distance=Distance.COSINE),
         )
-        # Payload indeksi za filtere
+
+    # Payload indeksi (i za nove i za postojeće kolekcije)
+    for field in ("filename", "source", "tip", "Funkcija"):
         try:
             qdrant.create_payload_index(
                 collection_name=text_col,
-                field_name="filename",
+                field_name=field,
                 field_schema="keyword",
             )
-            qdrant.create_payload_index(
-                collection_name=text_col,
-                field_name="source",
-                field_schema="keyword",
-            )
-        except Exception as e:
-            print(f"   ⚠ Index creation: {e}")
+        except Exception:
+            pass  # već postoji
 
     # Image collection (512 dim)
     image_col = f"{collection_prefix}_images"
@@ -450,10 +447,11 @@ def ensure_collections(qdrant: QdrantClient, collection_prefix: str = "biro", te
             collection_name=image_col,
             vectors_config=VectorParams(size=512, distance=Distance.COSINE),
         )
+    for field in ("filename", "tip"):
         try:
             qdrant.create_payload_index(
                 collection_name=image_col,
-                field_name="filename",
+                field_name=field,
                 field_schema="keyword",
             )
         except Exception:
