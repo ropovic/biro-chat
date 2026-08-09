@@ -6,11 +6,7 @@ langchain-groq
 langchain-community
 pypdf
 docx2txt
-paddlepaddle
-paddleocr
-easyocr
 pandas
 openpyxl
 Pillow
 requests
-httpx
