@@ -493,7 +493,10 @@ with st.sidebar:
                 st.write("**Kolekcije u Qdrant:**")
                 for c in cols:
                     info = qd.get_collection(c)
-                    st.write(f"- `{c}`: {info.vectors_count} vektora")
+                    # Kompatibilnost: points_count ili vectors_count
+                    count = (getattr(info, "points_count", None) or
+                             getattr(info, "vectors_count", None) or 0)
+                    st.write(f"- `{c}`: {count} tačaka")
                 # Test embedding
                 emb = get_embeddings()
                 test_vec = emb.embed_query("test")
@@ -508,7 +511,9 @@ with st.sidebar:
                 for p in results.points:
                     st.write(f"  - {p.payload.get('filename', '?')} (tip={p.payload.get('tip', '?')})")
             except Exception as e:
+                import traceback
                 st.error(f"Greška: {e}")
+                st.code(traceback.format_exc())
 
     if st.button("🔄 Osveži keš"):
         st.cache_resource.clear()
