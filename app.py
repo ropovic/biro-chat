@@ -605,23 +605,66 @@ with st.sidebar:
                 st.write("**Kolekcije u Qdrant:**")
                 for c in cols:
                     info = qd.get_collection(c)
-                    # Kompatibilnost: points_count ili vectors_count
                     count = (getattr(info, "points_count", None) or
                              getattr(info, "vectors_count", None) or 0)
                     st.write(f"- `{c}`: {count} tačaka")
+
                 # Test embedding
                 emb = get_embeddings()
                 test_vec = emb.embed_query("test")
                 st.write(f"**Embedding dim:** {len(test_vec)}")
-                # Test search
+
+                # Test v2 search
                 results = qd.query_points(
                     collection_name=TEXT_COLLECTION,
                     query=test_vec,
                     limit=3,
                 )
-                st.write(f"**Test pretraga:** {len(results.points)} rezultata")
+                st.write(f"**v2 Test pretraga:** {len(results.points)} rezultata")
                 for p in results.points:
                     st.write(f"  - {p.payload.get('filename', '?')} (tip={p.payload.get('tip', '?')})")
+
+                # ===== LEGACY: broj zapisa po tipu =====
+                st.write("---")
+                st.write("**Legacy baza — `tip` vrednosti:**")
+                all_results, _ = qd.scroll(
+                    collection_name=LEGACY_COLLECTION,
+                    limit=5000,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                tip_count = {}
+                sample_po_tipu = {}
+                for r in all_results:
+                    t = (r.payload or {}).get("tip", "<nEMA>")
+                    tip_count[t] = tip_count.get(t, 0) + 1
+                    if t not in sample_po_tipu:
+                        sample_po_tipu[t] = (r.payload or {}).get("filename", "?")
+                for t, n in sorted(tip_count.items(), key=lambda x: -x[1]):
+                    st.write(f"  - `{t}`: {n} (primer: {sample_po_tipu[t]})")
+
+                # Test legacy filter
+                st.write("---")
+                st.write("**Legacy filter test `tip=fotografija_profil`:**")
+                try:
+                    f_results, _ = qd.scroll(
+                        collection_name=LEGACY_COLLECTION,
+                        limit=20,
+                        scroll_filter=models.Filter(
+                            must=[models.FieldCondition(
+                                key="tip",
+                                match=models.MatchValue(value="fotografija_profil")
+                            )]
+                        ),
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    st.write(f"Pronađeno: {len(f_results)} zapisa")
+                    for r in f_results[:5]:
+                        st.write(f"  - {(r.payload or {}).get('filename', '?')}")
+                except Exception as e:
+                    st.error(f"Filter test: {e}")
+
             except Exception as e:
                 import traceback
                 st.error(f"Greška: {e}")
