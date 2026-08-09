@@ -271,12 +271,50 @@ def detektuj_tip(upit: str) -> str:
 def _parse_ime(tekst: str):
     """Parsira 'Fotografija Ime Prezime, pozicija, ...' iz teksta."""
     m = re.search(
-        r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđžA-Z]+\s+[A-ZČĆŠĐŽ][a-zčćšđžA-Z]+)',
+        r'[Ff]otografij[ae]\s+([A-ZČĆŠĐŽ][a-zčćšđžA-Z]+\s+[A-ZČĆŠĐŽ][a-zčćšđžA-Z]+),',
         tekst
     )
     if m:
-        return m.group(1).strip()
+        gen = m.group(1).strip()
+        return _gen2nom(gen)
     return None
+
+
+def _gen2nom(ime_gen: str) -> str:
+    """Gruba konverzija iz genitiva u nominativ (npr. 'Aleksandre Katić' → 'Aleksandra Katić')."""
+    reci = ime_gen.split()
+    if len(reci) < 2:
+        return ime_gen
+    ime, *ostatak = reci
+    prezime = " ".join(ostatak)
+
+    # Ime iz genitiva u nominativ
+    ime_nom = ime
+    if ime.endswith(('re', 'ne', 'le', 'se')) and not ime.endswith(('tre', 'rne', 'sle')):
+        # žensko ime: Aleksandre → Aleksandra, Svetlane → Svetlana
+        ime_nom = ime[:-1] + 'a'
+    elif ime.endswith(('še', 'će', 'đe')) and len(ime) > 3:
+        # Nebojše → Nebojša (muško)
+        ime_nom = ime[:-1] + 'a'
+    elif ime.endswith('e') and ime not in ('Đorđe', 'Vlastimir'):
+        ime_nom = ime[:-1] + 'a'
+    elif ime.endswith('ka') and len(ime) > 3:
+        # žensko -ka: Mirka → Mira ili muško Mirka → Mirko
+        ime_nom = ime[:-2] + 'ko' if ime[0].isupper() else ime
+    elif ime.endswith('a') and len(ime) > 3:
+        # žensko -a: Aleksandra (već nominativ), Milana...
+        # Ako je "Aleksandra" (nominativ), ostavi. Ako je "Vladimira", prebaci.
+        # Vladimira (gen) → Vladimir (nom)
+        ime_nom = ime[:-1]
+
+    # Prezime: -ića, -ovića → -ić, -ović; ostalo ostaje
+    prezime_nom = prezime
+    if prezime.endswith('a') and len(prezime) > 4:
+        if any(prezime.lower().endswith(suf) for suf in
+               ('ića', 'ovića', 'ovića', 'ovića', 'ovića', 'ovića', 'ovića')):
+            prezime_nom = prezime[:-1]
+
+    return f"{ime_nom} {prezime_nom}"
 
 
 def _parse_pozicija(tekst: str):
@@ -444,28 +482,59 @@ def handle_oprema(upit: str):
 
 
 def handle_dijagram(upit: str):
-    """Dijagram - koristi legacy bazu."""
+    """Dijagram - koristi legacy bazu i ostale kolekcije."""
     u = upit.lower()
-    trazim_wind_rose = any(kw in u for kw in ["vetr", "rose", "ruza", "wind"])
+    trazim_wind_rose = any(kw in u for kw in ["vetr", "rose", "ruza", "wind", "klim"])
 
     svi_docs = []
     seen_ids = set()
 
-    # 1. Legacy baza (svi dijagrami)
-    for d in retrieve_legacy(tip="dijagram", k=500):
+    # 1. Legacy baza (dijagram klasa, 923 zapisa)
+    for d in retrieve_legacy(tip="dijagram", k=1000):
         key = d.get("text", "")[:100]
         if key not in seen_ids:
             seen_ids.add(key)
             svi_docs.append(d)
 
-    # 2. Embedding search u v2
-    for d in retrieve("dijagram šema grafikon", k=15):
+    # 2. Embedding search u v2 (klimatski, meteorologija, itd)
+    for d in retrieve("ruža vetrova wind rose klimatski dijagram", k=20):
         key = d.get("text", "")[:100]
         if key not in seen_ids:
             seen_ids.add(key)
             svi_docs.append(d)
 
-    # Filtriraj po ključnim rečima u tekstu ILI filename
+    # 3. Pretraži i ostale male kolekcije (baza_cloud_v5 - možda ima wind rose)
+    try:
+        qdrant = get_qdrant()
+        for col in ["baza_cloud_v5", "biro_text"]:
+            try:
+                results, _ = qdrant.scroll(
+                    collection_name=col,
+                    limit=200,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for r in results:
+                    payload = r.payload or {}
+                    tekst = (payload.get("tekst", "") or payload.get("text", ""))
+                    izvor = (payload.get("izvor", "") or payload.get("filename", ""))
+                    if any(kw in (tekst + " " + izvor).lower() for kw in
+                           ["wind", "rose", "ruza", "vetrova", "klim"]):
+                        key = tekst[:100]
+                        if key not in seen_ids:
+                            seen_ids.add(key)
+                            svi_docs.append({
+                                "text": tekst,
+                                "izvor": izvor,
+                                "tip": payload.get("tip", ""),
+                                "Link": payload.get("Link", ""),
+                            })
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Filtriraj
     relevantni = []
     for d in svi_docs:
         text = d.get("text", "").lower()
@@ -481,7 +550,6 @@ def handle_dijagram(upit: str):
                 relevantni.append(d)
 
     if not relevantni:
-        # Ako ništa specifično, prikaži prvih 5 dijagrama
         relevantni = svi_docs[:5]
         info = f"⚠️ Nema specifičnog '{upit}', ali evo {len(relevantni)} dijagrama iz baze:\n\n"
     else:
@@ -491,59 +559,79 @@ def handle_dijagram(upit: str):
     for i, d in enumerate(relevantni[:8]):
         text = d.get("text", "")[:250]
         izvor = d.get("izvor", "")
-        output += f"\n[{i+1}] {izvor}\n{text}...\n"
+        link = d.get("Link", "")
+        output += f"\n[{i+1}] {izvor}"
+        if link:
+            output += f"\n   🔗 {link}"
+        output += f"\n{text}...\n"
 
     return output, []
 
 
 def handle_clan(broj: str):
     """Pravni član - koristi legacy bazu (`tip=pravni_akt`)."""
-    # Fleksibilniji pattern: hvata razne oblike
+    # Najširi pattern: hvata i "Clan 14", "cl. 14", "Cl 14", "član 14", "clan 14"
     clan_pat = re.compile(
-        rf'(?:[Čč]lan|[Čč]l\.?|[Cc]lan|[Cc]l\.?)\s*\.?\s*{re.escape(broj)}\b',
+        rf'(?:[ČčĆć]lan|[ČčĆć]l\.?|[Cc]lan|[Cc]l\.?)\s*\.?\s*{re.escape(broj)}\b',
         re.IGNORECASE
     )
-    # Kraj člana: sledeći član ili "\n\n"
+    # Kraj člana: sledeći član
     kraj_pat = re.compile(
-        rf'(?:[Čč]lan|[Čč]l\.?|[Cc]lan|[Cc]l\.?)\s*\.?\s*\d+\b',
+        r'(?:[ČčĆć]lan|[ČčĆć]l\.?|[Cc]lan|[Cc]l\.?)\s*\.?\s*\d+\b',
         re.IGNORECASE
     )
 
     pogodci = []
     seen = set()
 
-    # Legacy baza sa filterom
+    # 1. Legacy baza
     for d in retrieve_legacy(tip="pravni_akt", k=2000):
         text = d.get("text", "")
         for m in clan_pat.finditer(text):
             start = m.start()
-            # Nađi kraj (sledeći član)
             end_m = kraj_pat.search(text, m.end())
             end = end_m.start() if end_m else min(start + 4000, len(text))
             clan_tekst = text[start:end].strip()
-            if 30 < len(clan_tekst) < 5000:
+            if 30 < len(clan_tekst) < 6000:
                 k = sredi_upit(clan_tekst[:200])
                 if k not in seen:
                     seen.add(k)
                     pogodci.append({"tekst": clan_tekst, "izvor": d.get("izvor", "")})
 
-    # Fallback: v2
+    # 2. Ako nema, probaj bez filtera (svi pravni akti)
     if not pogodci:
-        for d in retrieve(f"clan {broj} ugovor zakon pravilnik", k=50):
+        for d in retrieve_legacy(k=5000):
+            text = d.get("text", "")
+            if not text or len(text) < 100:
+                continue
+            for m in clan_pat.finditer(text):
+                start = m.start()
+                end_m = kraj_pat.search(text, m.end())
+                end = end_m.start() if end_m else min(start + 4000, len(text))
+                clan_tekst = text[start:end].strip()
+                if 30 < len(clan_tekst) < 6000:
+                    k = sredi_upit(clan_tekst[:200])
+                    if k not in seen:
+                        seen.add(k)
+                        pogodci.append({"tekst": clan_tekst, "izvor": d.get("izvor", "")})
+
+    # 3. Fallback: v2
+    if not pogodci:
+        for d in retrieve(f"clan {broj} ugovor zakon pravilnik član", k=50):
             text = d.get("text", "")
             for m in clan_pat.finditer(text):
                 start = m.start()
                 end_m = kraj_pat.search(text, m.end())
                 end = end_m.start() if end_m else min(start + 4000, len(text))
                 clan_tekst = text[start:end].strip()
-                if 30 < len(clan_tekst) < 5000:
+                if 30 < len(clan_tekst) < 6000:
                     k = sredi_upit(clan_tekst[:200])
                     if k not in seen:
                         seen.add(k)
                         pogodci.append({"tekst": clan_tekst, "izvor": d.get("filename", "")})
 
     if not pogodci:
-        return f"⚠️ Član {broj} nije pronađen.", []
+        return f"⚠️ Član {broj} nije pronađen. Probaj drugi broj ili pitaj 'koji su dokumenti u Birou'.", []
 
     pogodci.sort(key=lambda x: -len(x["tekst"]))
     p = pogodci[0]
