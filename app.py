@@ -485,6 +485,31 @@ with st.sidebar:
     st.header("⚙️ Podešavanja")
     st.write(f"**Kolekcija:** `{TEXT_COLLECTION}`")
 
+    if st.button("🔍 Diagnostika"):
+        with st.spinner("Provera..."):
+            try:
+                qd = get_qdrant()
+                cols = [c.name for c in qd.get_collections().collections]
+                st.write("**Kolekcije u Qdrant:**")
+                for c in cols:
+                    info = qd.get_collection(c)
+                    st.write(f"- `{c}`: {info.vectors_count} vektora")
+                # Test embedding
+                emb = get_embeddings()
+                test_vec = emb.embed_query("test")
+                st.write(f"**Embedding dim:** {len(test_vec)}")
+                # Test search
+                results = qd.query_points(
+                    collection_name=TEXT_COLLECTION,
+                    query=test_vec,
+                    limit=3,
+                )
+                st.write(f"**Test pretraga:** {len(results.points)} rezultata")
+                for p in results.points:
+                    st.write(f"  - {p.payload.get('filename', '?')} (tip={p.payload.get('tip', '?')})")
+            except Exception as e:
+                st.error(f"Greška: {e}")
+
     if st.button("🔄 Osveži keš"):
         st.cache_resource.clear()
         st.rerun()
