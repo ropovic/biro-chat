@@ -649,7 +649,7 @@ with st.sidebar:
                 try:
                     f_results, _ = qd.scroll(
                         collection_name=LEGACY_COLLECTION,
-                        limit=20,
+                        limit=5,
                         scroll_filter=models.Filter(
                             must=[models.FieldCondition(
                                 key="tip",
@@ -659,9 +659,13 @@ with st.sidebar:
                         with_payload=True,
                         with_vectors=False,
                     )
-                    st.write(f"Pronađeno: {len(f_results)} zapisa")
-                    for r in f_results[:5]:
-                        st.write(f"  - {(r.payload or {}).get('filename', '?')}")
+                    st.write(f"Pronađeno: {len(f_results)} (prikazujem 5)")
+                    for i, r in enumerate(f_results[:5]):
+                        payload = r.payload or {}
+                        st.write(f"**Zapis {i+1}** — sva polja:")
+                        for k, v in payload.items():
+                            v_str = str(v)[:200]
+                            st.write(f"  - `{k}`: {v_str}")
                 except Exception as e:
                     st.error(f"Filter test: {e}")
 
