@@ -918,6 +918,69 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Filter test: {e}")
 
+                # ===== TEST REGEX ZA ŠTAMPAČE I TONERE =====
+                st.write("---")
+                st.write("**Test regex za štampače/tonere:**")
+                try:
+                    oprema_results, _ = qd.scroll(
+                        collection_name=LEGACY_COLLECTION,
+                        limit=200,
+                        scroll_filter=models.Filter(must=[
+                            models.FieldCondition(key="tip", match=models.MatchValue(value="oprema"))
+                        ]),
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    printer_pat = re.compile(
+                        r'\b(?:'
+                        r'Kyocera\s+(?:TASKalfa\s+[\w-]+|FS-\d+|ECOSYS\s+[\w-]+|M\d{4}|P\d{4})'
+                        r'|HP\s+(?:LaserJet|OfficeJet|PageWide|Designjet)\s+[\w-]+'
+                        r'|Canon\s+(?:imageRUNNER|PIXMA|TX-\d+)'
+                        r')\b', re.IGNORECASE
+                    )
+                    toner_pat = re.compile(
+                        r'\b(?:'
+                        r'TK-\d+\w*'
+                        r'|HP\s+(?:[CP]\d+\w*|CE\d+\w*|C4\d{3}\w*|84\w*|940\w*|940XL\w*)'
+                        r'|Canon\s+(?:PFI-\d+\w*|CL-\d+\w*|PGI-\d+\w*)'
+                        r')\b', re.IGNORECASE
+                    )
+                    st.write(f"Oprema dokumenata: {len(oprema_results)}")
+                    stampaci_set, toneri_set = set(), set()
+                    for d in oprema_results:
+                        text = (d.payload or {}).get("tekst", "") or (d.payload or {}).get("text", "")
+                        for m in printer_pat.findall(text):
+                            stampaci_set.add(m.strip())
+                        for m in toner_pat.findall(text):
+                            toneri_set.add(m.strip())
+                    st.write(f"**Štampači (regex match):** {sorted(stampaci_set)}")
+                    st.write(f"**Toneri (regex match):** {sorted(toneri_set)}")
+                except Exception as e:
+                    st.error(f"Regex test: {e}")
+
+                # ===== ČLANOVI INDEKS =====
+                st.write("---")
+                st.write("**Članovi indeks:**")
+                try:
+                    clan_col = f"{COLLECTION_PREFIX}_clanovi"
+                    info = qd.get_collection(clan_col)
+                    st.write(f"`{clan_col}`: {info.points_count} članova")
+                    # Test clan 14
+                    results, _ = qd.scroll(
+                        collection_name=clan_col,
+                        limit=5,
+                        scroll_filter=models.Filter(must=[
+                            models.FieldCondition(key="clan_broj", match=models.MatchValue(value="14"))
+                        ]),
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    st.write(f"**Član 14:** {len(results)} zapisa")
+                    for r in results:
+                        st.write(f"  - {r.payload.get('dokument', '?')}: {r.payload.get('tekst', '')[:100]}...")
+                except Exception as e:
+                    st.error(f"Clan test: {e}")
+
             except Exception as e:
                 import traceback
                 st.error(f"Greška: {e}")
