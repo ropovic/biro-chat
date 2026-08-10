@@ -532,6 +532,27 @@ def handle_oprema(upit: str):
         for m in toner_pat.findall(text):
             toneri.add(m.strip())
 
+    # Deduplikacija: "M3655" i "M3655idn" su isti uređaj
+    stampaci_dedup = set()
+    for s in stampaci:
+        s_norm = s
+        # Ukloni sufikse idn, dn, ci, i
+        s_norm = re.sub(r'(M\d{4})idn\b', r'\1', s_norm, flags=re.IGNORECASE)
+        s_norm = re.sub(r'(P\d{4})dn\b', r'\1', s_norm, flags=re.IGNORECASE)
+        s_norm = re.sub(r'(FS-\d+)dn\b', r'\1', s_norm, flags=re.IGNORECASE)
+        s_norm = re.sub(r'(TASKalfa\s+\d+)ci\b', r'\1', s_norm, flags=re.IGNORECASE)
+        stampaci_dedup.add(s_norm)
+    stampaci = stampaci_dedup
+
+    # Deduplikacija tonera: TK-1160 i TK-1160H su isti
+    toneri_dedup = set()
+    for t in toneri:
+        t_norm = t
+        # Ukloni sufiks
+        t_norm = re.sub(r'(TK-\d+)[A-Z]+\b', r'\1', t_norm)
+        toneri_dedup.add(t_norm)
+    toneri = toneri_dedup
+
     output = ""
     if samo_toner:
         if toneri:
@@ -854,6 +875,30 @@ with st.sidebar:
 
     if st.button("🔍 Diagnostika"):
         with st.spinner("Provera..."):
+            # Test dispatch logike
+            if "test_upit" not in st.session_state:
+                st.session_state.test_upit = ""
+            test_q = st.text_input("Test upit (za dispatch):", value=st.session_state.test_upit)
+            if test_q:
+                u_test = test_q.lower()
+                pita_toner_t = any(kw in u_test for kw in ["toner", "kertrid", "kertridž", "cartridge"])
+                pita_stampac_t = any(kw in u_test for kw in [
+                    "stampac", "stampač", "štampac", "štampač", "printer", "pisač", "pisac"
+                ])
+                samo_toner_t = pita_toner_t and not pita_stampac_t
+                samo_stampac_t = pita_stampac_t and not pita_toner_t
+                st.write(f"**Test upit:** `{test_q}`")
+                st.write(f"**Pita toner:** {pita_toner_t}")
+                st.write(f"**Pita štampač:** {pita_stampac_t}")
+                st.write(f"**Samo toner:** {samo_toner_t}")
+                st.write(f"**Samo štampač:** {samo_stampac_t}")
+                if samo_stampac_t:
+                    st.success("→ Prikazaće SAMO štampače")
+                elif samo_toner_t:
+                    st.success("→ Prikazaće SAMO tonere")
+                else:
+                    st.info("→ Prikazaće i štampače i tonere")
+                st.write("---")
             try:
                 qd = get_qdrant()
                 cols = [c.name for c in qd.get_collections().collections]
