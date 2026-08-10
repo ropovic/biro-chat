@@ -562,7 +562,12 @@ def index_clanovi(qdrant: QdrantClient, legacy_collection: str = "baza_cloud_v2_
     for r in results:
         payload = r.payload or {}
         text = payload.get("tekst", "") or payload.get("text", "")
-        izvor = payload.get("izvor", "")
+        izvor = (payload.get("izvor", "") or
+                 payload.get("naziv_dokumenta", "") or
+                 payload.get("filename", "") or
+                 payload.get("source", ""))
+        if not izvor:
+            izvor = "nepoznat dokument"
         if not text:
             continue
 

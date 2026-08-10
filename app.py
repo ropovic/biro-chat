@@ -505,9 +505,15 @@ def handle_oprema(upit: str):
     # Regex paterni
     printer_pat = re.compile(
         r'\b(?:'
-        r'Kyocera\s+(?:TASKalfa\s+[\w-]+|FS-\d+|ECOSYS\s+[\w-]+|M\d{4}|P\d{4})'
+        r'Kyocera\s+(?:'
+            r'TASKalfa\s+[\w-]+'
+            r'|FS-\d+\w*'        # FS-9530dn
+            r'|ECOSYS\s+[\w-]+'
+            r'|M\d{4}\w*'        # M3655idn
+            r'|P\d{4}\w*'        # P2040dn
+        r')'
         r'|HP\s+(?:LaserJet|OfficeJet|PageWide|Designjet)\s+[\w-]+'
-        r'|Canon\s+(?:imageRUNNER|PIXMA|TX-\d+)'
+        r'|Canon\s+(?:imageRUNNER|PIXMA|TX-\d+\w*)'  # TX-3000
         r')\b', re.IGNORECASE
     )
     toner_pat = re.compile(
