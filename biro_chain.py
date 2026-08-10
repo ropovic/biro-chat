@@ -457,7 +457,149 @@ def ensure_collections(qdrant: QdrantClient, collection_prefix: str = "biro", te
         except Exception:
             pass
 
-    return text_col, image_col
+    # Clanovi indeks (posebna kolekcija, dummy vector)
+    clan_col = f"{collection_prefix}_clanovi"
+    if clan_col not in collections:
+        try:
+            qdrant.create_collection(
+                collection_name=clan_col,
+                vectors_config=VectorParams(size=1, distance=Distance.COSINE),
+            )
+            for field in ("clan_broj", "dokument", "izvor"):
+                try:
+                    qdrant.create_payload_index(
+                        collection_name=clan_col,
+                        field_name=field,
+                        field_schema="keyword",
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    return text_col, image_col, clan_col
+
+
+def index_clanovi(qdrant: QdrantClient, legacy_collection: str = "baza_cloud_v2_e5",
+                  clan_collection: str = "biro_v2_clanovi", legacy_dim: int = 768):
+    """Prolazi kroz pravne akte i indeksira sve 'Clan X' reference.
+    Vraća (broj_članova, broj_dokumenata)."""
+    import re
+    import uuid
+    from qdrant_client.models import (
+        VectorParams, PointStruct, Filter, FieldCondition, MatchValue, Distance
+    )
+
+    # Regex pokriva: ćirilicu, latinicu sa/bez dijakritike, sve padeže
+    CLAN_PAT = re.compile(
+        r'(?:'
+        r'[Чч][Лл][Аа][Нн][АаУуОоМмЕеИи]?|'
+        r'[Чч][Лл]\.?|'
+        r'[ČčĆćĊ][Ll][Aa][Nn][AaУуОоМмЕеИи]?|'
+        r'[ČčĆćĊ][Ll]\.?|'
+        r'[Cc][Ll][Aa][Nn][AaУуОоМмЕеИи]?|'
+        r'[Cc][Ll]\.?|'
+        r'[Cc][Ll][Nn]\.?'
+        r')\s*\.?\s*(\d+)\.?\b',
+        re.IGNORECASE | re.UNICODE
+    )
+    KRAJ_PAT = re.compile(
+        r'(?:'
+        r'[Чч][Лл][Аа][Нн][АаУуОоМмЕеИи]?|'
+        r'[Чч][Лл]\.?|'
+        r'[ČčĆćĊ][Ll][Aa][Nn][AaУуОоМмЕеИи]?|'
+        r'[ČčĆćĊ][Ll]\.?|'
+        r'[Cc][Ll][Aa][Nn][AaУуОоМмЕеИи]?|'
+        r'[Cc][Ll]\.?|'
+        r'[Cc][Ll][Nn]\.?'
+        r')\s*\.?\s*\d+\.?\b',
+        re.IGNORECASE | re.UNICODE
+    )
+
+    # Proveri da li već ima podataka
+    try:
+        info = qdrant.get_collection(clan_collection)
+        if (getattr(info, "points_count", None) or 0) > 0:
+            return 0, 0  # već indeksirano
+    except Exception:
+        pass
+
+    # Kreiraj ako ne postoji
+    try:
+        cols = [c.name for c in qdrant.get_collections().collections]
+        if clan_collection not in cols:
+            qdrant.create_collection(
+                collection_name=clan_collection,
+                vectors_config=VectorParams(size=1, distance=Distance.COSINE),
+            )
+            for field in ("clan_broj", "dokument", "izvor"):
+                try:
+                    qdrant.create_payload_index(
+                        collection_name=clan_collection, field_name=field,
+                        field_schema="keyword",
+                    )
+                except Exception:
+                    pass
+    except Exception as e:
+        return -1, 0
+
+    # Prođi kroz pravne akte
+    try:
+        results, _ = qdrant.scroll(
+            collection_name=legacy_collection,
+            limit=10000,
+            scroll_filter=Filter(must=[
+                FieldCondition(key="tip", match=MatchValue(value="pravni_akt"))
+            ]),
+            with_payload=True,
+            with_vectors=False,
+        )
+    except Exception as e:
+        return -1, 0
+
+    points = []
+    seen = set()
+    for r in results:
+        payload = r.payload or {}
+        text = payload.get("tekst", "") or payload.get("text", "")
+        izvor = payload.get("izvor", "")
+        if not text:
+            continue
+
+        for m in CLAN_PAT.finditer(text):
+            clan_br = m.group(1)
+            start = m.start()
+            end_m = KRAJ_PAT.search(text, m.end())
+            end = end_m.start() if end_m else min(start + 4000, len(text))
+            clan_tekst = text[start:end].strip()
+            key = (izvor, clan_br, clan_tekst[:200])
+            if key in seen:
+                continue
+            if not (40 < len(clan_tekst) < 5000):
+                continue
+            seen.add(key)
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{izvor}-{clan_br}-{start}"))
+            points.append(PointStruct(
+                id=point_id,
+                vector=[0.0],
+                payload={
+                    "clan_broj": clan_br,
+                    "dokument": izvor,
+                    "tekst": clan_tekst,
+                    "izvor": izvor,
+                    "tip": "clan_pravnog_akta",
+                    "start_pos": start,
+                },
+            ))
+
+    # Batch upload
+    for i in range(0, len(points), 100):
+        try:
+            qdrant.upsert(collection_name=clan_collection, points=points[i:i+100])
+        except Exception:
+            pass
+
+    return len(points), len(results)
 
 
 def list_available_models():

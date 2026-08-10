@@ -21,7 +21,7 @@ from qdrant_client import models
 from langchain_core.documents import Document
 from langchain_groq import ChatGroq
 
-from biro_chain import BiroEmbeddings, get_qdrant_client, ensure_collections
+from biro_chain import BiroEmbeddings, get_qdrant_client, ensure_collections, index_clanovi
 
 
 # ============================================================
@@ -76,6 +76,21 @@ def get_qdrant():
     except Exception as e:
         print(f"legacy index: {e}")
     return q
+
+
+@st.cache_resource
+def get_clanovi_index():
+    """Indeksira članove iz pravnih akata (jednom, keširano)."""
+    q = get_qdrant()
+    clan_col = f"{COLLECTION_PREFIX}_clanovi"
+    try:
+        n, m = index_clanovi(q, LEGACY_COLLECTION, clan_col)
+        if n > 0:
+            print(f"Indeksirano {n} članova iz {m} pravnih akata")
+        return clan_col
+    except Exception as e:
+        print(f"index_clanovi: {e}")
+        return clan_col
 
 
 @st.cache_resource
@@ -450,11 +465,24 @@ def handle_lista_zaposlenih():
 
 
 def handle_oprema(upit: str):
-    """Oprema - koristi legacy bazu (gde je `tip=oprema`)."""
+    """Oprema - čisto razdvajanje štampača od tonera prema upitu."""
     u = upit.lower()
-    samo_toner = any(kw in u for kw in ["toner", "kertrid", "kertridž", "cartridge"])
-    samo_stampac = any(kw in u for kw in ["stampac", "štampac", "štampač", "printer"])
-    samo_racunar = any(kw in u for kw in ["racun", "račun", "kompjut", "laptop", "monitor", "skener"])
+    # Detekcija namere korisnika
+    pita_toner = any(kw in u for kw in ["toner", "kertrid", "kertridž", "cartridge"])
+    pita_stampac = any(kw in u for kw in [
+        "stampac", "stampač", "štampac", "štampač", "printer", "pisač", "pisac"
+    ])
+    pita_racunar = any(kw in u for kw in [
+        "racun", "račun", "kompjut", "laptop", "monitor", "skener", "miš", "tastatura"
+    ])
+
+    # Ako je pomenuo tonere ALI NE štampače → SAMO toneri
+    # Ako je pomenuo štampače ALI NE tonere → SAMO štampači
+    # Ako je pomenuo oba → oba
+    # Ako ništa → oba
+    samo_toner = pita_toner and not pita_stampac
+    samo_stampac = pita_stampac and not pita_toner
+    samo_racunar = pita_racunar and not pita_toner and not pita_stampac
 
     svi_docs = []
     seen_ids = set()
@@ -466,26 +494,26 @@ def handle_oprema(upit: str):
             seen_ids.add(key)
             svi_docs.append(d)
 
-    # Ako nema dovoljno, probaj i u v2
+    # Fallback: embedding u v2
     if len(svi_docs) < 5:
-        for d in retrieve("oprema štampač toner računar", k=30):
+        for d in retrieve("oprema štampač toner kertridž računar", k=30):
             key = d.get("text", "")[:100]
             if key not in seen_ids:
                 seen_ids.add(key)
                 svi_docs.append(d)
 
-    # Bolji regex: Kyocera SAMO ako ima model
+    # Regex paterni
     printer_pat = re.compile(
         r'\b(?:'
-        r'Kyocera\s+(?:TASKalfa|FS-\d+|ECOSYS\s+[\w-]+|M\d{4}|P\d{4})'
-        r'|HP\s+(?:LaserJet|OfficeJet|PageWide|Designjet)\s+[\w]+'
+        r'Kyocera\s+(?:TASKalfa\s+[\w-]+|FS-\d+|ECOSYS\s+[\w-]+|M\d{4}|P\d{4})'
+        r'|HP\s+(?:LaserJet|OfficeJet|PageWide|Designjet)\s+[\w-]+'
         r'|Canon\s+(?:imageRUNNER|PIXMA|TX-\d+)'
         r')\b', re.IGNORECASE
     )
     toner_pat = re.compile(
         r'\b(?:'
         r'TK-\d+\w*'
-        r'|HP\s+(?:[CP]\d+\w*|CE\d+\w*|C4\d{3}\w*)'
+        r'|HP\s+(?:[CP]\d+\w*|CE\d+\w*|C4\d{3}\w*|84\w*|940\w*|940XL\w*)'
         r'|Canon\s+(?:PFI-\d+\w*|CL-\d+\w*|PGI-\d+\w*)'
         r')\b', re.IGNORECASE
     )
@@ -497,12 +525,6 @@ def handle_oprema(upit: str):
             stampaci.add(m.strip())
         for m in toner_pat.findall(text):
             toneri.add(m.strip())
-
-    # Ako je samo jedna kategorija, filtriraj
-    if samo_toner and not samo_stampac:
-        stampaci = set()
-    if samo_stampac and not samo_toner:
-        toneri = set()
 
     output = ""
     if samo_toner:
@@ -517,7 +539,10 @@ def handle_oprema(upit: str):
             output += "\n".join(f"- {s}" for s in sorted(stampaci))
         else:
             output = "⚠️ Nema štampača u bazi."
+    elif samo_racunar:
+        output = "⚠️ Nema podataka o računarskoj opremi u bazi (probaj 'monitor', 'laptop', 'tastatura')."
     else:
+        # Sve
         if stampaci:
             output += f"**Štampači ({len(stampaci)}):**\n"
             output += "\n".join(f"- {s}" for s in sorted(stampaci)) + "\n\n"
@@ -531,35 +556,37 @@ def handle_oprema(upit: str):
 
 
 def handle_dijagram(upit: str):
-    """Dijagram - koristi legacy bazu i ostale kolekcije."""
+    """Dijagram - wind rose specifično + svi dijagrami."""
     u = upit.lower()
-    trazim_wind_rose = any(kw in u for kw in ["vetr", "rose", "ruza", "wind", "klim"])
+    trazim_wind_rose = any(kw in u for kw in [
+        "vetr", "rose", "ruza", "ruža", "wind", "klimadij", "meteorolog"
+    ])
 
     svi_docs = []
     seen_ids = set()
 
-    # 1. Legacy baza (dijagram klasa, 923 zapisa)
-    for d in retrieve_legacy(tip="dijagram", k=1000):
+    # 1. Legacy baza (dijagram klasa, 923 zapisa) - SVE
+    for d in retrieve_legacy(tip="dijagram", k=1500):
         key = d.get("text", "")[:100]
         if key not in seen_ids:
             seen_ids.add(key)
             svi_docs.append(d)
 
-    # 2. Embedding search u v2 (klimatski, meteorologija, itd)
-    for d in retrieve("ruža vetrova wind rose klimatski dijagram", k=20):
+    # 2. Embedding search u v2 za wind rose
+    for d in retrieve("ruža vetrova wind rose klimatski meteorologija", k=30):
         key = d.get("text", "")[:100]
         if key not in seen_ids:
             seen_ids.add(key)
             svi_docs.append(d)
 
-    # 3. Pretraži i ostale male kolekcije (baza_cloud_v5 - možda ima wind rose)
+    # 3. Pretraži i ostale kolekcije (baza_cloud_v5, biro_text)
     try:
         qdrant = get_qdrant()
-        for col in ["baza_cloud_v5", "biro_text"]:
+        for col in ["baza_cloud_v5", "biro_text", "biro_v2_text"]:
             try:
                 results, _ = qdrant.scroll(
                     collection_name=col,
-                    limit=200,
+                    limit=500,
                     with_payload=True,
                     with_vectors=False,
                 )
@@ -567,17 +594,22 @@ def handle_dijagram(upit: str):
                     payload = r.payload or {}
                     tekst = (payload.get("tekst", "") or payload.get("text", ""))
                     izvor = (payload.get("izvor", "") or payload.get("filename", ""))
-                    if any(kw in (tekst + " " + izvor).lower() for kw in
-                           ["wind", "rose", "ruza", "vetrova", "klim"]):
-                        key = tekst[:100]
-                        if key not in seen_ids:
-                            seen_ids.add(key)
-                            svi_docs.append({
-                                "text": tekst,
-                                "izvor": izvor,
-                                "tip": payload.get("tip", ""),
-                                "Link": payload.get("Link", ""),
-                            })
+                    if not tekst:
+                        continue
+                    haystack = (tekst + " " + izvor).lower()
+                    if trazim_wind_rose:
+                        if any(kw in haystack for kw in
+                               ["wind", "rose", "ruza", "ruža", "vetrova", "vetar",
+                                "klimatski", "klimadij", "meteorolog"]):
+                            key = tekst[:100]
+                            if key not in seen_ids:
+                                seen_ids.add(key)
+                                svi_docs.append({
+                                    "text": tekst,
+                                    "izvor": izvor,
+                                    "tip": payload.get("tip", ""),
+                                    "Link": payload.get("Link", ""),
+                                })
             except Exception:
                 pass
     except Exception:
@@ -590,10 +622,11 @@ def handle_dijagram(upit: str):
         izvor = d.get("izvor", "").lower()
         haystack = text + " " + izvor
         if trazim_wind_rose:
-            # Precizniji pattern: samo specifični wind rose
+            # Specifičniji: samo wind rose / klimatski dijagram
             if any(kw in haystack for kw in
                    ["wind rose", "windrose", "ruza vetrova", "ruža vetrova",
-                    "ruze vetrova", "ruže vetrova", "klimadijagram", "klimadiagram"]):
+                    "ruze vetrova", "ruže vetrova", "klimadijagram", "klimadiagram",
+                    "klimatski dijagram"]):
                 relevantni.append(d)
         else:
             if any(kw in haystack for kw in ["dijagram", "grafikon", "shema", "mapa",
@@ -602,13 +635,28 @@ def handle_dijagram(upit: str):
 
     if not relevantni:
         if trazim_wind_rose:
-            relevantni = svi_docs[:5]
-            info = (
-                f"⚠️ **Nema dijagrama ruže vetrova** specifično u bazi.\n\n"
-                f"Pronađeno je {len(svi_docs)} drugih dijagrama u bazi "
-                f"(uglavnom projektne dokumentacije). Evo prvih {len(relevantni)}:\n\n"
-                f"💡 Savet: probaj 'dijagram projekta', 'shema gazdovanja' ili konkretnu godišnju osnovu."
-            )
+            # Probaj fallback: svi klimatski dokumenti
+            klimatski = []
+            for d in svi_docs:
+                text = d.get("text", "").lower()
+                izvor = d.get("izvor", "").lower()
+                if "klim" in (text + " " + izvor) or "meteoro" in (text + " " + izvor):
+                    klimatski.append(d)
+
+            if klimatski:
+                relevantni = klimatski[:5]
+                info = (
+                    f"⚠️ **Nema specifičnog dijagrama ruže vetrova** u bazi.\n\n"
+                    f"Ali pronađeno {len(klimatski)} klimatskih dijagrama. Evo prvih {len(relevantni)}:\n\n"
+                    f"💡 Ruža vetrova obično se nalazi u poglavlju 'Klima' godišnje osnove."
+                )
+            else:
+                relevantni = svi_docs[:5]
+                info = (
+                    f"⚠️ **Nema dijagrama ruže vetrova** u bazi.\n\n"
+                    f"Pronađeno {len(svi_docs)} drugih dijagrama. Evo prvih {len(relevantni)}:\n\n"
+                    f"💡 Savet: 'dijagram klime', 'meteorološki podaci', ili konkretna GJ (gazdinska jedinica)."
+                )
         else:
             relevantni = svi_docs[:5]
             info = f"⚠️ Nema specifičnog '{upit}', ali evo {len(relevantni)} dijagrama iz baze:\n\n"
@@ -629,14 +677,56 @@ def handle_dijagram(upit: str):
 
 
 def handle_clan(broj: str):
-    """Pravni član - koristi legacy bazu (`tip=pravni_akt`)."""
-    # Najširi pattern: toleriše "Clan 14", "cl. 14", "Cl 14", "član 14", "clan 14.",
-    # sa ili bez tačke na kraju
+    """Pravni član - prvo traži u indeksu članova, pa fallback."""
+    qdrant = get_qdrant()
+    clan_col = f"{COLLECTION_PREFIX}_clanovi"
+
+    # Pokušaj automatski kreirati indeks članova ako ne postoji
+    try:
+        get_clanovi_index()
+    except Exception:
+        pass
+
+    # 1. Pretraži u indeksu članova
+    try:
+        info = qdrant.get_collection(clan_col)
+        if (getattr(info, "points_count", None) or 0) > 0:
+            results, _ = qdrant.scroll(
+                collection_name=clan_col,
+                limit=200,
+                scroll_filter=models.Filter(must=[
+                    models.FieldCondition(key="clan_broj", match=models.MatchValue(value=str(broj)))
+                ]),
+                with_payload=True,
+                with_vectors=False,
+            )
+            if results:
+                # Grupiši po dokumentu, uzmi najduži
+                by_doc = {}
+                for r in results:
+                    payload = r.payload or {}
+                    doc = payload.get("dokument", "?")
+                    if doc not in by_doc or len(payload.get("tekst", "")) > len(by_doc[doc]["tekst"]):
+                        by_doc[doc] = {
+                            "tekst": payload.get("tekst", ""),
+                            "izvor": doc,
+                        }
+                # Sortiraj po dužini teksta
+                sorted_docs = sorted(by_doc.values(), key=lambda x: -len(x["tekst"]))
+                best = sorted_docs[0]
+                output = f"**Члан {broj}** (izvor: {best['izvor']}):\n\n{best['tekst']}"
+                if len(sorted_docs) > 1:
+                    output += f"\n\n📚 Pronađeno u {len(sorted_docs)} dokumenata."
+                return output, []
+    except Exception as e:
+        # Ako indeks ne postoji, fallback
+        pass
+
+    # 2. Fallback: regex pretraga u legacy bazi
     clan_pat = re.compile(
         rf'(?:[ČčĆćĊ]lan|[ČčĆćĊ]l\.?|[Cc]lan|[Cc]l\.?)\s*\.?\s*{re.escape(broj)}\.?\b',
         re.IGNORECASE
     )
-    # Kraj člana: sledeći član
     kraj_pat = re.compile(
         r'(?:[ČčĆćĊ]lan|[ČčĆćĊ]l\.?|[Cc]lan|[Cc]l\.?)\s*\.?\s*\d+\.?\b',
         re.IGNORECASE
@@ -645,7 +735,6 @@ def handle_clan(broj: str):
     pogodci = []
     seen = set()
 
-    # 1. Legacy baza sa filterom
     for d in retrieve_legacy(tip="pravni_akt", k=2500):
         text = d.get("text", "")
         for m in clan_pat.finditer(text):
@@ -659,52 +748,17 @@ def handle_clan(broj: str):
                     seen.add(k)
                     pogodci.append({"tekst": clan_tekst, "izvor": d.get("izvor", "")})
 
-    # 2. Bez filtera (svi zapisi, jer možda nisu svi klasifikovani)
     if not pogodci:
-        for d in retrieve_legacy(k=8000):
-            text = d.get("text", "")
-            if not text or len(text) < 50:
-                continue
-            for m in clan_pat.finditer(text):
-                start = m.start()
-                end_m = kraj_pat.search(text, m.end())
-                end = end_m.start() if end_m else min(start + 3500, len(text))
-                clan_tekst = text[start:end].strip()
-                if 30 < len(clan_tekst) < 4000:
-                    k = sredi_upit(clan_tekst[:200])
-                    if k not in seen:
-                        seen.add(k)
-                        pogodci.append({"tekst": clan_tekst, "izvor": d.get("izvor", "")})
-
-    # 3. Fallback: v2
-    if not pogodci:
-        for d in retrieve(f"clan {broj} ugovor zakon pravilnik član", k=50):
-            text = d.get("text", "")
-            for m in clan_pat.finditer(text):
-                start = m.start()
-                end_m = kraj_pat.search(text, m.end())
-                end = end_m.start() if end_m else min(start + 3500, len(text))
-                clan_tekst = text[start:end].strip()
-                if 30 < len(clan_tekst) < 4000:
-                    k = sredi_upit(clan_tekst[:200])
-                    if k not in seen:
-                        seen.add(k)
-                        pogodci.append({"tekst": clan_tekst, "izvor": d.get("filename", "")})
-
-    if not pogodci:
-        # Pokušaj da nađeš bilo šta slično
         hint_dokumenti = set()
         for d in retrieve_legacy(tip="pravni_akt", k=200):
             izvor = d.get("izvor", "")
             if izvor and "pravil" in izvor.lower():
                 hint_dokumenti.add(izvor)
-
         hint = f"⚠️ Član {broj} nije pronađen u bazi."
         if hint_dokumenti:
             hint += f"\n\n💡 Dostupni pravni akti:\n"
             for h in sorted(hint_dokumenti)[:5]:
                 hint += f"  - {h}\n"
-            hint += f"\nProbaj specifičniji upit: 'pravilnik o radu', 'kolektivni ugovor', ili pitaj 'koji pravilnici postoje'."
         return hint, []
 
     pogodci.sort(key=lambda x: -len(x["tekst"]))
