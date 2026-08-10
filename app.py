@@ -271,7 +271,11 @@ def detektuj_tip(upit: str) -> str:
     if "zaposlen" in u and any(kw in u for kw in ["svi", "lista", "spisak", "koji su", "imena"]):
         return "lista"
 
-    if "toner" in u or "kertrid" in u or any(kw in u for kw in ["stampac", "oprema", "racunar"]):
+    if ("toner" in u or "kertrid" in u or
+            any(kw in u for kw in [
+                "stampac", "stampač", "štampac", "štampač", "printer", "pisač", "pisac",
+                "oprema", "racunar", "računar", "laptop", "monitor", "skener"
+            ])):
         return "oprema"
 
     if any(kw in u for kw in ["dijagram", "mapa", "karta", "ruza vetrova", "vetrova", "shema"]):
