@@ -558,8 +558,7 @@ def handle_oprema(upit: str):
         toneri_dedup.add(t_norm)
     toneri = toneri_dedup
 
-    # Debug info (privremeno)
-    debug_info = f"\n\n<sub>DEBUG: u=`{u[:80]}` | pita_stampac={pita_stampac} | pita_toner={pita_toner} | samo_stampac={samo_stampac} | samo_toner={samo_toner} | stampaci={len(stampaci)} | toneri={len(toneri)}</sub>"
+    # Debug info (uklonjeno posle uspešnog testiranja)
 
     output = ""
     if samo_toner:
@@ -587,7 +586,7 @@ def handle_oprema(upit: str):
         if not output:
             output = "⚠️ Nema specifične opreme u bazi (probaj drugi upit)."
 
-    return output + debug_info, []
+    return output, []
 
 
 def handle_dijagram(upit: str):
