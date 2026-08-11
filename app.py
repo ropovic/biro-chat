@@ -470,14 +470,15 @@ def handle_lista_zaposlenih():
 
 def handle_oprema(upit: str):
     """Oprema - čisto razdvajanje štampača od tonera prema upitu."""
-    u = upit.lower()
+    # VAŽNO: koristi sredi_upit da konvertuje ćirilicu u latinicu
+    u = sredi_upit(upit)
     # Detekcija namere korisnika
-    pita_toner = any(kw in u for kw in ["toner", "kertrid", "kertridž", "cartridge"])
+    pita_toner = any(kw in u for kw in ["toner", "kertrid", "kertridz", "cartridge"])
     pita_stampac = any(kw in u for kw in [
-        "stampac", "stampač", "štampac", "štampač", "printer", "pisač", "pisac"
+        "stampac", "stampac", "stampac", "stampac", "printer", "pisac", "pisac"
     ])
     pita_racunar = any(kw in u for kw in [
-        "racun", "račun", "kompjut", "laptop", "monitor", "skener", "miš", "tastatura"
+        "racun", "racun", "kompjut", "laptop", "monitor", "skener", "mis", "tastatura"
     ])
 
     # Ako je pomenuo tonere ALI NE štampače → SAMO toneri
@@ -557,6 +558,9 @@ def handle_oprema(upit: str):
         toneri_dedup.add(t_norm)
     toneri = toneri_dedup
 
+    # Debug info (privremeno)
+    debug_info = f"\n\n<sub>DEBUG: u=`{u[:80]}` | pita_stampac={pita_stampac} | pita_toner={pita_toner} | samo_stampac={samo_stampac} | samo_toner={samo_toner} | stampaci={len(stampaci)} | toneri={len(toneri)}</sub>"
+
     output = ""
     if samo_toner:
         if toneri:
@@ -583,7 +587,7 @@ def handle_oprema(upit: str):
         if not output:
             output = "⚠️ Nema specifične opreme u bazi (probaj drugi upit)."
 
-    return output, []
+    return output + debug_info, []
 
 
 def handle_dijagram(upit: str):
