@@ -24,11 +24,7 @@ QDRANT_URL = get_config("QDRANT_URL", "https://09ffa5ef-2765-45c8-bfcf-29bc6bf90
 QDRANT_API_KEY = get_config("QDRANT_API_KEY", "")
 GROQ_API_KEY = get_config("GROQ_API_KEY", "")
 TAVILY_API_KEY = get_config("TAVILY_API_KEY", "")
-
-# Online / Remote Hosted Ollama podešavanja
-OLLAMA_URL = get_config("OLLAMA_URL", "https://tvoj-online-ollama-endpoint.com/api/chat")
-OLLAMA_API_KEY = get_config("OLLAMA_API_KEY", "")
-OLLAMA_MODEL = get_config("OLLAMA_MODEL", "qwen2.5:7b")
+GEMINI_API_KEY = get_config("GEMINI_API_KEY", "")
 
 
 # --- KEŠIRANE KONEKCIJE ---
@@ -53,7 +49,7 @@ def get_groq_client() -> Groq | None:
 
 # --- PRETRAGA INTERNE QDRANT BAZE ---
 def retrieve_internal_context(query: str, top_k: int = 3, max_chars_per_doc: int = 3500) -> Dict[str, Any]:
-    """Pretražuje Qdrant i vraća tekst skraćen na bezbednu dužinu."""
+    """Pretražuje Qdrant i vraća tekst skraćen na bezbednu dužinu radi prevencije token limit grešaka."""
     embed_model = load_embedding_model()
     qdrant_client = get_qdrant_client()
 
@@ -78,19 +74,22 @@ def retrieve_internal_context(query: str, top_k: int = 3, max_chars_per_doc: int
         doc_name = payload.get("document_name", "Dokument")
         content = payload.get("markdown_content", "")
         
-        # Skraćivanje predugačkog teksta radi izbegavanja token limita
-        content_snippet = content[:max_chars_per_doc] + ("\n...[skraćeno]" if len(content) > max_chars_per_doc else "")
+        # Skraćivanje predugačkog teksta po dokumentu radi izbegavanja Groq Error 400
+        if len(content) > max_chars_per_doc:
+            content_snippet = content[:max_chars_per_doc] + "\n\n... [sadržaj dokumenta je skraćen zbog dužine]"
+        else:
+            content_snippet = content
         
         employees = payload.get("detected_employees_in_doc", [])
-        emp_str = ", ".join([e['employee_name'] for e in employees]) if employees else "Nema"
+        emp_str = ", ".join([e['employee_name'] for e in employees]) if employees else "Nema detektovanih lica"
         
         csvs = payload.get("csv_tables_attached", [])
-        csv_str = ", ".join(csvs) if csvs else "Nema"
+        csv_str = ", ".join(csvs) if csvs else "Nema priloženih tabela"
 
         block = f"📄 INTERNI DOKUMENT: {doc_name}\n"
         block += f"👤 PREPOZNATI ZAPOSLENI: {emp_str}\n"
-        block += f"📊 TABELE: {csv_str}\n"
-        block += f"📝 TEKST:\n{content_snippet}\n"
+        block += f"📊 ATTACHED TABELE: {csv_str}\n"
+        block += f"📝 TEKST DOKUMENTA:\n{content_snippet}\n"
         
         formatted_context.append(block)
         sources.append(doc_name)
@@ -104,7 +103,7 @@ def retrieve_internal_context(query: str, top_k: int = 3, max_chars_per_doc: int
 
 # --- WEB PRETRAGA (TAVILY) ---
 def search_web_tavily(query: str) -> Dict[str, Any]:
-    """Pretražuje internet preko Tavily API-ja ako internih podataka nema."""
+    """Pretražuje internet preko Tavily API-ja ako podaci u bazi ne postoje ili imaju nizak score."""
     api_key = get_config("TAVILY_API_KEY", "")
     if not api_key:
         return {"web_context": "", "web_sources": []}
@@ -134,6 +133,7 @@ def search_web_tavily(query: str) -> Dict[str, Any]:
 
 # --- LLM INVOCATIONS ---
 def query_groq(system_prompt: str, user_query: str) -> str:
+    """Poziva primarni Groq LLaMA-3.3-70B model."""
     client = get_groq_client()
     if not client:
         raise ValueError("GROQ_API_KEY nije definisan.")
@@ -150,24 +150,35 @@ def query_groq(system_prompt: str, user_query: str) -> str:
     return response.choices[0].message.content
 
 
-def query_ollama_online(system_prompt: str, user_query: str) -> str:
-    """Poziva eksterni / hosted Online Ollama API sa API ključem."""
-    headers = {"Content-Type": "application/json"}
-    if OLLAMA_API_KEY:
-        headers["Authorization"] = f"Bearer {OLLAMA_API_KEY}"
+def query_gemini_online(system_prompt: str, user_query: str) -> str:
+    """Poziva besplatni Google Gemini 1.5 Flash kao 100% cloud fallback."""
+    gemini_key = get_config("GEMINI_API_KEY", "")
+    if not gemini_key:
+        raise ValueError("GEMINI_API_KEY nije podešen u Secrets.")
 
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+    headers = {"Content-Type": "application/json"}
+    
     payload = {
-        "model": OLLAMA_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_query}
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": f"SISTEMSKO UPUTSTVO:\n{system_prompt}\n\nKORISNIČKO PITANJE:\n{user_query}"}
+                ]
+            }
         ],
-        "stream": False
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 1500
+        }
     }
     
-    res = requests.post(OLLAMA_URL, json=payload, headers=headers, timeout=60)
+    res = requests.post(url, json=payload, headers=headers, timeout=30)
     res.raise_for_status()
-    return res.json()["message"]["content"]
+    
+    data = res.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
 # --- GLAVNI RAG FLOW ---
@@ -179,14 +190,14 @@ def ask_birochat(user_query: str) -> Dict[str, Any]:
     web_sources = []
     combined_context = ""
 
-    # Ako interni rezultati imaju nizak score (< 0.40), aktivira se Tavily Web Search
+    # Ako je score manji od 0.40 ili nema dokumenata u Qdrant-u, aktivira se Tavily Web Search
     if internal_res["max_score"] < 0.40 or not internal_res["sources"]:
         used_web_search = True
         web_res = search_web_tavily(user_query)
         web_sources = web_res["web_sources"]
         
         combined_context = (
-            "⚠️ Napomena: Podaci nisu pronađeni u internoj bazi. Korišćena je pretraga sa interneta.\n\n"
+            "⚠️ Napomena: Podaci nisu pronađeni u internoj bazi Biroa. Korišćena je pretraga sa interneta.\n\n"
             f"{web_res['web_context']}"
         )
     else:
@@ -201,17 +212,17 @@ def ask_birochat(user_query: str) -> Dict[str, Any]:
 
     used_provider = "Groq (LLaMA-3.3-70B)"
     
-    # Executing LLM call
+    # Poziv LLM-a sa automatskim preusmeravanjem na Google Gemini ako Groq izbaci grešku
     try:
         answer = query_groq(system_prompt, user_query)
     except Exception as groq_err:
-        print(f"⚠️ Groq greška ({groq_err}). Preusmeravam na Online Ollama...")
+        print(f"⚠️ Groq greška ({groq_err}). Preusmeravam na Google Gemini Online...")
         try:
-            used_provider = f"Online Ollama ({OLLAMA_MODEL})"
-            answer = query_ollama_online(system_prompt, user_query)
+            used_provider = "Google Gemini 1.5 Flash (Online Free)"
+            answer = query_gemini_online(system_prompt, user_query)
         except Exception as fallback_err:
             used_provider = "Greška"
-            answer = f"❌ Greška pri komunikaciji sa modelima:\n- Groq: `{groq_err}`\n- Ollama: `{fallback_err}`"
+            answer = f"❌ Greška pri komunikaciji sa AI modelima:\n- Groq: `{groq_err}`\n- Gemini: `{fallback_err}`"
 
     return {
         "answer": answer,
