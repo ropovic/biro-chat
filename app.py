@@ -1,56 +1,73 @@
-import os
 import streamlit as st
-from rag_engine import ask_birochat
+from rag_engine import query_biro_system
+from r2_sync import sync_employees_from_r2
 
-st.set_page_config(page_title="BiroChat AI", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="BiroChat - Upravljanje i Zaposleni", page_icon="🏢", layout="wide")
 
-st.sidebar.title("🤖 BiroChat Status")
-st.sidebar.markdown("---")
+st.title("🏢 BiroChat - Interni Asistent")
+st.markdown("Pretraga baze dokumenata, organizacione strukture i zaposlenih u Birou.")
 
-groq_set = bool(os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY"))
-st.sidebar.success("✅ Primarni LLM: Groq" if groq_set else "⚠️ Groq nije podešen")
-st.sidebar.info("🌐 Web Fallback: Tavily Search")
-st.sidebar.info("🎯 Vector Engine: Qdrant Cloud (BGE-M3)")
+# Bočna traka za administraciju
+with st.sidebar:
+    st.header("⚙️ Administracija")
+    if st.button("🔄 Osveži zaposlene iz Cloudflare R2"):
+        with st.spinner("Preuzimanje slika i opisa..."):
+            sync_employees_from_r2()
+            st.success("Baza zaposlenih je uspešno ažurirana!")
 
-st.sidebar.markdown("---")
-if st.sidebar.button("🧹 Očisti chat"):
-    st.session_state.messages = []
-    st.rerun()
-
-st.title("📂 BiroChat — Hybrid RAG Asistent")
-st.caption("Pretražuje internu bazu Biroa, a po potrebi vrši pretragu interneta u realnom vremenu.")
-
+# Istorija poruka u sesiji
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if message["role"] == "assistant" and "provider" in message:
-            sources = ", ".join(message.get('sources', [])) or "Nema internih"
-            web_info = f" | 🌐 Web izvori: {len(message.get('web_sources', []))}" if message.get('used_web') else ""
-            st.caption(f"⚙️ **Model:** {message['provider']} | 📄 **Interni izvori:** `{sources}`{web_info}")
+# Prikaz prethodnih poruka
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if "employees" in msg and msg["employees"]:
+            st.write("---")
+            st.subheader("🖼️ Detektovani profili zaposlenih:")
+            cols = st.columns(min(len(msg["employees"]), 3))
+            for idx, emp in enumerate(msg["employees"]):
+                with cols[idx % 3]:
+                    st.image(emp["image_url"], use_column_width=True)
+                    badge = "⭐ DIREKTOR" if emp.get("is_director") else "👤 ZAPOSLENI"
+                    st.markdown(f"**{emp['name']}**\n\n`{badge}`")
+                    st.caption(f"**Rola:** {emp['role']}")
+                    if emp.get("description"):
+                        st.write(emp["description"])
 
-if user_query := st.chat_input("Postavite pitanje..."):
-    st.session_state.messages.append({"role": "user", "content": user_query})
+# Korisnički unos
+if prompt := st.chat_input("Postavite pitanje (npr. 'Ko je direktor Biroa?' ili 'Prikaži zaposlene')..."):
+    # Prikaz korisničkog pitanja
+    st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
-        st.markdown(user_query)
+        st.markdown(prompt)
 
+    # Generisanje odgovora
     with st.chat_message("assistant"):
-        with st.spinner("Pretražujem bazu i internet..."):
-            res = ask_birochat(user_query)
+        with st.spinner("Pretražujem bazu dokumenata i Cloudflare R2..."):
+            answer, employees = query_biro_system(prompt)
             
-            st.markdown(res["answer"])
+            st.markdown(answer)
             
-            sources = ", ".join(res['sources']) if res['sources'] else "Nema internih"
-            web_info = f" | 🌐 Korišćena pretraga interneta ({len(res['web_sources'])} izvora)" if res['used_web'] else ""
-            st.caption(f"⚙️ **Model:** {res['provider']} | 📄 **Interni izvori:** `{sources}`{web_info}")
-            
+            # Prikaz vizuelnih kartica zaposlenih ako ih ima u rezultatima
+            if employees:
+                st.write("---")
+                st.subheader("🖼️ Identifikovani profili iz baze:")
+                cols = st.columns(min(len(employees), 3))
+                for idx, emp in enumerate(employees):
+                    with cols[idx % 3]:
+                        st.image(emp["image_url"], caption=emp["name"], use_column_width=True)
+                        badge = "⭐ DIREKTOR BIROA" if emp.get("is_director") else "👤 ZAPOSLENI"
+                        st.markdown(f"**{emp['name']}**")
+                        st.markdown(f"**Status:** `{badge}`")
+                        st.markdown(f"**Pozicija:** {emp['role']}")
+                        if emp.get("description"):
+                            st.caption(emp["description"])
+
+            # Sačuvanje u sesiju
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": res["answer"],
-                "provider": res["provider"],
-                "sources": res["sources"],
-                "web_sources": res["web_sources"],
-                "used_web": res["used_web"]
+                "content": answer,
+                "employees": employees
             })
