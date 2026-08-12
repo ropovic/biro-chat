@@ -31,7 +31,6 @@ COLLECTION_NAME = get_config("COLLECTION_NAME", "biro_documents")
 # --- KEŠIRANI MODELI I KLIJENTI ---
 @st.cache_resource(show_spinner=False)
 def load_embedding_model():
-    # Jedinstveni BAAI/bge-m3 model (vektor dimenzije 1024)
     return SentenceTransformer("BAAI/bge-m3")
 
 
@@ -46,11 +45,7 @@ def get_groq_client() -> Groq | None:
 
 
 # --- PRETRAGA INTERNE QDRANT BAZE ---
-def retrieve_internal_context(query: str, top_k: int = 4, max_chars_per_doc: int = 2500) -> Dict[str, Any]:
-    """
-    Pretražuje Qdrant i vraća tekst skraćen na bezbednu dužinu radi prevencije
-    Groq Error 413 (Rate Limit / Token Exceeded) grešaka.
-    """
+def retrieve_internal_context(query: str, top_k: int = 6, max_chars_per_doc: int = 2500) -> Dict[str, Any]:
     embed_model = load_embedding_model()
     qdrant_client = get_qdrant_client()
 
@@ -79,7 +74,7 @@ def retrieve_internal_context(query: str, top_k: int = 4, max_chars_per_doc: int
         payload = res.payload or {}
         doc_type = payload.get("doc_type", "document")
         
-        # Ako je u pitanju profil zaposlenog ili logo, sačuvaj metapodatke za UI karticu
+        # Ako je profil zaposlenog ili logo
         if doc_type in ["employee", "employee_profile", "logo"]:
             matched_employees.append(payload)
             name = payload.get("name", "Nepoznato")
@@ -87,8 +82,8 @@ def retrieve_internal_context(query: str, top_k: int = 4, max_chars_per_doc: int
             desc = payload.get("description", "")
             
             block = f"👤 PROFIL / LICE: {name}\n"
-            block += f"💼 FUNKCIJA: {role}\n"
-            block += f"📝 OPIS: {desc}\n"
+            block += f"💼 FUNKCIJA / ROLA: {role}\n"
+            block += f"📝 DETALJAN OPIS: {desc}\n"
             formatted_context.append(block)
             sources.append(f"Profil: {name}")
             continue
@@ -97,25 +92,12 @@ def retrieve_internal_context(query: str, top_k: int = 4, max_chars_per_doc: int
         doc_name = payload.get("document_name", payload.get("name", "Dokument"))
         content = payload.get("markdown_content", payload.get("text", ""))
         
-        # Skraćivanje teksta predugačkih dokumenata radi zaštite TPM limita (12000 tokena)
         if len(content) > max_chars_per_doc:
-            content_snippet = content[:max_chars_per_doc] + "\n\n... [sadržaj dokumenta je skraćen zbog dužine]"
+            content_snippet = content[:max_chars_per_doc] + "\n\n... [skraćeno zbog dužine]"
         else:
             content_snippet = content
 
-        employees = payload.get("detected_employees_in_doc", [])
-        emp_str = ", ".join([e.get('employee_name', '') for e in employees if isinstance(e, dict)]) if employees else "Nema detektovanih lica"
-        
-        csvs = payload.get("csv_tables_attached", [])
-        csv_str = ", ".join(csvs) if csvs else "Nema priloženih tabela"
-
-        block = f"📄 INTERNI DOKUMENT: {doc_name}\n"
-        if emp_str != "Nema detektovanih lica":
-            block += f"👤 PREPOZNATI ZAPOSLENI: {emp_str}\n"
-        if csv_str != "Nema priloženih tabela":
-            block += f"📊 ATTACHED TABELE: {csv_str}\n"
-        block += f"📝 TEKST DOKUMENTA:\n{content_snippet}\n"
-        
+        block = f"📄 DOKUMENT: {doc_name}\n📝 SADRŽAJ:\n{content_snippet}\n"
         formatted_context.append(block)
         sources.append(doc_name)
 
@@ -129,7 +111,6 @@ def retrieve_internal_context(query: str, top_k: int = 4, max_chars_per_doc: int
 
 # --- WEB PRETRAGA (TAVILY FALLBACK) ---
 def search_web_tavily(query: str) -> Dict[str, Any]:
-    """Pretražuje internet preko Tavily API-ja ako podaci u bazi ne postoje ili imaju nizak score."""
     api_key = get_config("TAVILY_API_KEY", "")
     if not api_key:
         return {"web_context": "", "web_sources": []}
@@ -157,9 +138,8 @@ def search_web_tavily(query: str) -> Dict[str, Any]:
         return {"web_context": "", "web_sources": []}
 
 
-# --- LLM POZIVI (GROQ + GEMINI 2.0 ONLINE FALLBACK) ---
+# --- LLM POZIVI ---
 def query_groq(system_prompt: str, user_query: str) -> str:
-    """Poziva primarni Groq LLaMA-3.3-70B model."""
     client = get_groq_client()
     if not client:
         raise ValueError("GROQ_API_KEY nije definisan u Secrets.")
@@ -170,19 +150,17 @@ def query_groq(system_prompt: str, user_query: str) -> str:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_query}
         ],
-        temperature=0.2,
+        temperature=0.1,
         max_tokens=1500
     )
     return response.choices[0].message.content
 
 
 def query_gemini_online(system_prompt: str, user_query: str) -> str:
-    """Poziva besplatni Google Gemini 2.0 Flash REST API kao 100% online fallback."""
     gemini_key = get_config("GEMINI_API_KEY", "")
     if not gemini_key:
         raise ValueError("GEMINI_API_KEY nije podešen u Secrets.")
 
-    # Koristi aktuelni Gemini 2.0 Flash endpoint
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}"
     headers = {"Content-Type": "application/json"}
     
@@ -196,7 +174,7 @@ def query_gemini_online(system_prompt: str, user_query: str) -> str:
             }
         ],
         "generationConfig": {
-            "temperature": 0.2,
+            "temperature": 0.1,
             "maxOutputTokens": 1500
         }
     }
@@ -210,15 +188,15 @@ def query_gemini_online(system_prompt: str, user_query: str) -> str:
 
 # --- GLAVNI RAG FLOW ---
 def ask_birochat(user_query: str) -> Dict[str, Any]:
-    # 1. Pretraga interne Qdrant baze
     internal_res = retrieve_internal_context(user_query)
     
     used_web_search = False
     web_sources = []
-    combined_context = ""
 
-    # Ako je score manji od 0.35 ili nema dokumenata u Qdrant-u, aktivira se Tavily Web Search
-    if internal_res["max_score"] < 0.35 or not internal_res["sources"]:
+    # WEB PRETRAGA SE SE POKREĆE SAMO AKO NEMA ZAPOSLENIH I SCORE JE NIŽI OD 0.20
+    has_matched_employees = len(internal_res["matched_employees"]) > 0
+    
+    if not has_matched_employees and (internal_res["max_score"] < 0.20 or not internal_res["sources"]):
         used_web_search = True
         web_res = search_web_tavily(user_query)
         web_sources = web_res["web_sources"]
@@ -230,15 +208,19 @@ def ask_birochat(user_query: str) -> Dict[str, Any]:
     else:
         combined_context = f"INTERNI PODACI I PROFILI ZAPOSLENIH:\n{internal_res['context_str']}"
 
+    # STROGO SISTEMSKO UPUTSTVO PROTIV GENERALIZACIJE
     system_prompt = (
-        "Ti si BiroChat AI asistent. Odgovaraj precizno, tačno i profesionalno na srpskom jeziku.\n"
-        "Za formulisanje odgovora primarno koristi priložene podatke.\n"
-        "Ako su u kontekstu navedeni direktor, zamenici direktora, samostalni projektanti, projektanti, blagajnici ili geodete, jasnim rečima iznesi tražene podatke."
+        "Ti si BiroChat AI asistent za internek podatke Biroa i JP Srbijašume.\n\n"
+        "VAŽNA PRAVILA ZA ODGOVARANJE:\n"
+        "1. Ako korisnik pita ko obavlja neku funkciju (npr. 'Ko je zamenik direktora?', 'Ko je direktor?', 'Ko su blagajnici?'), "
+        "IZRIČITO I ODMAH navedi tačna IMENA I PREZIMENA osoba navedenih u kontekstu!\n"
+        "2. STROGO JE ZABRANJENO davati opšte definicije radnih mesta ili objašnjavati šta ta funkcija inače znači u teoriji (npr. 'Zamenik direktora je osoba koja pomaže...'). Korisnika zanimaju SAMO KONKRETNA LICA iz baze.\n"
+        "3. Budi direktan, jasan i precizan. Ako ima više lica za istu funkciju (npr. dva zamenika direktora), navedi ih sve u listi.\n\n"
+        f"PRILOŽENI KONTEKST IZ BAZE:\n{combined_context}"
     )
 
     used_provider = "Groq (LLaMA-3.3-70B)"
     
-    # Executing LLM call with fallback to Gemini 2.0 Flash if Groq fails
     try:
         answer = query_groq(system_prompt, user_query)
     except Exception as groq_err:
@@ -260,7 +242,6 @@ def ask_birochat(user_query: str) -> Dict[str, Any]:
     }
 
 
-# Kompatibilnost za stariji naziv funkcije u app.py
 def query_biro_system(user_query: str) -> Tuple[str, List[Dict[str, Any]]]:
     res = ask_birochat(user_query)
     return res["answer"], res["matched_employees"]
