@@ -3,4 +3,5 @@ qdrant-client
 langchain-huggingface
 sentence-transformers
 groq
+tavily-python
 requests
