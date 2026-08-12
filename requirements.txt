@@ -1,7 +1,7 @@
 streamlit
+requests
+boto3
 qdrant-client
-langchain-huggingface
 sentence-transformers
 groq
 tavily-python
-requests
