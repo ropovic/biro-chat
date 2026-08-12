@@ -1,12 +1,6 @@
-streamlit>=1.30
-qdrant-client>=1.7
-fastembed>=0.4
-langchain>=0.2
-langchain-groq
-langchain-community
-pypdf
-docx2txt
-pandas
-openpyxl
-Pillow
+streamlit
+qdrant-client
+langchain-huggingface
+sentence-transformers
+groq
 requests
