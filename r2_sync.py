@@ -1,3 +1,31 @@
+import os
+import json
+import boto3
+import streamlit as st
+from qdrant_client import QdrantClient
+from qdrant_client.models import PointStruct, VectorParams, Distance
+
+
+def get_config(key: str, default: str = "") -> str:
+    try:
+        if key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+
+R2_ACCOUNT_ID = get_config("R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = get_config("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = get_config("R2_SECRET_ACCESS_KEY")
+R2_BUCKET_NAME = get_config("R2_BUCKET_NAME")
+R2_PUBLIC_URL_PREFIX = get_config("R2_PUBLIC_URL_PREFIX").rstrip("/")
+
+QDRANT_URL = get_config("QDRANT_URL", "https://09ffa5ef-2765-45c8-bfcf-29bc6bf90f08.eu-west-2-0.aws.cloud.qdrant.io")
+QDRANT_API_KEY = get_config("QDRANT_API_KEY", "")
+COLLECTION_NAME = get_config("COLLECTION_NAME", "biro_documents")
+
+
 def get_s3_client():
     if not R2_ACCOUNT_ID or not R2_ACCESS_KEY_ID or not R2_SECRET_ACCESS_KEY:
         print("⚠️ Nedostaju Cloudflare R2 kredencijali u Secrets.")
@@ -13,27 +41,39 @@ def get_s3_client():
 
 
 def sync_employees_from_r2():
-    """
-    Preuzima 'employees.json' iz Cloudflare R2 bucket-a i indeksira
-    sve zaposlene u Qdrant. Preskače ako ključevi nisu podešeni.
-    """
     s3 = get_s3_client()
     if not s3:
-        print("⚠️ Preskačem R2 sinhronizaciju jer R2 ključevi nisu definisani u Secrets.")
+        print("⚠️ Preskačem R2 sinhronizaciju (nedostaju R2 ključevi).")
         return
 
-    print("Preuzimanje manifesta 'employees.json' iz Cloudflare R2...")
+    print("Preuzimanje 'employees.json' iz Cloudflare R2...")
     try:
         response = s3.get_object(Bucket=R2_BUCKET_NAME, Key="employees.json")
         raw_data = response['Body'].read().decode('utf-8')
         employees_data = json.loads(raw_data)
     except Exception as e:
-        print(f"❌ Greška pri čitanju employees.json iz R2 bucket-a: {e}")
+        print(f"❌ Greška pri čitanju employees.json iz R2: {e}")
         return
 
-    print(f"Pronađeno {len(employees_data)} unosa. Inicijalizacija BAAI/bge-m3 embedding modela...")
+    from sentence_transformers import SentenceTransformer
     embedder = SentenceTransformer("BAAI/bge-m3")
     qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, check_compatibility=False)
+
+    # Provera i rekreiranje kolekcije ako dimenzija vektora nije 1024
+    try:
+        collection_info = qdrant.get_collection(collection_name=COLLECTION_NAME)
+        current_size = collection_info.config.params.vectors.size
+        if current_size != 1024:
+            print(f"⚠️ Dimenzija kolekcije ({current_size}) se ne poklapa sa BGE-M3 (1024). Ponovo kreiram kolekciju...")
+            qdrant.recreate_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=VectorParams(size=1024, distance=Distance.COSINE)
+            )
+    except Exception:
+        qdrant.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=1024, distance=Distance.COSINE)
+        )
 
     points = []
     for idx, emp in enumerate(employees_data):
@@ -46,12 +86,12 @@ def sync_employees_from_r2():
             image_url = photo_filename
 
         full_text = (
-            f"Ime i prezime / Naziv: {emp.get('name', '')}. "
-            f"Rola / Funkcija: {emp.get('role', '')}. "
-            f"Tip unosa: {doc_type}. "
-            f"Da li je direktor: {'Da' if emp.get('is_director') else 'Ne'}. "
-            f"Da li je zamenik direktora: {'Da' if emp.get('is_deputy_director') else 'Ne'}. "
-            f"Detaljan opis: {emp.get('description', '')}"
+            f"Ime i prezime: {emp.get('name', '')}. "
+            f"Rola / Funkcija / Pozicija: {emp.get('role', '')}. "
+            f"Tip: {doc_type}. "
+            f"Direktor: {'Da' if emp.get('is_director') else 'Ne'}. "
+            f"Zamenik direktora: {'Da' if emp.get('is_deputy_director') else 'Ne'}. "
+            f"Opis: {emp.get('description', '')}"
         )
 
         vector = embedder.encode(full_text).tolist()
@@ -76,12 +116,5 @@ def sync_employees_from_r2():
             )
         )
 
-    existing_collections = [c.name for c in qdrant.get_collections().collections]
-    if COLLECTION_NAME not in existing_collections:
-        qdrant.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(size=1024, distance=Distance.COSINE)
-        )
-
     qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
-    print(f"✅ Uspešno indeksirano {len(points)} unosa u Qdrant!")
+    print(f"✅ Uspešno indeksirano {len(points)} unosa zaposlenih u Qdrant!")
