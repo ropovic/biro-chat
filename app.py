@@ -1,7 +1,7 @@
-import os
 import streamlit as st
+from rag_engine import ask_birochat
 
-# Postavljanje konfiguracije stranice (obavezno na samom početku)
+# Podešavanje stranice
 st.set_page_config(
     page_title="BiroChat AI",
     page_icon="🏢",
@@ -9,140 +9,106 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-from rag_engine import ask_birochat
-from r2_sync import sync_employees_from_r2
-
-# Bezbedna sinhronizacija sa R2 samo jednom pri pokretanju aplikacije
-if "r2_synced" not in st.session_state:
-    try:
-        sync_employees_from_r2()
-        st.session_state.r2_synced = True
-    except Exception as e:
-        st.session_state.r2_synced = False
-        print(f"R2 sinhronizacija nije izvršena: {e}")
-
-# Inicijalizacija istorije poruka
+# Inicijalizacija istorije poruka u session state-u
 if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "assistant",
-            "content": "Zdravo! Ja sam **BiroChat AI** asistent. Možete me pitati o zaposlenima, rukovodstvu, geodetama, blagajnicima, kao i o ostalim dokumentima i informacijama vezanim za Biro."
-        }
-    ]
+    st.session_state.messages = []
 
-# --- SIDEBAR (BOČNA TRAKA) ---
-with st.sidebar:
-    st.image("https://raw.githubusercontent.com/streamlit/streamlit/main/docs/static/logo.png", width=120)
-    st.title("🏢 BiroChat Admin")
-    st.markdown("---")
+
+def render_employee_cards(employees: list):
+    """Renderuje vizuelne kartice za zaposlene sa slikama sa URL-a."""
+    if not employees:
+        return
+
+    st.markdown("### 👤 Profil / Rukovodstvo")
     
-    st.subheader("⚙️ Status sistema")
-    if st.session_state.get("r2_synced"):
-        st.success("Cloudflare R2: Sinhronizovano")
-    else:
-        st.warning("Cloudflare R2: Aktivna lokalna/Qdrant baza")
+    # Prikaz u mrežastom rasporedu (do 3 kartice u redu)
+    cols = st.columns(min(len(employees), 3))
+    
+    for idx, emp in enumerate(employees):
+        col = cols[idx % 3]
+        with col:
+            with st.container(border=True):
+                # Ekstrakcija URL-a slike iz različitih mogućih ključeva u bazi
+                img_url = (
+                    emp.get("image_url") or 
+                    emp.get("photo_url") or 
+                    emp.get("image") or 
+                    emp.get("slika")
+                )
+                
+                # Učitavanje slike preko st.image() ako je URL validan
+                if img_url and isinstance(img_url, str) and img_url.startswith(("http://", "https://")):
+                    try:
+                        st.image(
+                            img_url,
+                            caption=emp.get("name", ""),
+                            use_container_width=True
+                        )
+                    except Exception:
+                        st.warning("⚠️ Slika ne može da se učita")
+                else:
+                    st.info("👤 Nema priložene fotografije")
 
-    st.markdown("---")
-    if st.button("🗑️ Očisti istoriju razgovora", use_container_width=True):
-        st.session_state.messages = [
-            {
-                "role": "assistant",
-                "content": "Istorija je očišćena. Kako vam mogu pomoći?"
-            }
-        ]
-        st.rerun()
+                # Osnovni podaci o zaposlenom
+                name = emp.get("name", "Nepoznati zaposleni")
+                role = emp.get("role", "Funkcija nije navedena")
+                
+                st.subheader(name)
+                st.caption(f"💼 **Funkcija:** {role}")
 
-    st.markdown("---")
-    st.caption("BiroChat v2.0 | Powered by Qdrant & Groq / Gemini")
 
-# --- GLAVNI INTERFEJS ---
-st.title("🏢 BiroChat AI Asistent")
-st.caption("Pretraga interne dokumentacije i profila zaposlenih")
+# Glavni interfejs
+st.title("🏢 BiroChat Interni Asistent")
+st.caption("Pretraga interne dokumentacije, ugovora i profila zaposlenih.")
 
 # Prikaz prethodnih poruka iz istorije
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         
-        # Ako poruka sadrži kartice zaposlenih ili logotipa
-        if "matched_employees" in msg and msg["matched_employees"]:
-            st.markdown("---")
-            cols = st.columns(min(len(msg["matched_employees"]), 3))
-            for idx, emp in enumerate(msg["matched_employees"]):
-                col = cols[idx % 3]
-                with col:
-                    img_src = emp.get("image_url") or emp.get("photo_filename")
-                    if img_src:
-                        st.image(img_src, caption=emp.get("name", ""), use_container_width=True)
-                    st.write(f"**{emp.get('name', '')}**")
-                    st.caption(f"💼 {emp.get('role', 'Zaposleni')}")
-                    
+        # Ako poruka sadrži profil zaposlenog, prikaži karticu
+        if msg.get("matched_employees"):
+            render_employee_cards(msg["matched_employees"])
+            
         # Prikaz izvora ako postoje
-        if "sources" in msg and msg["sources"]:
-            with st.expander("📚 Korišćeni interni izvori"):
+        if msg.get("sources"):
+            with st.expander("📚 Korišćeni izvori iz baze"):
                 for src in msg["sources"]:
                     st.write(f"- {src}")
-                    
-        if "web_sources" in msg and msg["web_sources"]:
-            with st.expander("🌐 Korišćeni web izvori"):
-                for wsrc in msg["web_sources"]:
-                    st.write(f"- {wsrc}")
 
-# --- OBRAĐIVANJE KORISNIČKOG UNOSA ---
-if prompt := st.chat_input("Postavite pitanje (npr. 'Ko je zamenik direktora?', 'Ko su blagajnici?')..."):
-    
-    # Prikaz korisničke poruke
-    st.session_state.messages.append({"role": "user", "content": prompt})
+# Unos pitanja
+if user_input := st.chat_input("Postavite pitanje o dokumentima ili zaposlenima..."):
+    # 1. Prikaz korisničkog pitanja
+    st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.markdown(user_input)
 
-    # Odgovor asistenta
+    # 2. Obrada odgovora preko RAG sistema
     with st.chat_message("assistant"):
-        with st.spinner("Pretražujem bazu i generišem odgovor..."):
-            res = ask_birochat(prompt)
+        with st.spinner("Pretražujem bazu podataka..."):
+            res = ask_birochat(user_input)
             
-            answer = res["answer"]
+            answer = res.get("answer", "")
             matched_employees = res.get("matched_employees", [])
             sources = res.get("sources", [])
-            web_sources = res.get("web_sources", [])
-            provider = res.get("provider", "")
 
-            # Prikaz teksta odgovora
+            # Ispis tekstualnog odgovora
             st.markdown(answer)
 
-            # Prikaz kartica sa fotografijama zaposlenih/logotipa ako su pronađeni
+            # Prikaz kartica sa slikom ako je prepoznat zaposleni
             if matched_employees:
-                st.markdown("---")
-                cols = st.columns(min(len(matched_employees), 3))
-                for idx, emp in enumerate(matched_employees):
-                    col = cols[idx % 3]
-                    with col:
-                        img_src = emp.get("image_url") or emp.get("photo_filename")
-                        if img_src:
-                            st.image(img_src, caption=emp.get("name", ""), use_container_width=True)
-                        st.write(f"**{emp.get('name', '')}**")
-                        st.caption(f"💼 {emp.get('role', 'Zaposleni')}")
+                render_employee_cards(matched_employees)
 
             # Prikaz izvora
             if sources:
-                with st.expander("📚 Korišćeni interni izvori"):
+                with st.expander("📚 Korišćeni izvori iz baze"):
                     for src in sources:
                         st.write(f"- {src}")
 
-            if web_sources:
-                with st.expander("🌐 Korišćeni web izvori"):
-                    for wsrc in web_sources:
-                        st.write(f"- {wsrc}")
-
-            if provider:
-                st.caption(f"🤖 Model: {provider}")
-
-    # Cuvanje u istoriju
+    # 3. Čuvanje kompletnog odgovora u istoriji radi očuvanja stanja slika pri osvežavanju
     st.session_state.messages.append({
         "role": "assistant",
         "content": answer,
         "matched_employees": matched_employees,
-        "sources": sources,
-        "web_sources": web_sources,
-        "provider": provider
+        "sources": sources
     })
