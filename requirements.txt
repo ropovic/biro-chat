@@ -5,3 +5,7 @@ qdrant-client
 sentence-transformers
 groq
 tavily-python
+langchain
+langchain-community
+langchain-huggingface
+langchain-qdrant
