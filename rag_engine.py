@@ -5,33 +5,33 @@ from groq import Groq
 
 class RAGEngine:
     def __init__(self):
-        # Parametri moraju biti identični onima iz skripte za indeksiranje
+        # Parametri za Qdrant Cloud
         self.qdrant_url = "https://09ffa5ef-2765-45c8-bfcf-29bc6bf90f08.eu-west-2-0.aws.cloud.qdrant.io"
         self.qdrant_api_key = os.getenv("QDRANT_API_KEY", "VAŠ_API_KLJUČ_OVDE")
-        self.collection_name = "Baza_biro" # TAČAN NAZIV KOLEKCIJE SA 1583 POENA
+        self.collection_name = "Baza_biro"
         
-        # Isti embedding model koji je korišćen pri indeksiranju
+        # Sentence Transformer model za embedding
         self.encoder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
         
-        # Inicijalizacija Qdrant Cloud klijenta
+        # Qdrant klijent
         self.qdrant_client = QdrantClient(
             url=self.qdrant_url,
             api_key=self.qdrant_api_key,
             check_compatibility=False
         )
         
-        # Inicijalizacija Groq klijenta
+        # Groq klijent
         self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         self.llm_model = "llama3-8b-8192"
 
     def query(self, user_question: str) -> str:
-        """Pretražuje Bazu_biro i šalje pronađeni kontekst Groq LLM modelu."""
+        """Pretražuje Bazu_biro i šalje kontekst Groq LLM-u."""
         
-        # 1. Generisanje vektora upita
+        # 1. Generisanje vektora
         query_vector = self.encoder.encode(user_question).tolist()
         
         try:
-            # 2. Pretraga u Qdrant Cloud bazi (povlačimo top 5 najrelevantnijih chunk-ova)
+            # 2. Pretraga u Qdrant Cloud bazi
             search_results = self.qdrant_client.search(
                 collection_name=self.collection_name,
                 query_vector=query_vector,
@@ -47,23 +47,20 @@ class RAGEngine:
         context_texts = []
         for hit in search_results:
             payload = hit.payload or {}
-            # Langchain standardno čuva tekst pod ključem 'page_content'
             text_content = payload.get("page_content") or payload.get("text")
             
             if text_content:
-                # Ako postoji i informacija o originalnom fajlu u metadata, možemo je izvući
                 metadata = payload.get("metadata", {})
                 source_file = metadata.get("source", "Dokument")
-                
                 block = f"📄 Izvor: {source_file}\nSadržaj:\n{text_content}"
                 context_texts.append(block)
                 
         if not context_texts:
-            return "Pronađeni su rezultati u bazi, ali tekstualni sadržaj nije mogao biti proitan iz payloada."
+            return "Pronađeni su rezultati u bazi, ali tekstualni sadržaj nije mogao biti pročitan."
             
         context = "\n---\n".join(context_texts)
         
-        # 4. Priprema prompta za model
+        # 4. Sistemski prompt
         system_prompt = (
             "Ti si BiroChat, korporativni asistent za pretragu dokumentacije. "
             "Odgovori precizno na korisničko pitanje koristeći ISKLJUČIVO priloženi kontekst iz baze. "
@@ -87,5 +84,10 @@ class RAGEngine:
         except Exception as e:
             return f"⚠️ Greška prilikom generisanja odgovora od strane LLM-a: {e}"
 
-# Instanca za direktan import u app.py
-rag_engine = RAGEngine()
+# Globalna instanca klase
+_engine_instance = RAGEngine()
+
+# Funkcija koju app.py očekuje i uvozi
+def ask_birochat(question: str) -> str:
+    """Omotač koji direktno poziva RAG engine za app.py"""
+    return _engine_instance.query(question)
