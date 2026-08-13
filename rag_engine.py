@@ -1,69 +1,71 @@
 import os
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
 from groq import Groq
 
 class RAGEngine:
     def __init__(self):
         # Parametri za Qdrant Cloud
         self.qdrant_url = "https://09ffa5ef-2765-45c8-bfcf-29bc6bf90f08.eu-west-2-0.aws.cloud.qdrant.io"
-        self.qdrant_api_key = os.getenv("QDRANT_API_KEY", "VAŠ_API_KLJUČ_OVDE")
+        self.qdrant_api_key = os.getenv("QDRANT_API_KEY", "VAŠ_API_KLJUČ_OVDE") # Obavezno unesite ključ
         self.collection_name = "Baza_biro"
         
-        # Sentence Transformer model za embedding
-        self.encoder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+        # 1. Inicijalizacija istog embedding modela korišćenog pri indeksiranju
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={'device': 'cpu'}, 
+            encode_kwargs={'normalize_embeddings': True}
+        )
         
-        # Qdrant klijent
-        self.qdrant_client = QdrantClient(
+        # 2. Povezivanje na Qdrant Cloud
+        self.client = QdrantClient(
             url=self.qdrant_url,
             api_key=self.qdrant_api_key,
             check_compatibility=False
         )
         
-        # Groq klijent
+        # 3. Langchain omotač za pretragu (eliminiše 'search' attribute error)
+        self.vector_store = QdrantVectorStore(
+            client=self.client,
+            collection_name=self.collection_name,
+            embedding=self.embeddings
+        )
+        
+        # 4. Groq klijent
         self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         self.llm_model = "llama3-8b-8192"
 
     def query(self, user_question: str) -> dict:
-        """Pretražuje Bazu_biro i vraća rečnik sa 'answer' i 'source_documents'."""
-        
-        # 1. Generisanje vektora
-        query_vector = self.encoder.encode(user_question).tolist()
+        """Pretražuje Bazu_biro preko Langchain-a i vraća rečnik."""
         
         try:
-            # 2. Pretraga u Qdrant Cloud bazi
-            search_results = self.qdrant_client.search(
-                collection_name=self.collection_name,
-                query_vector=query_vector,
-                limit=5
-            )
+            # Pretraga preko Langchain-a (metoda similarity_search)
+            docs = self.vector_store.similarity_search(user_question, k=5)
         except Exception as e:
-            return {"answer": f"⚠️ Greška prilikom komunikacije sa Qdrant bazom: {e}", "source_documents": []}
+            return {"answer": f"⚠️ Greška prilikom pretrage: {e}", "source_documents": []}
             
-        if not search_results:
+        if not docs:
             return {"answer": "Nažalost, nisam pronašao relevantne informacije u bazi podataka.", "source_documents": []}
             
-        # 3. Ekstrakcija teksta iz Langchain payloada ('page_content')
         context_texts = []
         sources = []
-        for hit in search_results:
-            payload = hit.payload or {}
-            text_content = payload.get("page_content") or payload.get("text")
+        
+        # Langchain automatski kreira objekte sa .page_content i .metadata
+        for doc in docs:
+            text_content = doc.page_content
+            source_file = doc.metadata.get("source", "Nepoznat dokument")
             
-            if text_content:
-                metadata = payload.get("metadata", {})
-                source_file = metadata.get("source", "Dokument")
+            # Filtriranje kako ne bismo dodavali iste izvore više puta u listu
+            if source_file not in sources:
                 sources.append(source_file)
-                
-                block = f"📄 Izvor: {source_file}\nSadržaj:\n{text_content}"
-                context_texts.append(block)
-                
-        if not context_texts:
-            return {"answer": "Pronađeni su rezultati u bazi, ali tekstualni sadržaj nije mogao biti pročitan.", "source_documents": []}
+            
+            block = f"📄 Izvor: {source_file}\nSadržaj:\n{text_content}"
+            context_texts.append(block)
             
         context = "\n---\n".join(context_texts)
         
-        # 4. Sistemski prompt
+        # Sistemski prompt
         system_prompt = (
             "Ti si BiroChat, korporativni asistent za pretragu dokumentacije. "
             "Odgovori precizno na korisničko pitanje koristeći ISKLJUČIVO priloženi kontekst iz baze. "
@@ -72,7 +74,7 @@ class RAGEngine:
         
         user_prompt = f"Kontekst iz baze:\n{context}\n\nPitanje: {user_question}"
         
-        # 5. Poziv Groq API-ja
+        # Poziv Groq API-ja
         try:
             response = self.groq_client.chat.completions.create(
                 messages=[
@@ -85,7 +87,6 @@ class RAGEngine:
             )
             answer_text = response.choices[0].message.content
             
-            # Vraćamo rečnik koji odgovara očekivanju u app.py
             return {
                 "answer": answer_text,
                 "source_documents": context_texts,
@@ -97,7 +98,6 @@ class RAGEngine:
 # Globalna instanca klase
 _engine_instance = RAGEngine()
 
-# Funkcija koju app.py očekuje i uvozi
+# Funkcija koju app.py očekuje
 def ask_birochat(question: str) -> dict:
-    """Omotač koji vraća dict sa odgovorom."""
     return _engine_instance.query(question)
