@@ -24,8 +24,8 @@ class RAGEngine:
         self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         self.llm_model = "llama3-8b-8192"
 
-    def query(self, user_question: str) -> str:
-        """Pretražuje Bazu_biro i šalje kontekst Groq LLM-u."""
+    def query(self, user_question: str) -> dict:
+        """Pretražuje Bazu_biro i vraća rečnik sa 'answer' i 'source_documents'."""
         
         # 1. Generisanje vektora
         query_vector = self.encoder.encode(user_question).tolist()
@@ -38,13 +38,14 @@ class RAGEngine:
                 limit=5
             )
         except Exception as e:
-            return f"⚠️ Greška prilikom komunikacije sa Qdrant bazom: {e}"
+            return {"answer": f"⚠️ Greška prilikom komunikacije sa Qdrant bazom: {e}", "source_documents": []}
             
         if not search_results:
-            return "Nažalost, nisam pronašao relevantne informacije u bazi podataka."
+            return {"answer": "Nažalost, nisam pronašao relevantne informacije u bazi podataka.", "source_documents": []}
             
         # 3. Ekstrakcija teksta iz Langchain payloada ('page_content')
         context_texts = []
+        sources = []
         for hit in search_results:
             payload = hit.payload or {}
             text_content = payload.get("page_content") or payload.get("text")
@@ -52,11 +53,13 @@ class RAGEngine:
             if text_content:
                 metadata = payload.get("metadata", {})
                 source_file = metadata.get("source", "Dokument")
+                sources.append(source_file)
+                
                 block = f"📄 Izvor: {source_file}\nSadržaj:\n{text_content}"
                 context_texts.append(block)
                 
         if not context_texts:
-            return "Pronađeni su rezultati u bazi, ali tekstualni sadržaj nije mogao biti pročitan."
+            return {"answer": "Pronađeni su rezultati u bazi, ali tekstualni sadržaj nije mogao biti pročitan.", "source_documents": []}
             
         context = "\n---\n".join(context_texts)
         
@@ -80,14 +83,21 @@ class RAGEngine:
                 temperature=0.1,
                 max_tokens=1024
             )
-            return response.choices[0].message.content
+            answer_text = response.choices[0].message.content
+            
+            # Vraćamo rečnik koji odgovara očekivanju u app.py
+            return {
+                "answer": answer_text,
+                "source_documents": context_texts,
+                "sources": sources
+            }
         except Exception as e:
-            return f"⚠️ Greška prilikom generisanja odgovora od strane LLM-a: {e}"
+            return {"answer": f"⚠️ Greška prilikom generisanja odgovora od strane LLM-a: {e}", "source_documents": []}
 
 # Globalna instanca klase
 _engine_instance = RAGEngine()
 
 # Funkcija koju app.py očekuje i uvozi
-def ask_birochat(question: str) -> str:
-    """Omotač koji direktno poziva RAG engine za app.py"""
+def ask_birochat(question: str) -> dict:
+    """Omotač koji vraća dict sa odgovorom."""
     return _engine_instance.query(question)
