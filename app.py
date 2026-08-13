@@ -20,15 +20,12 @@ def render_employee_cards(employees: list):
         return
 
     st.markdown("### 👤 Profil / Rukovodstvo")
-    
-    # Prikaz u mrežastom rasporedu (do 3 kartice u redu)
     cols = st.columns(min(len(employees), 3))
     
     for idx, emp in enumerate(employees):
         col = cols[idx % 3]
         with col:
             with st.container(border=True):
-                # Ekstrakcija URL-a slike iz različitih mogućih ključeva u bazi
                 img_url = (
                     emp.get("image_url") or 
                     emp.get("photo_url") or 
@@ -36,7 +33,6 @@ def render_employee_cards(employees: list):
                     emp.get("slika")
                 )
                 
-                # Učitavanje slike preko st.image() ako je URL validan
                 if img_url and isinstance(img_url, str) and img_url.startswith(("http://", "https://")):
                     try:
                         st.image(
@@ -49,7 +45,6 @@ def render_employee_cards(employees: list):
                 else:
                     st.info("👤 Nema priložene fotografije")
 
-                # Osnovni podaci o zaposlenom
                 name = emp.get("name", "Nepoznati zaposleni")
                 role = emp.get("role", "Funkcija nije navedena")
                 
@@ -57,33 +52,53 @@ def render_employee_cards(employees: list):
                 st.caption(f"💼 **Funkcija:** {role}")
 
 
-# Glavni interfejs
+# Zaglavlje interfejsa
 st.title("🏢 BiroChat Interni Asistent")
-st.caption("Pretraga interne dokumentacije, ugovora i profila zaposlenih.")
+st.caption("Pretraga interne dokumentacije, ugovora, POGŠ, opreme i profila zaposlenih.")
 
-# Prikaz prethodnih poruka iz istorije
+# 🧪 Dugmad za brzo testiranje baze
+st.markdown("##### 🧪 Brza test pitanja:")
+btn_col1, btn_col2, btn_col3 = st.columns(3)
+btn_col4, btn_col5, btn_col6 = st.columns(3)
+
+triggered_query = None
+
+if btn_col1.button("1. Ko je direktor Biroa?", use_container_width=True):
+    triggered_query = "Ko je direktor Biroa?"
+if btn_col2.button("2. Ko su zamenici direktora?", use_container_width=True):
+    triggered_query = "Ko su zamenici direktora?"
+if btn_col3.button("3. Postojeće POGŠ u bazi?", use_container_width=True):
+    triggered_query = "Koje osnove gazdovanja šumama (POGŠ) postoje u bazi."
+if btn_col4.button("4. Štampači u Birou?", use_container_width=True):
+    triggered_query = "Koji štampači se koriste u Birou?"
+if btn_col5.button("5. Potrebni toneri?", use_container_width=True):
+    triggered_query = "Koji toneri su potrebni za štampače?"
+if btn_col6.button("6. Član 14 ugovora?", use_container_width=True):
+    triggered_query = "Navedi član 14 kolektivnog ugovora."
+
+# Polje za slobodan unos
+chat_input = st.chat_input("Postavite pitanje o dokumentima ili zaposlenima...")
+
+# Preuzimanje unosa (sa dugmeta ili iz polja)
+user_input = triggered_query or chat_input
+
+# Prikaz istorije poruka
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        
-        # Ako poruka sadrži profil zaposlenog, prikaži karticu
         if msg.get("matched_employees"):
             render_employee_cards(msg["matched_employees"])
-            
-        # Prikaz izvora ako postoje
         if msg.get("sources"):
             with st.expander("📚 Korišćeni izvori iz baze"):
                 for src in msg["sources"]:
                     st.write(f"- {src}")
 
-# Unos pitanja
-if user_input := st.chat_input("Postavite pitanje o dokumentima ili zaposlenima..."):
-    # 1. Prikaz korisničkog pitanja
+# Obrada novog pitanja
+if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # 2. Obrada odgovora preko RAG sistema
     with st.chat_message("assistant"):
         with st.spinner("Pretražujem bazu podataka..."):
             res = ask_birochat(user_input)
@@ -92,23 +107,20 @@ if user_input := st.chat_input("Postavite pitanje o dokumentima ili zaposlenima.
             matched_employees = res.get("matched_employees", [])
             sources = res.get("sources", [])
 
-            # Ispis tekstualnog odgovora
             st.markdown(answer)
 
-            # Prikaz kartica sa slikom ako je prepoznat zaposleni
             if matched_employees:
                 render_employee_cards(matched_employees)
 
-            # Prikaz izvora
             if sources:
                 with st.expander("📚 Korišćeni izvori iz baze"):
                     for src in sources:
                         st.write(f"- {src}")
 
-    # 3. Čuvanje kompletnog odgovora u istoriji radi očuvanja stanja slika pri osvežavanju
     st.session_state.messages.append({
         "role": "assistant",
         "content": answer,
         "matched_employees": matched_employees,
         "sources": sources
     })
+    st.rerun()
