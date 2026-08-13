@@ -22,7 +22,7 @@ QDRANT_URL = get_config("QDRANT_URL", "https://09ffa5ef-2765-45c8-bfcf-29bc6bf90
 QDRANT_API_KEY = get_config("QDRANT_API_KEY", "")
 GROQ_API_KEY = get_config("GROQ_API_KEY", "")
 GEMINI_API_KEY = get_config("GEMINI_API_KEY", "")
-COLLECTION_NAME = get_config("COLLECTION_NAME", "biro_documents")
+COLLECTION_NAME = get_config("COLLECTION_NAME", "Baza_biro")
 
 
 @st.cache_resource(show_spinner=False)
