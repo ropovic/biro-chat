@@ -1,205 +1,299 @@
 import os
+import re
+import unicodedata
 import boto3
-from botocore.config import Config
 import streamlit as st
-from qdrant_client import QdrantClient
-from llama_index.core import VectorStoreIndex, Settings
-from llama_index.vector_stores.qdrant import QdrantVectorStore
-# Prilagodi importove za tvoj LLM i embedding model (ukoliko koristiš multilingual embeddings kao ranije, zameni ovde)
-from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.llms.openai import OpenAI
-
-st.set_page_config(page_title="BiroChat", page_icon="🤖", layout="wide")
+from rag_engine import ask_birochat
 
 # ==========================================
-# 1. BRZI UPITI (6 DUGMIĆA)
+# 1. PODEŠAVANJA STRANICE I DIZAJNA
 # ==========================================
-QUICK_PROMPTS = [
-    "Ko je direktor?",
-    "Ko su zamenici direktora?",
-    "Spisak zaposlenih",
-    "Štampači u Birou",
-    "Toneri za štampače",
-    "Osnove gazdovanja u Birou"
-]
+st.set_page_config(page_title="BiroChat", page_icon="🌲", layout="wide")
+
+st.markdown("""
+<style>
+.stApp { background-color: #f2f7f2; }
+[data-testid="stSidebar"] { background-color: #e5f0e5; border-right: 1px solid #d4e5d4; }
+.title-text { color: #2e7d32; font-weight: 800; font-family: 'Segoe UI', sans-serif; margin-bottom: 0px; }
+.stButton button { background-color: #2e7d32; color: white; border: none; }
+.stButton button:hover { background-color: #1b5e20; color: white; }
+</style>
+""", unsafe_allow_html=True)
 
 # ==========================================
-# 2. INICIJALIZACIJA BAZE (QDRANT)
+# 2. KONFIGURACIJA CLOUDFLARE R2 BUCKETA
 # ==========================================
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "TVOJ_R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "TVOJ_R2_ACCESS_KEY")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "TVOJ_R2_SECRET_KEY")
+R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "fotografijebiro")
+
+DEPUTIES_TOKENS = ["caldovic", "mihajlovic", "goran", "svetlana"]
+
+def normalize_text(text: str) -> str:
+    if not text: return ""
+    text = text.lower().replace("đ", "dj")
+    nfkd = unicodedata.normalize('NFKD', text)
+    return "".join([c for c in nfkd if not unicodedata.combining(c)])
+
 @st.cache_resource
-def init_query_engine():
-    """Inicijalizacija LlamaIndex + Qdrant vektorske baze."""
-    Settings.llm = OpenAI(model="gpt-4o", api_key=os.environ.get("OPENAI_API_KEY"))
-    Settings.embed_model = OpenAIEmbedding(api_key=os.environ.get("OPENAI_API_KEY"))
-    
-    client = QdrantClient(
-        url=os.environ.get("QDRANT_URL", "tvoj-qdrant-url"),
-        api_key=os.environ.get("QDRANT_API_KEY", "tvoj-kljuc")
-    )
-    vector_store = QdrantVectorStore(client=client, collection_name="biro_baza")
-    index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
-    return index.as_query_engine(similarity_top_k=3)
+def get_r2_client():
+    if not R2_ACCESS_KEY_ID or R2_ACCESS_KEY_ID == "TVOJ_R2_ACCESS_KEY": return None
+    try:
+        return boto3.client(
+            service_name="s3", endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+            aws_access_key_id=R2_ACCESS_KEY_ID, aws_secret_access_key=R2_SECRET_ACCESS_KEY, region_name="auto"
+        )
+    except Exception as e:
+        st.error(f"Greška pri povezivanju na Cloudflare R2: {e}")
+        return None
 
-# ==========================================
-# 3. IMPLEMENTACIJA CLOUDFLARE R2 (BOTO3)
-# ==========================================
-def fetch_photos_from_r2(query_text: str):
-    """
-    Povezuje se na Cloudflare R2 putem Boto3 biblioteke i povlači fotografije
-    na osnovu traženog upita (direktor, zamenici, zaposleni).
-    """
-    # Preuzimanje Cloudflare akreditiva iz sistemskih varijabli (ili Streamlit secrets)
-    account_id = os.environ.get("CF_ACCOUNT_ID")
-    access_key = os.environ.get("CF_ACCESS_KEY")
-    secret_key = os.environ.get("CF_SECRET_KEY")
-    bucket_name = os.environ.get("CF_BUCKET_NAME", "biro-mediji")  # Zameni pravim imenom bucketa
-    
-    if not all([account_id, access_key, secret_key]):
-        st.warning("⚠️ R2 Akreditivi nedostaju u okruženju (CF_ACCOUNT_ID, CF_ACCESS_KEY, CF_SECRET_KEY).")
+def get_presigned_url(s3_client, key: str) -> str:
+    try:
+        return s3_client.generate_presigned_url('get_object', Params={'Bucket': R2_BUCKET_NAME, 'Key': key}, ExpiresIn=3600)
+    except Exception:
+        return ""
+
+@st.cache_data(ttl=3600)
+def fetch_system_logos():
+    s3 = get_r2_client()
+    logos = {"biro": None, "srbijasume": None}
+    if not s3: return logos
+    try:
+        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME)
+        if "Contents" in response:
+            for obj in response["Contents"]:
+                key_lower = obj["Key"].lower()
+                if "biro_logo" in key_lower:
+                    logos["biro"] = get_presigned_url(s3, obj["Key"])
+                elif "srbijasume_logo" in key_lower:
+                    logos["srbijasume"] = get_presigned_url(s3, obj["Key"])
+    except Exception:
+        pass
+    return logos
+
+@st.cache_data(ttl=300)
+def load_personnel_catalog_from_r2():
+    s3 = get_r2_client()
+    if not s3: return []
+
+    try:
+        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME)
+        if "Contents" not in response: return []
+
+        all_keys = [obj["Key"] for obj in response["Contents"]]
+        image_files = [k for k in all_keys if k.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'logo' not in k.lower()]
+        text_files = [k for k in all_keys if k.lower().endswith('.txt')]
+
+        catalog = []
+        seen_identities = set()
+
+        for img_key in image_files:
+            img_base = os.path.splitext(img_key)[0]
+            img_norm = normalize_text(img_base).replace("_", " ").replace("-", " ")
+
+            matching_txt_key = None
+            for txt_key in text_files:
+                txt_base = os.path.splitext(txt_key)[0]
+                if normalize_text(txt_base) in img_norm or img_norm in normalize_text(txt_base):
+                    matching_txt_key = txt_key
+                    break
+
+            description_content = ""
+            if matching_txt_key:
+                try:
+                    txt_obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=matching_txt_key)
+                    description_content = txt_obj['Body'].read().decode('utf-8', errors='ignore').strip()
+                except Exception:
+                    pass
+
+            search_corpus = normalize_text(f"{img_key} {matching_txt_key or ''} {description_content}")
+
+            is_deputy = any(dep in search_corpus for dep in DEPUTIES_TOKENS) or "zamenik" in search_corpus
+            is_director = "direktor" in search_corpus and not is_deputy
+
+            role = "direktor" if is_director else ("zamenik" if is_deputy else "zaposleni")
+
+            if role == "direktor":
+                person_id = "direktor_glavni"
+            elif "caldovic" in search_corpus or "goran" in search_corpus:
+                person_id = "zamenik_caldovic"
+            elif "mihajlovic" in search_corpus or "svetlana" in search_corpus:
+                person_id = "zamenik_mihajlovic"
+            else:
+                person_id = img_norm.strip()
+
+            if person_id in seen_identities:
+                continue
+            seen_identities.add(person_id)
+
+            title = img_base.replace("_", " ").replace("Foto", "").replace("foto", "").strip().title()
+            if not title or len(title) < 3:
+                title = person_id.replace("_", " ").title()
+
+            if role == "direktor" and "direktor" not in title.lower():
+                title += " (Direktor)"
+            elif role == "zamenik" and "zamenik" not in title.lower():
+                title += " (Zamenik direktora)"
+
+            image_presigned_url = get_presigned_url(s3, img_key)
+
+            catalog.append({
+                "image_key": img_key,
+                "image_url": image_presigned_url,
+                "title": title,
+                "description": description_content,
+                "role": role,
+                "search_corpus": search_corpus
+            })
+
+        return catalog
+    except Exception as e:
+        st.error(f"Greška pri skeniranju R2 bucketa: {e}")
         return []
 
-    # Kreiranje klijenta za Cloudflare R2
-    s3_client = boto3.client(
-        's3',
-        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        config=Config(signature_version='s3v4'),
-        region_name='auto' # Za Cloudflare R2 obavezno auto
-    )
+# ==========================================
+# 3. ZAGLAVLJE I SIDEBAR
+# ==========================================
+system_logos = fetch_system_logos()
 
-    image_urls = []
-    
-    try:
-        # Određivanje prefiksa na osnovu ključnih reči u upitu.
-        # Možeš prilagoditi foldere tačno onako kako se zovu u R2 bucketu.
-        q = query_text.lower()
-        if "zamenic" in q:
-            prefix = "zamenici/"
-        elif "direktor" in q:
-            prefix = "direktor/"
-        else:
-            prefix = "zaposleni/"
+col_l1, col_l2, col_l3 = st.columns([1, 4, 1])
+with col_l1:
+    if system_logos["biro"]:
+        st.image(system_logos["biro"], use_container_width=True)
+with col_l2:
+    st.markdown("<h1 class='title-text' style='text-align: center;'>🌲 BiroChat</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #2e7d32; font-size: 1.2rem; font-weight: bold;'>Korporativni Asistent</p>", unsafe_allow_html=True)
+with col_l3:
+    if system_logos["srbijasume"]:
+        st.image(system_logos["srbijasume"], use_container_width=True)
 
-        # Preuzimanje liste fajlova iz foldera
-        response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+st.markdown("---")
+
+with st.sidebar:
+    st.markdown("### ⚙️ Opcije")
+    if st.button("🧹 Obriši poruke", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
         
-        if 'Contents' in response:
-            for obj in response['Contents']:
-                file_key = obj['Key']
-                # Filtriranje samo slikovnih formata
-                if file_key.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                    # Generisanje privremenog (presigned) linka koji važi 1 sat
-                    url = s3_client.generate_presigned_url(
-                        ClientMethod='get_object',
-                        Params={'Bucket': bucket_name, 'Key': file_key},
-                        ExpiresIn=3600
-                    )
-                    image_urls.append(url)
-                    
-        return image_urls
-    except Exception as e:
-        st.error(f"⚠️ Došlo je do greške prilikom povezivanja sa R2: {str(e)}")
-        return []
-
-def requires_r2_photos(query_text: str) -> bool:
-    """Određuje da li upit zahteva aktivaciju Boto3 pretrage za slikama."""
-    keywords = ["direktor", "zamenic", "zaposlen"]
-    return any(kw in query_text.lower() for kw in keywords)
-
+    st.markdown("---")
+    st.markdown("### 🧠 Sistemski moduli")
+    st.info("""
+    **LLM Model:**
+    Groq Llama-3.1-8b-instant
+    
+    **Vektorska Baza:**
+    Qdrant Vector Store
+    
+    **Embedder:**
+    paraphrase-multilingual-MiniLM-L12-v2
+    
+    **Orkestrator:**
+    LangChain
+    
+    **Web Ekstenzija:**
+    Tavily API
+    """)
 
 # ==========================================
-# 4. INICIJALIZACIJA SESSION STATE-A
+# 4. CHAT I LOGIKA PRETRAGE
 # ==========================================
-if "query_engine" not in st.session_state:
-    try:
-        st.session_state.query_engine = init_query_engine()
-    except Exception as e:
-        st.session_state.query_engine = None
-        st.error(f"Greška pri povezivanju sa vektorskom bazom: {e}")
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "pending_prompt" not in st.session_state:
-    st.session_state.pending_prompt = None
 
+PERSONNEL_KEYWORDS = ["direktor", "direktora", "zamenik", "zamenika", "zamenici", "zaposlen", "zaposleni", "zaposlenih", "radnik", "radnici", "uprava", "slika", "fotografija"]
 
-# ==========================================
-# 5. RENDEROVANJE INTERFEJSA
-# ==========================================
-st.title("🤖 BiroChat")
-st.caption("Interni pretraživač Biroa (Qdrant Tekst + Cloudflare R2 Mediji)")
+def is_personnel_query(question: str) -> bool:
+    q_norm = normalize_text(question)
+    return any(re.search(r'\b' + re.escape(kw) + r'\b', q_norm) for kw in PERSONNEL_KEYWORDS)
+
+def filter_personnel(catalog, query: str):
+    q_norm = normalize_text(query)
+    
+    if "direktor" in q_norm and not any(k in q_norm for k in ["zamenik", "zamenika", "zamenici"]):
+        res = [p for p in catalog if p["role"] == "direktor"]
+        if res: return res
+
+    if any(k in q_norm for k in ["zamenik", "zamenika", "zamenici", "goran", "caldovic", "svetlana", "mihajlovic"]):
+        res = [p for p in catalog if p["role"] == "zamenik"]
+        if res: return res
+
+    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa"]]
+    matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
+    return matched if matched else catalog
+
+st.markdown("##### 💡 Brza pitanja:")
+quick_questions = [
+    "Ko je direktor Biroa?",
+    "Ko su zamenici direktora?",
+    "Koji štampači se koriste u Birou?",
+    "Ko su zamenici direktora?",  # <--- Zamenjeno umesto starog pitanja o kolektivnom ugovoru
+    "Spisak opreme i tonera",
+    "Ko je ministar zdravstva u Srbiji?"
+]
+
+col1, col2, col3 = st.columns(3)
+q_cols = [col1, col2, col3, col1, col2, col3]
+
+selected_quick_q = None
+for idx, q in enumerate(quick_questions):
+    if q_cols[idx].button(q, key=f"quick_btn_{idx}", use_container_width=True):
+        selected_quick_q = q
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
+        if "content" in msg and msg["content"]:
+            st.markdown(msg["content"])
         if "images" in msg and msg["images"]:
-            # Dinamički kreira kolone ako ima više slika zaposlenih
-            cols = st.columns(min(len(msg["images"]), 3)) 
-            for img_idx, img_url in enumerate(msg["images"]):
-                cols[img_idx % 3].image(img_url, use_container_width=True)
-        st.markdown(msg["content"])
+            for img in msg["images"]:
+                st.image(img["image_url"], caption=img["title"], width=250)
 
-st.write("---")
-st.caption("Brzi upiti (klikni za automatsku pretragu):")
-row1 = st.columns(3)
-row2 = st.columns(3)
+chat_input_val = st.chat_input("Postavite pitanje o dokumentima ili zaposlenima...")
+user_input = selected_quick_q or chat_input_val
 
-for i, prompt_text in enumerate(QUICK_PROMPTS):
-    col = row1[i] if i < 3 else row2[i - 3]
-    if col.button(prompt_text, use_container_width=True):
-        st.session_state.pending_prompt = prompt_text
-        st.rerun()
-
-# ==========================================
-# 6. OBRADA KORISNIČKOG UPITA (CHAT INPUT)
-# ==========================================
-user_input = st.chat_input("Postavi pitanje...")
-
-if st.session_state.pending_prompt:
-    active_query = st.session_state.pending_prompt
-    st.session_state.pending_prompt = None
-elif user_input:
-    active_query = user_input
-else:
-    active_query = None
-
-if active_query:
-    st.session_state.messages.append({"role": "user", "content": active_query})
+if user_input:
+    st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
-        st.markdown(active_query)
+        st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        found_images = []
-        
-        # --- 1. R2 BUCKET PRETRAGA ---
-        if requires_r2_photos(active_query):
-            st.markdown("🔍 *Pretražujem registar fotografija u R2 bazi...*")
-            found_images = fetch_photos_from_r2(active_query)
+        if is_personnel_query(user_input):
+            st.info("🔍 Pretražujem registar fotografija u R2 bazi...")
+            catalog = load_personnel_catalog_from_r2()
             
-            if found_images:
-                st.success(f"Pronađeno {len(found_images)} fotografija.")
-                cols = st.columns(min(len(found_images), 3))
-                for img_idx, img_url in enumerate(found_images):
-                    cols[img_idx % 3].image(img_url, use_container_width=True)
+            if not catalog:
+                answer_text = "⚠️ Nije moguće pristupiti R2 bucketu ili bucket nema slika."
+                st.warning(answer_text)
+                st.session_state.messages.append({"role": "assistant", "content": answer_text})
             else:
-                st.warning("⚠️ U R2 bucketu nisu pronađene odgovarajuće fotografije za ovaj upit.")
+                filtered_photos = filter_personnel(catalog, user_input)
+                if filtered_photos:
+                    answer_text = f"Pronađeno u registru fotografija Biroa:"
+                    st.markdown(answer_text)
+                    for img in filtered_photos:
+                        st.image(img["image_url"], caption=img["title"], width=250)
+                    
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": answer_text,
+                        "images": filtered_photos
+                    })
+                else:
+                    answer_text = "⚠️ U R2 bucketu nisu pronađene odgovarajuće fotografije."
+                    st.warning(answer_text)
+                    st.session_state.messages.append({"role": "assistant", "content": answer_text})
         
-        # --- 2. QDRANT TEKSTUALNA PRETRAGA ---
-        with st.spinner("Pretražujem Biro dokumentaciju (Qdrant)..."):
-            if st.session_state.query_engine:
-                try:
-                    response = st.session_state.query_engine.query(active_query)
-                    text_answer = str(response)
-                except Exception as e:
-                    text_answer = f"Greška pri dobavljanju teksta iz baze: {str(e)}"
-            else:
-                text_answer = "⚠️ Nema konekcije sa vektorskom bazom (Qdrant)."
-            
-            st.markdown(text_answer)
-            
-    # Čuvanje rezultata u memoriju chata
-    st.session_state.messages.append({
-        "role": "assistant", 
-        "content": text_answer,
-        "images": found_images
-    })
+        else:
+            with st.spinner("Pretražujem bazu dokumenata..."):
+                result = ask_birochat(user_input)
+                answer_text = result.get("answer", "Nema odgovora.")
+                sources = result.get("sources", [])
+                
+                st.markdown(answer_text)
+                
+                if sources:
+                    with st.expander("📚 Korišćeni izvori iz baze / weba"):
+                        for src in sources:
+                            st.write(f"- `{src}`")
+                            
+                st.session_state.messages.append({"role": "assistant", "content": answer_text})
