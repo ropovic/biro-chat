@@ -62,23 +62,25 @@ class RAGEngine:
         self.llm_model = "llama-3.1-8b-instant"
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")
 
-    def _generate_search_queries(self, user_question: str) -> list:
+    def _generate_search_queries(self, user_question: str) -> tuple:
         q_norm = normalize_text(user_question)
         queries = [user_question]
 
         if any(w in q_norm for w in ["stampac", "stampaci", "printer", "oprema", "ploter"]):
             queries.append("HP Designjet Canon TX Kyocera ploter štampač oprema toneri")
 
-        # Detekcija člana (i na ćirilici i na latinici)
-        article_match = re.search(r'(?:clan|član|члан|cl|čl|чл)\.?\s*(\d+)', q_norm)
-        if article_match:
-            art_num = article_match.group(1)
-            queries.append(f"Kolektivni ugovor Član {art_num}")
-            queries.append(f"Колективни уговор Члан {art_num}")
-            queries.append(f"Član {art_num}. clan {art_num} čl {art_num}")
-            queries.append(f"Члан {art_num} чл {art_num}")
+        article_match = re.search(r'(?:clan|cl)\.?\s*(\d+)', q_norm)
+        target_article = article_match.group(1) if article_match else None
 
-        return queries
+        if target_article:
+            queries.append(f"Član {target_article}")
+            queries.append(f"Члан {target_article}")
+            queries.append(f"Član {target_article}. Kolektivni ugovor")
+            queries.append(f"Члан {target_article}. Колективни уговор")
+            queries.append(f"čl. {target_article}")
+            queries.append(f"чл. {target_article}")
+
+        return queries, target_article
 
     def query(self, user_question: str) -> dict:
         context_texts = []
@@ -87,17 +89,18 @@ class RAGEngine:
         q_norm = normalize_text(user_question)
         is_internal_query = any(w in q_norm for w in INTERNAL_WORDS)
         
-        article_match = re.search(r'(?:clan|član|члан|cl|čl|чл)\.?\s*(\d+)', q_norm)
-        target_article = article_match.group(1) if article_match else None
+        search_queries, target_article = self._generate_search_queries(user_question)
 
         # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT)
         try:
-            search_queries = self._generate_search_queries(user_question)
             all_retrieved_docs = []
             seen_contents = set()
 
+            # Ako se traži konkretan član, pretražujemo do 60 čunkova u dubinu
+            k_depth = 60 if target_article else 15
+
             for q_str in search_queries:
-                docs = self.vector_store.similarity_search(q_str, k=15)
+                docs = self.vector_store.similarity_search(q_str, k=k_depth)
                 for doc in docs:
                     content_head = doc.page_content.strip()[:100]
                     if content_head not in seen_contents:
@@ -113,19 +116,18 @@ class RAGEngine:
                     "source": source_file
                 })
 
-            # HIBRIDNO RE-RANGIRANJE ZA ČLANOVE (Uključuje i Ćirilicu)
+            # HIBRIDNO RE-RANGIRANJE ZA ČLANOVE
             if target_article:
                 def score_chunk(chunk):
                     c_norm = normalize_text(chunk["text"])
-                    # Provera prisustva broja člana i ključnih reči za ugovor
-                    has_num = re.search(r'\b' + re.escape(target_article) + r'\b', c_norm)
-                    has_clan = any(w in c_norm for w in ["clan", "cl", "claba"])
-                    has_ugovor = "kolektivn" in c_norm or "ugovor" in c_norm
-                    
-                    if has_num and (has_clan or has_ugovor):
-                        if re.search(r'\b(?:clan|cl)\.?\s*' + re.escape(target_article) + r'\b', c_norm):
-                            return 200
-                        return 100
+                    # Traženje broja člana u svim varijantama
+                    num_pattern = r'(?:\b|c|cl|clan)\.?\s*' + re.escape(target_article) + r'(?:\.|\b)'
+                    if re.search(num_pattern, c_norm):
+                        if "kolektivn" in c_norm or "ugovor" in c_norm:
+                            return 300
+                        return 200
+                    if re.search(r'\b' + re.escape(target_article) + r'\b', c_norm):
+                        return 50
                     return 0
 
                 extracted_chunks.sort(key=score_chunk, reverse=True)

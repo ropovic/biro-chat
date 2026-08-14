@@ -118,14 +118,25 @@ def load_media_catalog_from_r2():
 
             search_corpus = normalize_text(f"{img_key} {matching_txt_key or ''} {description_content}")
 
-            # Detekcija kategorije: Dijagram / Ruža vetrova VS Osoblje
-            is_diagram = any(k in search_corpus for k in ["ruza", "vetro", "vetar", "dijagram", "grafik", "karta", "skica"])
-            
+            # KATEGORIZACIJA
+            is_wind_rose = any(k in search_corpus for k in ["ruza", "ruze", "vetro", "vetar", "vetrova"])
+            is_diagram = is_wind_rose or any(k in search_corpus for k in ["dijagram", "grafik", "karta", "skica", "nacrt"])
+
             is_deputy = any(dep in search_corpus for dep in DEPUTIES_TOKENS) or "zamenik" in search_corpus
             is_director = "direktor" in search_corpus and not is_deputy
-            is_personnel = (is_director or is_deputy or "zaposlen" in search_corpus or "radnik" in search_corpus or "foto" in search_corpus) and not is_diagram
+            
+            # ISPRAVLJENO: Uklonjen uslov 'foto'
+            is_personnel = (is_director or is_deputy or any(k in search_corpus for k in ["zaposlen", "zaposleni", "radnik", "radnici", "osoblje"])) and not is_diagram
 
-            category = "diagram" if is_diagram else ("personnel" if is_personnel else "other")
+            if is_wind_rose:
+                category = "wind_rose"
+            elif is_diagram:
+                category = "diagram"
+            elif is_personnel:
+                category = "personnel"
+            else:
+                category = "other"
+
             role = "direktor" if is_director else ("zamenik" if is_deputy else "zaposleni")
 
             if category == "personnel":
@@ -209,30 +220,38 @@ def is_media_query(question: str) -> bool:
 def filter_media(catalog, query: str):
     q_norm = normalize_text(query)
 
-    # 1. Traženje dijagrama ruža vetrova
-    if any(k in q_norm for k in ["ruza", "ruze", "vetar", "vetrova", "dijagram", "dijagrami"]):
-        diagrams = [p for p in catalog if p["category"] == "diagram" or any(w in p["search_corpus"] for w in ["ruza", "vetro", "vetar", "dijagram"])]
-        return diagrams
+    # 1. Traženje isključivo ruža vetrova
+    if any(k in q_norm for k in ["ruza", "ruze", "vetar", "vetrova"]):
+        res = [p for p in catalog if p["category"] == "wind_rose" or any(w in p["search_corpus"] for w in ["ruza", "vetro", "vetar"])]
+        return res
 
-    # 2. Traženje direktora
+    # 2. Traženje opštih dijagrama
+    if any(k in q_norm for k in ["dijagram", "dijagrami", "grafik", "grafikoni", "karta", "karte", "skica"]):
+        res = [p for p in catalog if p["category"] in ["diagram", "wind_rose"]]
+        return res
+
+    # 3. Traženje direktora
     if "direktor" in q_norm and not any(k in q_norm for k in ["zamenik", "zamenika", "zamenici"]):
         res = [p for p in catalog if p["role"] == "direktor"]
         if res: return res
 
-    # 3. Traženje zamenika
+    # 4. Traženje zamenika
     if any(k in q_norm for k in ["zamenik", "zamenika", "zamenici", "goran", "caldovic", "svetlana", "mihajlovic"]):
         res = [p for p in catalog if p["role"] == "zamenik"]
         if res: return res
 
-    # 4. Traženje svih zaposlenih (VRAĆA SAMO OSOBLJE, NIKADA DIJAGRAME!)
+    # 5. Traženje zaposlenih (Striktno osoblje)
     if any(k in q_norm for k in ["zaposlen", "zaposleni", "radnik", "radnici", "osoblje"]):
-        personnel = [p for p in catalog if p["category"] == "personnel" or p["role"] in ["direktor", "zamenik", "zaposleni"]]
-        return personnel
+        res = [p for p in catalog if p["category"] == "personnel" or p["role"] in ["direktor", "zamenik", "zaposleni"]]
+        return res
 
-    # 5. Opšta pretraga po rečima u korpusu
-    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa", "pokazi", "daj", "slike"]]
-    matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
-    return matched
+    # 6. Pretraga po ostalim rečima
+    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa", "pokazi", "daj", "slike", "slika", "dijagram", "fotografija"]]
+    if query_words:
+        matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
+        return matched
+
+    return []
 
 # ==========================================
 # 4. CHAT INTERFEJS
