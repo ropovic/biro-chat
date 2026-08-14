@@ -201,7 +201,7 @@ with st.sidebar:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-PERSONNEL_KEYWORDS = ["direktor", "direktora", "zamenik", "zamenika", "zamenici", "zaposlen", "zaposleni", "zaposlenih", "radnik", "radnici", "uprava", "slika", "fotografija"]
+PERSONNEL_KEYWORDS = ["direktor", "direktora", "zamenik", "zamenika", "zamenici", "zaposlen", "zaposleni", "zaposlenih", "radnik", "radnici", "uprava"]
 
 def is_personnel_query(question: str) -> bool:
     q_norm = normalize_text(question)
@@ -221,15 +221,13 @@ def filter_personnel(catalog, query: str):
     if "zaposlen" in q_norm or "spisak" in q_norm:
         return catalog
 
-    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa"]]
-    matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
-    return matched if matched else catalog
+    return []
 
 st.markdown("##### 💡 Brza pitanja:")
 quick_questions = [
     "Ko je direktor Biroa?",
     "Ko su zamenici direktora?",
-    "Spisak zaposlenih",  # <--- Ispravljeno dugme umesto duplog
+    "Spisak zaposlenih",
     "Koji štampači se koriste u Birou?",
     "Spisak opreme i tonera",
     "Ko je ministar zdravstva u Srbiji?"

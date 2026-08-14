@@ -81,9 +81,9 @@ class RAGEngine:
             seen_contents = set()
 
             for q_str in search_queries:
-                docs = self.vector_store.similarity_search(q_str, k=12)
+                docs = self.vector_store.similarity_search(q_str, k=6)
                 for doc in docs:
-                    content_head = doc.page_content.strip()[:100]
+                    content_head = doc.page_content.strip()[:150]
                     if content_head not in seen_contents:
                         seen_contents.add(content_head)
                         all_retrieved_docs.append(doc)
@@ -105,7 +105,7 @@ class RAGEngine:
                     return 0
                 extracted_chunks.sort(key=score_chunk, reverse=True)
 
-            for item in extracted_chunks[:10]:
+            for item in extracted_chunks[:5]:
                 text_content = item["text"]
                 if len(text_content) > 1500:
                     text_content = text_content[:1500] + "..."
@@ -119,7 +119,7 @@ class RAGEngine:
         except Exception as e:
             pass 
             
-        # 2. PRETRAGA WEBA (TAVILY API) - Popravljeno za spoljna pitanja
+        # 2. PRETRAGA WEBA (TAVILY API)
         if self.tavily_api_key and (not is_internal_query or "ministar" in q_norm or "srbiji" in q_norm):
             try:
                 tavily_resp = requests.post(
@@ -129,9 +129,9 @@ class RAGEngine:
                         "query": user_question, 
                         "search_depth": "basic", 
                         "include_answer": True, 
-                        "max_results": 3
+                        "max_results": 2
                     },
-                    timeout=7
+                    timeout=5
                 )
                 if tavily_resp.status_code == 200:
                     data = tavily_resp.json()
@@ -156,16 +156,16 @@ class RAGEngine:
         
         system_prompt = (
             "Ti si BiroChat, korporativni asistent za pretragu dokumentacije Biroa za planiranje i projektovanje u šumarstvu, kao i opšte pretrage.\n"
-            "Odgovori precizno koristeći navedeni kontekst.\n\n"
+            "Odgovori precizno koristeći navedeni kontekst, bez ponavljanja istih informacija.\n\n"
             "VAŽNA PRAVILA ZA STRUKTURU ODGOVORA:\n"
             "1. KADA JE PITANJE 'Koji štampači se koriste u Birou?':\n"
-            "   - Izvuci i navedi SAMO čiste nazive modela štampača i plotera (npr. HP Designjet 800PS, Canon TX-3000, Kyocera FS-9530dn, Kyocera M3655idn, Kyocera P2040dn).\n"
+            "   - Izvuci i navedi SAMO čiste nazive modela štampača i plotera.\n"
             "   - Nemoj navoditi šifre tonera.\n"
             "2. KADA JE PITANJE 'Spisak opreme i tonera':\n"
-            "   - Obavezno navedi i štampače/opremu i pripadajuće tonere (sa njihovim šiframa ako postoje u kontekstu).\n"
+            "   - Navedi štampače i pripadajuće tonere jedinstveno, bez dupliranja sekcija u odgovoru.\n"
             "3. KADA SE TRAŽI KONKRETAN ČLAN (npr. Član 14 Kolektivnog ugovora):\n"
-            "   - Pronađi taj član u kontekstu i navedi njegov pun tekst ili detaljno sumiraj sve njegove odredbe.\n"
-            "4. Za opšta pitanja (poput političkih ili javnih funkcija) koristi podatke iz Web Pretrage.\n"
+            "   - Pronađi taj član u kontekstu i navedi njegov pun tekst.\n"
+            "4. Za opšta pitanja koristi podatke iz Web Pretrage.\n"
             "5. Ako podatak zaista ne postoji u kontekstu, odgovori sa 'Podatak nije dostupan.'"
         )
         
