@@ -84,7 +84,6 @@ def load_personnel_catalog_from_r2():
 
         all_keys = [obj["Key"] for obj in response["Contents"]]
         
-        # Filtriramo samo slike koje NISU logoi i NISU dijagrami/tehnički crteži
         image_files = []
         for k in all_keys:
             k_lower = k.lower()
@@ -219,22 +218,26 @@ def is_personnel_query(question: str) -> bool:
 def filter_personnel(catalog, query: str):
     q_norm = normalize_text(query)
     
+    # 1. Specifičan upit za direktora
     if "direktor" in q_norm and not any(k in q_norm for k in ["zamenik", "zamenika", "zamenici"]):
         res = [p for p in catalog if p["role"] == "direktor"]
         if res: return res
 
+    # 2. Specifičan upit za zamenike
     if any(k in q_norm for k in ["zamenik", "zamenika", "zamenici", "goran", "caldovic", "svetlana", "mihajlovic"]):
         res = [p for p in catalog if p["role"] == "zamenik"]
         if res: return res
 
+    # 3. Ako se traži spisak zaposlenih, vrati sve zaposlene iz kataloga
     if "zaposlen" in q_norm or "spisak" in q_norm:
-        # Vraća samo proverene profile zaposlenih i rukovodstva
-        return [p for p in catalog if p["role"] in ["direktor", "zamenik"] or "foto" in p["image_key"].lower() or len(p["description"]) > 0]
+        return catalog
 
-    # Pretraga po imenu ako je korisnik kucao konkretno ime
-    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa"]]
+    # 4. Pretraga po imenu ili ključnim rečima iz unosa
+    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa", "prikazi", "sliku", "slika"]]
     matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
-    return matched if matched else [p for p in catalog if p["role"] in ["direktor", "zamenik"]]
+    
+    # Ako pretraga po imenu da rezultat, vrati to; inače za opšte upite vrati ceo katalog
+    return matched if matched else catalog
 
 st.markdown("##### 💡 Brza pitanja:")
 quick_questions = [
