@@ -47,13 +47,23 @@ class RAGEngine:
         self.llm_model = "llama-3.1-8b-instant"
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")
 
-    def _expand_query(self, query: str) -> str:
-        """ Proširuje sinonime da vektorska baza lakše pronađe sve štampače/plotere """
-        q_norm = normalize_text(query)
-        expanded = query
-        if any(w in q_norm for w in ["stampac", "stampaci", "printer", "oprema"]):
-            expanded += " ploter hp800 hp designjet kyocera canon mf uređaj"
-        return expanded
+    def _generate_search_queries(self, user_question: str) -> list:
+        """ Generiše više ciljanih upita za sigurniji obuhvat iz Qdrant-a """
+        q_norm = normalize_text(user_question)
+        queries = [user_question]
+
+        # Ako se traže štampači/oprema, forsira povlačenje svih brand-ova i plotera
+        if any(w in q_norm for w in ["stampac", "stampaci", "printer", "oprema", "ploter"]):
+            queries.append("HP Designjet Canon TX Kyocera ploter štampač oprema toneri")
+
+        # Ako se traži konkretan član (npr. član 14)
+        article_match = re.search(r'(?:clan|član)\s*(\d+)', q_norm)
+        if article_match:
+            art_num = article_match.group(1)
+            queries.append(f"Kolektivni ugovor Član {art_num}. clan {art_num}")
+            queries.append(f"član {art_num} clan {art_num}")
+
+        return queries
 
     def query(self, user_question: str) -> dict:
         context_texts = []
@@ -61,18 +71,25 @@ class RAGEngine:
         
         q_norm = normalize_text(user_question)
         is_internal_query = any(w in q_norm for w in INTERNAL_WORDS)
-        
-        # Detekcija specifičnog člana (npr. "clan 14" ili "član 14")
         article_match = re.search(r'(?:clan|član)\s*(\d+)', q_norm)
         target_article = article_match.group(1) if article_match else None
 
-        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT) - Povećano k=15
+        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT) - Multi-Query Engine
         try:
-            search_query = self._expand_query(user_question)
-            docs = self.vector_store.similarity_search(search_query, k=15)
-            
+            search_queries = self._generate_search_queries(user_question)
+            all_retrieved_docs = []
+            seen_contents = set()
+
+            for q_str in search_queries:
+                docs = self.vector_store.similarity_search(q_str, k=12)
+                for doc in docs:
+                    content_head = doc.page_content.strip()[:100]
+                    if content_head not in seen_contents:
+                        seen_contents.add(content_head)
+                        all_retrieved_docs.append(doc)
+
             extracted_chunks = []
-            for doc in docs:
+            for doc in all_retrieved_docs:
                 text_content = doc.page_content.strip()
                 source_file = doc.metadata.get("source", "Lokalni dokument")
                 extracted_chunks.append({
@@ -80,7 +97,7 @@ class RAGEngine:
                     "source": source_file
                 })
 
-            # HIBRIDNO RE-RANGIRANJE ZA ČLANOVE: Ako se traži Član X, poguraj ga na vrh!
+            # HIBRIDNO RE-RANGIRANJE ZA ČLANOVE UGOVORA
             if target_article:
                 def score_chunk(chunk):
                     c_norm = normalize_text(chunk["text"])
@@ -89,8 +106,8 @@ class RAGEngine:
                     return 0
                 extracted_chunks.sort(key=score_chunk, reverse=True)
 
-            # Sastavljanje konteksta
-            for item in extracted_chunks[:8]:  # Uzimamo najboljih 8 nakon re-rangiranja
+            # Sastavljanje finalnog konteksta za LLM
+            for item in extracted_chunks[:10]:
                 text_content = item["text"]
                 if len(text_content) > 1500:
                     text_content = text_content[:1500] + "..."
@@ -104,7 +121,7 @@ class RAGEngine:
         except Exception as e:
             pass 
             
-        # 2. PRETRAGA WEBA (TAVILY API) - Samo za opšta spoljna pitanja
+        # 2. PRETRAGA WEBA (TAVILY API) - Za opšta pitanja
         if self.tavily_api_key and not is_internal_query:
             try:
                 tavily_resp = requests.post(
@@ -133,18 +150,22 @@ class RAGEngine:
                 pass
 
         if not context_texts:
-            return {"answer": "Nažalost, podatak nije pronađen u dokumentima baze.", "source_documents": []}
+            return {"answer": "Podatak nije dostupan u bazi dokumentacije.", "source_documents": []}
             
         context = "\n\n---\n\n".join(context_texts)
-        if len(context) > 6000:
-            context = context[:6000] + "\n...[Kontekst skraćen]"
+        if len(context) > 7000:
+            context = context[:7000] + "\n...[Kontekst skraćen]"
         
         system_prompt = (
-            "Ti si BiroChat, korporativni asistent za pretragu dokumentacije. "
-            "Odgovori precizno koristeći ISKLJUČIVO navedeni kontekst. "
-            "Uvek navedi SVE štampače, plotere i opremu koji se pominju u kontekstu (uključujući HP, Kyocera, Canon). "
-            "Ako se traži konkretan član ugovora, prepiši ili detaljno sumiraj taj član iz konteksta. "
-            "Ako u kontekstu nema traženih podataka, jasno navedi da podatak nije dostupan."
+            "Ti si BiroChat, korporativni asistent za pretragu dokumentacije Biroa za planiranje i projektovanje u šumarstvu.\n"
+            "Odgovori precizno koristeći ISKLJUČIVO navedeni kontekst.\n\n"
+            "VAŽNA PRAVILA ZA STRUKTURU ODGOVORA:\n"
+            "1. KADA JE PITANJE 'Koji štampači se koriste u Birou?' ili opšte o štampačima/opremi:\n"
+            "   - Izvuci i navedi SAMO čiste nazive modela štampača i plotera (npr. HP Designjet 800PS, Canon TX-3000, Kyocera FS-9530dn, Kyocera M3655idn, Kyocera P2040dn).\n"
+            "   - NIKADA nemoj navoditi šifre tonera (poput TK-710, HP C4844A) niti količine komada kada korisnik pita koji se štampači koriste.\n"
+            "2. KADA SE TRAŽI KONKRETAN ČLAN (npr. Član 14 Kolektivnog ugovora):\n"
+            "   - Pronađi taj član u kontekstu i navedi njegov pun tekst ili detaljno sumiraj sve njegove odredbe.\n"
+            "3. Ako podatak zaista ne postoji u kontekstu, odgovori sa 'Podatak nije dostupan.'"
         )
         
         user_prompt = f"Kontekst:\n{context}\n\nPitanje: {user_question}"
