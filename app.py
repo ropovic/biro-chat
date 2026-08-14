@@ -29,7 +29,12 @@ R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "TVOJ_R2_SECRET_KEY")
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "fotografijebiro")
 
 DEPUTIES_TOKENS = ["caldovic", "mihajlovic", "goran", "svetlana"]
-EXCLUDE_IMAGE_TERMS = ["shema", "dijagram", "grafik", "plan", "crtez", "mapa", "topology", "mreza", "arhitektura", "schema", "chart", "projekt"]
+EXCLUDE_IMAGE_TERMS = [
+    "shema", "dijagram", "grafik", "plan", "crtez", "mapa", 
+    "topology", "mreza", "arhitektura", "schema", "chart", 
+    "projekt", "osnova", "presek", "detalj", "situacija", 
+    "geodetska", "katastar", "karta", "prikaz"
+]
 
 def normalize_text(text: str) -> str:
     if not text: return ""
@@ -129,7 +134,7 @@ def load_personnel_catalog_from_r2():
             elif "mihajlovic" in search_corpus or "svetlana" in search_corpus:
                 person_id = "zamenik_mihajlovic"
             else:
-                person_id = img_norm.strip()
+                person_id = img_key  # Jedinstven ključ za svakog zaposlenog da se izbegnu kolizije
 
             if person_id in seen_identities:
                 continue
@@ -218,25 +223,24 @@ def is_personnel_query(question: str) -> bool:
 def filter_personnel(catalog, query: str):
     q_norm = normalize_text(query)
     
-    # 1. Specifičan upit za direktora
+    # 1. Direktor
     if "direktor" in q_norm and not any(k in q_norm for k in ["zamenik", "zamenika", "zamenici"]):
         res = [p for p in catalog if p["role"] == "direktor"]
         if res: return res
 
-    # 2. Specifičan upit za zamenike
+    # 2. Zamenici
     if any(k in q_norm for k in ["zamenik", "zamenika", "zamenici", "goran", "caldovic", "svetlana", "mihajlovic"]):
         res = [p for p in catalog if p["role"] == "zamenik"]
         if res: return res
 
-    # 3. Ako se traži spisak zaposlenih, vrati sve zaposlene iz kataloga
+    # 3. Spisak zaposlenih (vraća sve zaposlene i rukovodstvo iz kataloga)
     if "zaposlen" in q_norm or "spisak" in q_norm:
         return catalog
 
-    # 4. Pretraga po imenu ili ključnim rečima iz unosa
-    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa", "prikazi", "sliku", "slika"]]
+    # 4. Pretraga po specifičnom imenu
+    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa", "prikazi", "sliku", "slika", "zaposlenih", "zaposleni"]]
     matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
     
-    # Ako pretraga po imenu da rezultat, vrati to; inače za opšte upite vrati ceo katalog
     return matched if matched else catalog
 
 st.markdown("##### 💡 Brza pitanja:")
