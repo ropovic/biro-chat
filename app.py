@@ -30,10 +30,11 @@ R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "fotografijebiro")
 
 DEPUTIES_TOKENS = ["caldovic", "mihajlovic", "goran", "svetlana"]
 EXCLUDE_IMAGE_TERMS = [
-    "shema", "dijagram", "grafik", "plan", "crtez", "mapa", 
+    "shema", "sema", "dijagram", "grafik", "plan", "crtez", "mapa", 
     "topology", "mreza", "arhitektura", "schema", "chart", 
-    "projekt", "osnova", "presek", "detalj", "situacija", 
-    "geodetska", "katastar", "karta", "prikaz"
+    "projekt", "projekat", "osnova", "presek", "detalj", "situacija", 
+    "geodetska", "katastar", "karta", "prikaz", "skica", "snimak", 
+    "tabela", "pregled", "specifikacija", "izvestaj", "blok"
 ]
 
 def normalize_text(text: str) -> str:
@@ -134,7 +135,7 @@ def load_personnel_catalog_from_r2():
             elif "mihajlovic" in search_corpus or "svetlana" in search_corpus:
                 person_id = "zamenik_mihajlovic"
             else:
-                person_id = img_key  # Jedinstven ključ za svakog zaposlenog da se izbegnu kolizije
+                person_id = img_key
 
             if person_id in seen_identities:
                 continue
@@ -159,6 +160,10 @@ def load_personnel_catalog_from_r2():
                 "role": role,
                 "search_corpus": search_corpus
             })
+
+        # Strogo sortiranje: direktor prvi, pa zamenici, pa zaposleni abecedno po nazivu
+        role_order = {"direktor": 0, "zamenik": 1, "zaposleni": 2}
+        catalog.sort(key=lambda x: (role_order.get(x["role"], 2), x["title"]))
 
         return catalog
     except Exception as e:
@@ -233,11 +238,11 @@ def filter_personnel(catalog, query: str):
         res = [p for p in catalog if p["role"] == "zamenik"]
         if res: return res
 
-    # 3. Spisak zaposlenih (vraća sve zaposlene i rukovodstvo iz kataloga)
+    # 3. Spisak zaposlenih (vraća sortirani katalog bez dijagrama)
     if "zaposlen" in q_norm or "spisak" in q_norm:
         return catalog
 
-    # 4. Pretraga po specifičnom imenu
+    # 4. Pretraga po imenu
     query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa", "prikazi", "sliku", "slika", "zaposlenih", "zaposleni"]]
     matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
     
