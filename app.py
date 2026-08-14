@@ -29,6 +29,7 @@ R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "TVOJ_R2_SECRET_KEY")
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "fotografijebiro")
 
 DEPUTIES_TOKENS = ["caldovic", "mihajlovic", "goran", "svetlana"]
+EXCLUDE_IMAGE_TERMS = ["shema", "dijagram", "grafik", "plan", "crtez", "mapa", "topology", "mreza", "arhitektura", "schema", "chart", "projekt"]
 
 def normalize_text(text: str) -> str:
     if not text: return ""
@@ -82,7 +83,15 @@ def load_personnel_catalog_from_r2():
         if "Contents" not in response: return []
 
         all_keys = [obj["Key"] for obj in response["Contents"]]
-        image_files = [k for k in all_keys if k.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'logo' not in k.lower()]
+        
+        # Filtriramo samo slike koje NISU logoi i NISU dijagrami/tehnički crteži
+        image_files = []
+        for k in all_keys:
+            k_lower = k.lower()
+            if k_lower.endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'logo' not in k_lower:
+                if not any(term in k_lower for term in EXCLUDE_IMAGE_TERMS):
+                    image_files.append(k)
+
         text_files = [k for k in all_keys if k.lower().endswith('.txt')]
 
         catalog = []
@@ -219,9 +228,13 @@ def filter_personnel(catalog, query: str):
         if res: return res
 
     if "zaposlen" in q_norm or "spisak" in q_norm:
-        return catalog
+        # Vraća samo proverene profile zaposlenih i rukovodstva
+        return [p for p in catalog if p["role"] in ["direktor", "zamenik"] or "foto" in p["image_key"].lower() or len(p["description"]) > 0]
 
-    return []
+    # Pretraga po imenu ako je korisnik kucao konkretno ime
+    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa"]]
+    matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
+    return matched if matched else [p for p in catalog if p["role"] in ["direktor", "zamenik"]]
 
 st.markdown("##### 💡 Brza pitanja:")
 quick_questions = [
@@ -259,17 +272,17 @@ if user_input:
 
     with st.chat_message("assistant"):
         if is_personnel_query(user_input):
-            st.info("🔍 Pretražujem registar fotografija u R2 bazi...")
+            st.info("🔍 Pretražujem registar zaposlenih...")
             catalog = load_personnel_catalog_from_r2()
             
             if not catalog:
-                answer_text = "⚠️ Nije moguće pristupiti R2 bucketu ili bucket nema slika."
+                answer_text = "⚠️ Nije moguće pristupiti R2 bucketu ili nema fotografija zaposlenih."
                 st.warning(answer_text)
                 st.session_state.messages.append({"role": "assistant", "content": answer_text})
             else:
                 filtered_photos = filter_personnel(catalog, user_input)
                 if filtered_photos:
-                    answer_text = f"Pronađeno u registru fotografija Biroa:"
+                    answer_text = f"Pronađeno u registru zaposlenih Biroa:"
                     st.markdown(answer_text)
                     for img in filtered_photos:
                         st.image(img["image_url"], caption=img["title"], width=250)
@@ -280,7 +293,7 @@ if user_input:
                         "images": filtered_photos
                     })
                 else:
-                    answer_text = "⚠️ U R2 bucketu nisu pronađene odgovarajuće fotografije."
+                    answer_text = "⚠️ U registru nisu pronađeni odgovarajući zaposleni."
                     st.warning(answer_text)
                     st.session_state.messages.append({"role": "assistant", "content": answer_text})
         
