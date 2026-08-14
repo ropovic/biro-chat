@@ -12,13 +12,12 @@ R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "TVOJ_R2_ACCOUNT_ID")
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "TVOJ_R2_ACCESS_KEY")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "TVOJ_R2_SECRET_KEY")
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "fotografijebiro")
-R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL", "https://pub-xxx.r2.dev")
 
-# Imena zamenika direktora prema tvojoj specifikaciji
+# Imena zamenika direktora
 DEPUTIES_TOKENS = ["caldovic", "mihajlovic", "goran caldovic", "svetlana mihajlovic"]
 
 def normalize_text(text: str) -> str:
-    """Smanjuje slova, zamenjuje đ sa dj i uklanja dijakritike."""
+    """Normalizuje tekst (mala slova, đ->dj, uklanjanje kvačica)."""
     if not text:
         return ""
     text = text.lower().replace("đ", "dj")
@@ -43,12 +42,22 @@ def get_r2_client():
         st.error(f"Greška pri povezivanju na Cloudflare R2: {e}")
         return None
 
+def get_presigned_url(s3_client, key: str) -> str:
+    """Generiše bezbedan privremeni URL za sliku direktno iz R2."""
+    try:
+        url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': R2_BUCKET_NAME, 'Key': key},
+            ExpiresIn=3600  # Link važi 1 sat
+        )
+        return url
+    except Exception as e:
+        st.error(f"Neuspešno kreiranje URL-a za sliku {key}: {e}")
+        return ""
+
 @st.cache_data(ttl=300)
 def load_personnel_catalog_from_r2():
-    """
-    Skenira R2 bucket 'fotografijebiro', spaja fotografije sa njihovim pratećim .txt opisima,
-    čita sadržaj .txt fajlova i određuje uloge (direktor, zamenik, zaposleni).
-    """
+    """Skenira R2 bucket, učitava .txt fajlove i pravi presigned URL-ove za slike."""
     s3 = get_r2_client()
     if not s3:
         return []
@@ -59,14 +68,12 @@ def load_personnel_catalog_from_r2():
             return []
 
         all_keys = [obj["Key"] for obj in response["Contents"]]
-        
         image_files = [k for k in all_keys if k.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
         text_files = [k for k in all_keys if k.lower().endswith('.txt')]
 
         catalog = []
 
         for img_key in image_files:
-            # Povezivanje slike i .txt fajla na osnovu imena
             img_base = os.path.splitext(img_key)[0]
             img_norm = normalize_text(img_base).replace("_", " ").replace("-", " ")
             img_tokens = [w for w in img_norm.split() if len(w) > 1]
@@ -78,7 +85,6 @@ def load_personnel_catalog_from_r2():
                     matching_txt_key = txt_key
                     break
 
-            # Čitanje sadržaja .txt fajla iz R2
             description_content = ""
             if matching_txt_key:
                 try:
@@ -87,30 +93,34 @@ def load_personnel_catalog_from_r2():
                 except Exception:
                     description_content = ""
 
-            # Normalizovani tekst za određivanje uloge
             search_corpus = normalize_text(f"{img_key} {matching_txt_key or ''} {description_content}")
 
             is_deputy = any(dep in search_corpus for dep in DEPUTIES_TOKENS) or "zamenik" in search_corpus
             is_director = "direktor" in search_corpus and not is_deputy
 
-            if is_director:
-                role = "direktor"
-            elif is_deputy:
-                role = "zamenik"
-            else:
-                role = "zaposleni"
+            role = "direktor" if is_director else ("zamenik" if is_deputy else "zaposleni")
 
-            # Formiranje opisa ispod slike (caption)
+            # Kratki naslov za sliku
             if description_content:
-                caption = description_content
-            elif matching_txt_key:
-                caption = matching_txt_key.replace("Foto_", "").replace(".txt", "").replace("_", " ")
+                title = description_content.split("–")[0].split("-")[0].strip()
+                if len(title) > 40:
+                    title = img_base.replace("_", " ").title()
             else:
-                caption = img_base.replace("_", " ").title()
+                title = img_base.replace("_", " ").title()
+
+            if role == "direktor" and "direktor" not in title.lower():
+                title += " (Direktor)"
+            elif role == "zamenik" and "zamenik" not in title.lower():
+                title += " (Zamenik direktora)"
+
+            # Presigned URL koji rešava problem neotvaranja slika
+            image_presigned_url = get_presigned_url(s3, img_key)
 
             catalog.append({
-                "image_url": f"{R2_PUBLIC_URL.rstrip('/')}/{img_key}",
-                "caption": caption,
+                "image_key": img_key,
+                "image_url": image_presigned_url,
+                "title": title,
+                "description": description_content,
                 "role": role,
                 "search_corpus": search_corpus
             })
@@ -132,22 +142,19 @@ def is_personnel_query(question: str) -> bool:
     return any(re.search(r'\b' + re.escape(kw) + r'\b', q_norm) for kw in PERSONNEL_KEYWORDS)
 
 def filter_personnel(catalog, query: str):
-    """Filtrira katalog slika na osnovu postavljenog pitanja."""
+    """Filtrira fotografije u zavisnosti od postavljenog pitanja."""
     q_norm = normalize_text(query)
 
-    # Ako se traži izričito direktor (a ne zamenik)
     if "direktor" in q_norm and not any(k in q_norm for k in ["zamenik", "zamenika", "zamenici"]):
         res = [p for p in catalog if p["role"] == "direktor"]
         if res:
             return res
 
-    # Ako se traže zamenici
     if any(k in q_norm for k in ["zamenik", "zamenika", "zamenici", "goran", "caldovic", "svetlana", "mihajlovic"]):
         res = [p for p in catalog if p["role"] == "zamenik"]
         if res:
             return res
 
-    # Ako se traži konkretno ime ili opšte zaposleni
     query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa"]]
     matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
     
@@ -161,7 +168,6 @@ st.set_page_config(page_title="BiroChat", page_icon="🌲", layout="wide")
 st.title("🌲 BiroChat - Korporativni Asistent")
 st.caption("Pretraga dokumentacije i uvid u zaposlene u Birou")
 
-# Inicijalizacija istorije poruka u sesiji
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -191,13 +197,19 @@ for msg in st.session_state.messages:
             st.markdown(msg["content"])
         
         if "images" in msg and msg["images"]:
-            n_cols = max(1, min(len(msg["images"]), 3))
-            cols = st.columns(n_cols)
-            for idx, img in enumerate(msg["images"]):
-                with cols[idx % n_cols]:
-                    st.image(img["image_url"], caption=img["caption"], use_container_width=True)
+            for img in msg["images"]:
+                c1, c2 = st.columns([1, 2])
+                with c1:
+                    if img["image_url"]:
+                        st.image(img["image_url"], caption=img["title"], use_container_width=True)
+                    else:
+                        st.warning("⚠️ Slika nije dostupna.")
+                with c2:
+                    st.subheader(img["title"])
+                    if img["description"]:
+                        st.write(img["description"])
 
-# Unos pitanja korisnika (preko chat ulaza ili klika na dugme)
+# Unos pitanja korisnika
 chat_input_val = st.chat_input("Postavite pitanje o dokumentima ili zaposlenima...")
 user_input = selected_quick_q or chat_input_val
 
@@ -207,14 +219,14 @@ if user_input:
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        # ROUTER: Pitanja o osoblju idu u R2 (ignorišu tekstualne ugovore)
+        # ROUTER: Pitanja o osoblju idu direktno u R2
         if is_personnel_query(user_input):
             st.info("🔍 Pretražujem registar fotografija u R2 bazi...")
             
             catalog = load_personnel_catalog_from_r2()
             
             if not catalog:
-                answer_text = "⚠️ Nije moguće pristupiti R2 bucketu ili bucket nema slika. Proverite da li su podešeni R2 ključevi u okruženju."
+                answer_text = "⚠️ Nije moguće pristupiti R2 bucketu ili bucket nema slika. Proverite da li su podešeni R2 ključevi."
                 st.warning(answer_text)
                 st.session_state.messages.append({"role": "assistant", "content": answer_text})
             else:
@@ -224,11 +236,17 @@ if user_input:
                     answer_text = f"Pronađeno u registru fotografija Biroa:"
                     st.markdown(answer_text)
                     
-                    n_cols = max(1, min(len(filtered_photos), 3))
-                    cols = st.columns(n_cols)
-                    for idx, img in enumerate(filtered_photos):
-                        with cols[idx % n_cols]:
-                            st.image(img["image_url"], caption=img["caption"], use_container_width=True)
+                    for img in filtered_photos:
+                        c1, c2 = st.columns([1, 2])
+                        with c1:
+                            if img["image_url"]:
+                                st.image(img["image_url"], caption=img["title"], use_container_width=True)
+                            else:
+                                st.warning("⚠️ Slika nije dostupna.")
+                        with c2:
+                            st.subheader(img["title"])
+                            if img["description"]:
+                                st.write(img["description"])
                     
                     st.session_state.messages.append({
                         "role": "assistant",
