@@ -1,9 +1,18 @@
 import os
 import requests
+import unicodedata
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from groq import Groq
+
+def normalize_text(text: str) -> str:
+    text = text.lower().replace("đ", "dj")
+    nfkd = unicodedata.normalize('NFKD', text)
+    return "".join([c for c in nfkd if not unicodedata.combining(c)])
+
+# Ključne reči koje označavaju da se traži lokalni dokument
+INTERNAL_WORDS = ["biro", "ugovor", "kolektivni", "stampac", "toner", "zaposlen", "oprema", "clan", "pravilnik", "srbijasum", "direktor", "odmor", "radni", "katalog"]
 
 class RAGEngine:
     def __init__(self):
@@ -31,19 +40,24 @@ class RAGEngine:
         
         self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         self.llm_model = "llama-3.1-8b-instant"
-        self.tavily_api_key = os.getenv("TAVILY_API_KEY") # Obavezno setovati ovaj ključ u .env
+        self.tavily_api_key = os.getenv("TAVILY_API_KEY")
 
     def query(self, user_question: str) -> dict:
         context_texts = []
         sources = []
         
-        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT)
+        # Provera da li je upit isključivo interni
+        q_norm = normalize_text(user_question)
+        is_internal_query = any(w in q_norm for w in INTERNAL_WORDS)
+        
+        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT) - Povećano k=8
         try:
-            docs = self.vector_store.similarity_search(user_question, k=3)
+            docs = self.vector_store.similarity_search(user_question, k=8)
             for doc in docs:
                 text_content = doc.page_content.strip()
-                if len(text_content) > 800:
-                    text_content = text_content[:800] + "..."
+                # Skraćujemo isečke na optimalnih 600 karaktera da stane HP800 i sve ostalo
+                if len(text_content) > 600:
+                    text_content = text_content[:600] + "..."
                     
                 source_file = doc.metadata.get("source", "Lokalni dokument")
                 if source_file not in sources:
@@ -52,10 +66,10 @@ class RAGEngine:
                 block = f"Izvor: {source_file}\n{text_content}"
                 context_texts.append(block)
         except Exception as e:
-            pass # Nastavlja dalje ukoliko je Qdrant baza trenutno nedostupna
+            pass 
             
-        # 2. PRETRAGA WEBA (TAVILY API)
-        if self.tavily_api_key:
+        # 2. PRETRAGA WEBA (TAVILY API) - Samo ako upit nije interni
+        if self.tavily_api_key and not is_internal_query:
             try:
                 tavily_resp = requests.post(
                     "https://api.tavily.com/search",
@@ -84,18 +98,19 @@ class RAGEngine:
                 pass
 
         if not context_texts:
-            return {"answer": "Nažalost, nisam pronašao relevantne informacije ni u bazi ni na webu.", "source_documents": []}
+            return {"answer": "Nažalost, nisam pronašao relevantne informacije u dostupnim izvorima.", "source_documents": []}
             
         context = "\n\n---\n\n".join(context_texts)
         
-        # Limit tokena za Groq
-        if len(context) > 3500:
-            context = context[:3500] + "\n...[Kontekst skraćen]"
+        # Ograničenje za stabilnost tokena (4500 karaktera)
+        if len(context) > 4500:
+            context = context[:4500] + "\n...[Kontekst skraćen]"
         
         system_prompt = (
-            "Ti si BiroChat, korporativni asistent. "
-            "Odgovori kratko i precizno na pitanje koristeći ISKLJUČIVO navedeni kontekst (koji uključuje lokalne dokumente i/ili web pretragu). "
-            "Ako u kontekstu nema traženog podatka, napiši da podatak nije dostupan."
+            "Ti si BiroChat, korporativni asistent za pretragu dokumentacije. "
+            "Odgovori precizno koristeći ISKLJUČIVO navedeni kontekst. "
+            "Ako u kontekstu nema odgovora, reci da podatak nije dostupan. "
+            "Nikada ne izmišljaj članove zakona, pravilnika ili liste opreme ukoliko ih nema u kontekstu."
         )
         
         user_prompt = f"Kontekst:\n{context}\n\nPitanje: {user_question}"
@@ -108,7 +123,7 @@ class RAGEngine:
                 ],
                 model=self.llm_model,
                 temperature=0.0,
-                max_tokens=400
+                max_tokens=500
             )
             answer_text = response.choices[0].message.content
             

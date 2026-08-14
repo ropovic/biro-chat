@@ -12,32 +12,11 @@ st.set_page_config(page_title="BiroChat", page_icon="🌲", layout="wide")
 
 st.markdown("""
 <style>
-/* Svetla zelena pozadina za aplikaciju u tonu Srbijašuma */
-.stApp {
-    background-color: #f2f7f2;
-}
-/* Bočna traka sa blagim kontrastom */
-[data-testid="stSidebar"] {
-    background-color: #e5f0e5;
-    border-right: 1px solid #d4e5d4;
-}
-/* Stilizacija naslova */
-.title-text {
-    color: #2e7d32;
-    font-weight: 800;
-    font-family: 'Segoe UI', sans-serif;
-    margin-bottom: 0px;
-}
-/* Stilizacija dugmadi */
-.stButton button {
-    background-color: #2e7d32;
-    color: white;
-    border: none;
-}
-.stButton button:hover {
-    background-color: #1b5e20;
-    color: white;
-}
+.stApp { background-color: #f2f7f2; }
+[data-testid="stSidebar"] { background-color: #e5f0e5; border-right: 1px solid #d4e5d4; }
+.title-text { color: #2e7d32; font-weight: 800; font-family: 'Segoe UI', sans-serif; margin-bottom: 0px; }
+.stButton button { background-color: #2e7d32; color: white; border: none; }
+.stButton button:hover { background-color: #1b5e20; color: white; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,11 +41,8 @@ def get_r2_client():
     if not R2_ACCESS_KEY_ID or R2_ACCESS_KEY_ID == "TVOJ_R2_ACCESS_KEY": return None
     try:
         return boto3.client(
-            service_name="s3",
-            endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
-            aws_access_key_id=R2_ACCESS_KEY_ID,
-            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-            region_name="auto"
+            service_name="s3", endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+            aws_access_key_id=R2_ACCESS_KEY_ID, aws_secret_access_key=R2_SECRET_ACCESS_KEY, region_name="auto"
         )
     except Exception as e:
         st.error(f"Greška pri povezivanju na Cloudflare R2: {e}")
@@ -74,19 +50,15 @@ def get_r2_client():
 
 def get_presigned_url(s3_client, key: str) -> str:
     try:
-        return s3_client.generate_presigned_url(
-            'get_object', Params={'Bucket': R2_BUCKET_NAME, 'Key': key}, ExpiresIn=3600
-        )
+        return s3_client.generate_presigned_url('get_object', Params={'Bucket': R2_BUCKET_NAME, 'Key': key}, ExpiresIn=3600)
     except Exception:
         return ""
 
 @st.cache_data(ttl=3600)
 def fetch_system_logos():
-    """Traži Biro_logo i Srbijasume_logo i vraća njihove URL-ove."""
     s3 = get_r2_client()
     logos = {"biro": None, "srbijasume": None}
     if not s3: return logos
-    
     try:
         response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME)
         if "Contents" in response:
@@ -110,12 +82,12 @@ def load_personnel_catalog_from_r2():
         if "Contents" not in response: return []
 
         all_keys = [obj["Key"] for obj in response["Contents"]]
-        
-        # Izdvajamo zaposlene (ISKLJUČUJEMO fajlove koji u nazivu imaju 'logo')
         image_files = [k for k in all_keys if k.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'logo' not in k.lower()]
         text_files = [k for k in all_keys if k.lower().endswith('.txt')]
 
         catalog = []
+        seen_titles = set() # Obezbeđuje deduplikaciju ljudi
+
         for img_key in image_files:
             img_base = os.path.splitext(img_key)[0]
             img_norm = normalize_text(img_base).replace("_", " ").replace("-", " ")
@@ -152,6 +124,11 @@ def load_personnel_catalog_from_r2():
             if role == "direktor" and "direktor" not in title.lower(): title += " (Direktor)"
             elif role == "zamenik" and "zamenik" not in title.lower(): title += " (Zamenik direktora)"
 
+            # Eliminacija duplikata
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
+
             image_presigned_url = get_presigned_url(s3, img_key)
 
             catalog.append({
@@ -165,7 +142,7 @@ def load_personnel_catalog_from_r2():
 
         return catalog
     except Exception as e:
-        st.error(f"Greška pri skeniranju R2 bucketa '{R2_BUCKET_NAME}': {e}")
+        st.error(f"Greška pri skeniranju R2 bucketa: {e}")
         return []
 
 # ==========================================
@@ -173,7 +150,6 @@ def load_personnel_catalog_from_r2():
 # ==========================================
 system_logos = fetch_system_logos()
 
-# Zaglavlje sa logotipima
 col_l1, col_l2, col_l3 = st.columns([1, 4, 1])
 with col_l1:
     if system_logos["biro"]:
@@ -187,7 +163,6 @@ with col_l3:
 
 st.markdown("---")
 
-# Bočna traka (Sidebar)
 with st.sidebar:
     st.markdown("### ⚙️ Opcije")
     if st.button("🧹 Obriši poruke", use_container_width=True):
@@ -243,7 +218,7 @@ quick_questions = [
     "Ko je direktor Biroa?",
     "Ko su zamenici direktora?",
     "Koji štampači se koriste u Birou?",
-    "Kolektivni ugovor - godišnji odmor",
+    "Navedi član 14 Kolektivnog ugovora.",
     "Spisak opreme i tonera",
     "Ko je ministar zdravstva u Srbiji?"
 ]
@@ -318,7 +293,7 @@ if user_input:
                     st.session_state.messages.append({"role": "assistant", "content": answer_text})
         
         else:
-            with st.spinner("Pretražujem bazu i web..."):
+            with st.spinner("Pretražujem bazu..."):
                 result = ask_birochat(user_input)
                 answer_text = result.get("answer", "Nema odgovora.")
                 sources = result.get("sources", [])
