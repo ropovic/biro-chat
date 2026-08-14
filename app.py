@@ -218,6 +218,9 @@ def filter_personnel(catalog, query: str):
         res = [p for p in catalog if p["role"] == "zamenik"]
         if res: return res
 
+    if "zaposlen" in q_norm or "spisak" in q_norm:
+        return catalog
+
     query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa"]]
     matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
     return matched if matched else catalog
@@ -226,8 +229,8 @@ st.markdown("##### 💡 Brza pitanja:")
 quick_questions = [
     "Ko je direktor Biroa?",
     "Ko su zamenici direktora?",
+    "Spisak zaposlenih",  # <--- Ispravljeno dugme umesto duplog
     "Koji štampači se koriste u Birou?",
-    "Ko su zamenici direktora?",  # <--- Zamenjeno umesto starog pitanja o kolektivnom ugovoru
     "Spisak opreme i tonera",
     "Ko je ministar zdravstva u Srbiji?"
 ]

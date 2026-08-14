@@ -7,24 +7,9 @@ from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from groq import Groq
 
-def cyrillic_to_latin(text: str) -> str:
-    cyr_map = {
-        'а':'a', 'б':'b', 'в':'v', 'г':'g', 'д':'d', 'ђ':'dj', 'е':'e', 'ж':'z',
-        'з':'z', 'и':'i', 'ј':'j', 'к':'k', 'л':'l', 'љ':'lj', 'м':'m', 'н':'n',
-        'њ':'nj', 'о':'o', 'п':'p', 'р':'r', 'с':'s', 'т':'t', 'ћ':'c', 'у':'u',
-        'ф':'f', 'х':'h', 'ц':'c', 'ч':'c', 'џ':'dz', 'ш':'s',
-        'А':'A', 'Б':'B', 'В':'V', 'Г':'G', 'Д':'D', 'Ђ':'Dj', 'Е':'E', 'Ж':'Z',
-        'З':'Z', 'И':'I', 'Ј':'J', 'К':'K', 'Л':'L', 'Љ':'Lj', 'М':'M', 'Н':'N',
-        'Њ':'Nj', 'О':'O', 'П':'P', 'Р':'R', 'С':'S', 'Т':'T', 'Ћ':'C', 'У':'U',
-        'Ф':'F', 'Х':'H', 'Ц':'C', 'Ч':'C', 'Џ':'Dz', 'Ш':'S'
-    }
-    for cyr, lat in cyr_map.items():
-        text = text.replace(cyr, lat)
-    return text
-
 def normalize_text(text: str) -> str:
     if not text: return ""
-    text = cyrillic_to_latin(text).lower().replace("đ", "dj")
+    text = text.lower().replace("đ", "dj")
     nfkd = unicodedata.normalize('NFKD', text)
     return "".join([c for c in nfkd if not unicodedata.combining(c)])
 
@@ -62,25 +47,23 @@ class RAGEngine:
         self.llm_model = "llama-3.1-8b-instant"
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")
 
-    def _generate_search_queries(self, user_question: str) -> tuple:
+    def _generate_search_queries(self, user_question: str) -> list:
         q_norm = normalize_text(user_question)
         queries = [user_question]
 
         if any(w in q_norm for w in ["stampac", "stampaci", "printer", "oprema", "ploter"]):
             queries.append("HP Designjet Canon TX Kyocera ploter štampač oprema toneri")
 
-        article_match = re.search(r'(?:clan|cl)\.?\s*(\d+)', q_norm)
-        target_article = article_match.group(1) if article_match else None
+        if any(w in q_norm for w in ["toner", "toneri"]):
+            queries.append("toner toneri sifra model štampač oprema")
 
-        if target_article:
-            queries.append(f"Član {target_article}")
-            queries.append(f"Члан {target_article}")
-            queries.append(f"Član {target_article}. Kolektivni ugovor")
-            queries.append(f"Члан {target_article}. Колективни уговор")
-            queries.append(f"čl. {target_article}")
-            queries.append(f"чл. {target_article}")
+        article_match = re.search(r'(?:clan|član)\s*(\d+)', q_norm)
+        if article_match:
+            art_num = article_match.group(1)
+            queries.append(f"Kolektivni ugovor Član {art_num}. clan {art_num}")
+            queries.append(f"član {art_num} clan {art_num}")
 
-        return queries, target_article
+        return queries
 
     def query(self, user_question: str) -> dict:
         context_texts = []
@@ -88,19 +71,17 @@ class RAGEngine:
         
         q_norm = normalize_text(user_question)
         is_internal_query = any(w in q_norm for w in INTERNAL_WORDS)
-        
-        search_queries, target_article = self._generate_search_queries(user_question)
+        article_match = re.search(r'(?:clan|član)\s*(\d+)', q_norm)
+        target_article = article_match.group(1) if article_match else None
 
         # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT)
         try:
+            search_queries = self._generate_search_queries(user_question)
             all_retrieved_docs = []
             seen_contents = set()
 
-            # Ako se traži konkretan član, pretražujemo do 60 čunkova u dubinu
-            k_depth = 60 if target_article else 15
-
             for q_str in search_queries:
-                docs = self.vector_store.similarity_search(q_str, k=k_depth)
+                docs = self.vector_store.similarity_search(q_str, k=12)
                 for doc in docs:
                     content_head = doc.page_content.strip()[:100]
                     if content_head not in seen_contents:
@@ -116,20 +97,12 @@ class RAGEngine:
                     "source": source_file
                 })
 
-            # HIBRIDNO RE-RANGIRANJE ZA ČLANOVE
             if target_article:
                 def score_chunk(chunk):
                     c_norm = normalize_text(chunk["text"])
-                    # Traženje broja člana u svim varijantama
-                    num_pattern = r'(?:\b|c|cl|clan)\.?\s*' + re.escape(target_article) + r'(?:\.|\b)'
-                    if re.search(num_pattern, c_norm):
-                        if "kolektivn" in c_norm or "ugovor" in c_norm:
-                            return 300
-                        return 200
-                    if re.search(r'\b' + re.escape(target_article) + r'\b', c_norm):
-                        return 50
+                    if f"clan {target_article}" in c_norm or f"clan{target_article}" in c_norm:
+                        return 100
                     return 0
-
                 extracted_chunks.sort(key=score_chunk, reverse=True)
 
             for item in extracted_chunks[:10]:
@@ -146,8 +119,8 @@ class RAGEngine:
         except Exception as e:
             pass 
             
-        # 2. PRETRAGA WEBA (TAVILY API)
-        if self.tavily_api_key and not is_internal_query:
+        # 2. PRETRAGA WEBA (TAVILY API) - Popravljeno za spoljna pitanja
+        if self.tavily_api_key and (not is_internal_query or "ministar" in q_norm or "srbiji" in q_norm):
             try:
                 tavily_resp = requests.post(
                     "https://api.tavily.com/search",
@@ -156,9 +129,9 @@ class RAGEngine:
                         "query": user_question, 
                         "search_depth": "basic", 
                         "include_answer": True, 
-                        "max_results": 2
+                        "max_results": 3
                     },
-                    timeout=5
+                    timeout=7
                 )
                 if tavily_resp.status_code == 200:
                     data = tavily_resp.json()
@@ -182,15 +155,18 @@ class RAGEngine:
             context = context[:7000] + "\n...[Kontekst skraćen]"
         
         system_prompt = (
-            "Ti si BiroChat, korporativni asistent za pretragu dokumentacije Biroa za planiranje i projektovanje u šumarstvu.\n"
-            "Odgovori precizno koristeći ISKLJUČIVO navedeni kontekst.\n\n"
-            "STRUKTURA ODGOVORA:\n"
-            "1. KADA JE PITANJE 'Koji štampači se koriste u Birou?' ili opšte o štampačima/opremi:\n"
-            "   - Navedi SAMO nazive modela uređaja (HP Designjet 800PS, Canon TX-3000, Kyocera FS-9530dn, Kyocera M3655idn, Kyocera P2040dn).\n"
-            "   - NIKADA nemoj navoditi šifre tonera i količine ako se pitaju samo štampači.\n"
-            "2. KADA SE TRAŽI KONKRETAN ČLAN (npr. Član 14 Kolektivnog ugovora):\n"
-            "   - Pronađi taj član u kontekstu i citiraj ili detaljno sumiraj sve njegove odredbe.\n"
-            "3. Ako podatak zaista ne postoji u kontekstu, odgovori sa 'Podatak nije dostupan.'"
+            "Ti si BiroChat, korporativni asistent za pretragu dokumentacije Biroa za planiranje i projektovanje u šumarstvu, kao i opšte pretrage.\n"
+            "Odgovori precizno koristeći navedeni kontekst.\n\n"
+            "VAŽNA PRAVILA ZA STRUKTURU ODGOVORA:\n"
+            "1. KADA JE PITANJE 'Koji štampači se koriste u Birou?':\n"
+            "   - Izvuci i navedi SAMO čiste nazive modela štampača i plotera (npr. HP Designjet 800PS, Canon TX-3000, Kyocera FS-9530dn, Kyocera M3655idn, Kyocera P2040dn).\n"
+            "   - Nemoj navoditi šifre tonera.\n"
+            "2. KADA JE PITANJE 'Spisak opreme i tonera':\n"
+            "   - Obavezno navedi i štampače/opremu i pripadajuće tonere (sa njihovim šiframa ako postoje u kontekstu).\n"
+            "3. KADA SE TRAŽI KONKRETAN ČLAN (npr. Član 14 Kolektivnog ugovora):\n"
+            "   - Pronađi taj član u kontekstu i navedi njegov pun tekst ili detaljno sumiraj sve njegove odredbe.\n"
+            "4. Za opšta pitanja (poput političkih ili javnih funkcija) koristi podatke iz Web Pretrage.\n"
+            "5. Ako podatak zaista ne postoji u kontekstu, odgovori sa 'Podatak nije dostupan.'"
         )
         
         user_prompt = f"Kontekst:\n{context}\n\nPitanje: {user_question}"
