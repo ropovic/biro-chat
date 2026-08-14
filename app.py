@@ -29,151 +29,176 @@ SYSTEM_LOGOS = {
 
 PERSONNEL_CATALOG = [
     {
-        "title": "Brane Vamovića, direktor u Birou za planiranje, PD Srbijašume",
+        "title": "Brane Vamović, direktor",
+        "full_title": "Fotografija Brane Vamovića, direktor u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Brano%20Vamovi%C4%87%20-%20direktor.jpg",
         "role": "direktor",
         "search_corpus": "fotografija brane vamovića, direktor u birou za planiranje, pd srbijašume brano vamović direktor"
     },
     {
-        "title": "Gorana Ćaldovića, viši projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Goran Ćaldović, viši projektant",
+        "full_title": "Fotografija Gorana Ćaldovića, viši projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Goran%20%C4%86aldovi%C4%87.jpg",
         "role": "zamenik",
         "search_corpus": "fotografija gorana ćaldovića, viši projektant u birou za planiranje, pd srbijašume goran ćaldović zamenik"
     },
     {
-        "title": "Svetlane Mihajlović, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Svetlana Mihajlović, samostalni projektant",
+        "full_title": "Fotografija Svetlane Mihajlović, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Svetlana%20Mihajlovi%C4%87.jpg",
         "role": "zamenik",
         "search_corpus": "fotografija svetlane mihajlović, samostalni projektant u birou za planiranje, pd srbijašume svetlana mihajlović zamenik"
     },
     {
-        "title": "Aleksandre Katić, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Aleksandra Katić",
+        "full_title": "Fotografija Aleksandre Katić, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Aleksandra%20Kati%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija aleksandre katić, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Arsenija Simića, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Arsenije Simić",
+        "full_title": "Fotografija Arsenija Simića, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Arsenije%20Simi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija arsenija simića, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Biljane Mirković, šef računovodstva u Birou za planiranje, PD Srbijašume",
+        "title": "Biljana Mirković",
+        "full_title": "Fotografija Biljane Mirković, šef računovodstva u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Biljana%20Mirkovi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija biljane mirković, šef računovodstva u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Bojane Jelić, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Bojana Jelić",
+        "full_title": "Fotografija Bojane Jelić, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Bojana%20Jeli%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija bojane jelić, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Boška Maleševića, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Boško Malešević",
+        "full_title": "Fotografija Boška Maleševića, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Bo%C5%A1ko%20Male%C5%A1evi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija boška maleševića, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Darka Živanovića, viši projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Darko Živanović",
+        "full_title": "Fotografija Darka Živanovića, viši projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Darko%20%C5%BDivanovi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija darka živanovića, viši projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Dragane Miladinović, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Dragana Miladinović",
+        "full_title": "Fotografija Dragane Miladinović, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Dragana%20Miladinovi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija dragane miladinović, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Marine Đukelić, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Marina Đukelić",
+        "full_title": "Fotografija Marine Đukelić, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Marina%20D%C5%BEukeli%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija marine đukelić, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Mirka Kovačevića, viši projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Mirko Kovačević",
+        "full_title": "Fotografija Mirka Kovačevića, viši projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Mirko%20Kova%C4%8Devi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija mirka kovačevića, viši projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Mirka Simonovića, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Mirko Simonović",
+        "full_title": "Fotografija Mirka Simonovića, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Mirko%20Simonovi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija mirka simonovića, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Nebojše Ivoševića, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Nebojša Ivošević",
+        "full_title": "Fotografija Nebojše Ivoševića, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Neboj%C5%A1a%20Ivo%C5%A1evi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija nebojše ivoševića, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Nenada Vamovića, viši projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Nenad Vamović",
+        "full_title": "Fotografija Nenada Vamovića, viši projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Nenad%20Vamovi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija nenada vamovića, viši projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Nenada Vereša, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Nenad Vereš",
+        "full_title": "Fotografija Nenada Vereša, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Nenad%20Vere%C5%A1.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija nenada vereša, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Predraga Dedijera, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Predrag Dedijer",
+        "full_title": "Fotografija Predraga Dedijera, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Predrag%20Dedijer.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija predraga dedijera, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Radoja Ščekića, viši projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Radoje Ščekić",
+        "full_title": "Fotografija Radoja Ščekića, viši projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Radoje%20%C5%A0%C4%8Deki%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija radoja ščekića, viši projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Saše Perduha, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Saša Perduh",
+        "full_title": "Fotografija Saše Perduha, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Sa%C5%A1a%20Perduh.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija saše perduha, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Snežane Dubovac, geodete u Birou za planiranje, PD Srbijašume",
+        "title": "Snežana Dubovac",
+        "full_title": "Fotografija Snežane Dubovac, geodete u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Sne%C5%BEana%20Dubovac.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija snežane dubovac, geodete u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Vedrane Miljković, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Vedrana Miljković",
+        "full_title": "Fotografija Vedrane Miljković, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Vedrana%20Miljkovi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija vedrane miljković, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Vladimira Milovanovića, radnik u računovodstvu u Birou za planiranje, PD Srbijašume",
+        "title": "Vladimir Milovanović",
+        "full_title": "Fotografija Vladimira Milovanovića, radnik u računovodstvu u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Vladimir%20Milovanovi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija vladimira milovanovića, radnik u računovodstvu u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Vuka Čeperkovića, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Vuk Čeperković",
+        "full_title": "Fotografija Vuka Čeperkovića, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Vuk%20%C4%8Ceperkovi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija vuka čeperkovića, samostalni projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Zorana Petrovića, viši projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Zoran Petrović",
+        "full_title": "Fotografija Zorana Petrovića, viši projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Zoran%20Petrovi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija zorana petrovića, viši projektant u birou za planiranje, pd srbijašume"
     },
     {
-        "title": "Čede Vukovića, samostalni projektant u Birou za planiranje, PD Srbijašume",
+        "title": "Čedo Vuković",
+        "full_title": "Fotografija Čede Vukovića, samostalni projektant u Birou za planiranje, PD Srbijašume",
         "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/%C4%8Cedo%20Vukovi%C4%87.jpg",
         "role": "zaposleni",
         "search_corpus": "fotografija čede vukovića, samostalni projektant u birou za planiranje, pd srbijašume"
@@ -222,9 +247,6 @@ with st.sidebar:
     
     **Orkestrator:**
     LangChain
-    
-    **Web Ekstenzija:**
-    Tavily API
     """)
 
 # ==========================================
@@ -280,13 +302,20 @@ for idx, q in enumerate(quick_questions):
     if q_cols[idx].button(q, key=f"quick_btn_{idx}", use_container_width=True):
         selected_quick_q = q
 
+# Prikaz istorije poruka
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         if "content" in msg and msg["content"]:
             st.markdown(msg["content"])
         if "images" in msg and msg["images"]:
-            for img in msg["images"]:
-                st.image(img["image_url"], caption=img["title"], width=250)
+            imgs = msg["images"]
+            if len(imgs) == 1:
+                st.image(imgs[0]["image_url"], caption=imgs[0]["full_title"], use_container_width=True)
+            else:
+                grid_cols = st.columns(3)
+                for idx, img_item in enumerate(imgs):
+                    with grid_cols[idx % 3]:
+                        st.image(img_item["image_url"], caption=img_item["title"], use_container_width=True)
 
 chat_input_val = st.chat_input("Postavite pitanje o dokumentima ili zaposlenima...")
 user_input = selected_quick_q or chat_input_val
@@ -298,18 +327,25 @@ if user_input:
 
     with st.chat_message("assistant"):
         if is_personnel_query(user_input):
-            st.info("🔍 Učitavam registar zaposlenih...")
+            st.info("🔍 Učitavam registar zaposlenih sa fotografijama...")
             
-            # Strogo sortiranje: direktor prvi (0), pa zamenici (1), pa zaposleni (2) abecedno
             role_order = {"direktor": 0, "zamenik": 1, "zaposleni": 2}
             sorted_catalog = sorted(PERSONNEL_CATALOG, key=lambda x: (role_order[x["role"]], x["title"]))
             
             filtered_photos = filter_personnel(sorted_catalog, user_input)
             if filtered_photos:
-                answer_text = f"Pronađeno u registru zaposlenih Biroa:"
+                answer_text = f"Pronađeno u registru zaposlenih Biroa ({len(filtered_photos)} zaposlenih):"
                 st.markdown(answer_text)
-                for img in filtered_photos:
-                    st.image(img["image_url"], caption=img["title"], width=250)
+                
+                # Prikaz slika: ako je 1 ili 2 (direktor/zamenici), prikaži veće; ako je spisak, prikaži u 3 kolone (grid)
+                if len(filtered_photos) <= 2:
+                    for img in filtered_photos:
+                        st.image(img["image_url"], caption=img["full_title"], use_container_width=True)
+                else:
+                    grid_cols = st.columns(3)
+                    for idx, img in enumerate(filtered_photos):
+                        with grid_cols[idx % 3]:
+                            st.image(img["image_url"], caption=img["title"], use_container_width=True)
                 
                 st.session_state.messages.append({
                     "role": "assistant",
