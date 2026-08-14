@@ -9,3 +9,8 @@ langchain
 langchain-community
 langchain-huggingface
 langchain-qdrant
+llama-index
+llama-index-core
+llama-index-vector-stores-qdrant
+llama-index-embeddings-openai
+llama-index-llms-openai
