@@ -1,4 +1,5 @@
 import os
+import requests
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
@@ -30,46 +31,74 @@ class RAGEngine:
         
         self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         self.llm_model = "llama-3.1-8b-instant"
+        self.tavily_api_key = os.getenv("TAVILY_API_KEY") # Obavezno setovati ovaj ključ u .env
 
     def query(self, user_question: str) -> dict:
-        try:
-            # Smanjeno k=3 radi čuvanja tokena u okviru Groq 6000 TPM limita
-            docs = self.vector_store.similarity_search(user_question, k=3)
-        except Exception as e:
-            return {"answer": f"⚠️ Greška prilikom pretrage baze: {e}", "source_documents": []}
-            
-        if not docs:
-            return {"answer": "Nažalost, nisam pronašao relevantne informacije u bazi podataka.", "source_documents": []}
-            
         context_texts = []
         sources = []
         
-        for doc in docs:
-            text_content = doc.page_content.strip()
-            # Skraćivanje pojedinačnih odsečaka ako su predugački
-            if len(text_content) > 800:
-                text_content = text_content[:800] + "..."
+        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT)
+        try:
+            docs = self.vector_store.similarity_search(user_question, k=3)
+            for doc in docs:
+                text_content = doc.page_content.strip()
+                if len(text_content) > 800:
+                    text_content = text_content[:800] + "..."
+                    
+                source_file = doc.metadata.get("source", "Lokalni dokument")
+                if source_file not in sources:
+                    sources.append(source_file)
                 
-            source_file = doc.metadata.get("source", "Nepoznat dokument")
-            if source_file not in sources:
-                sources.append(source_file)
+                block = f"Izvor: {source_file}\n{text_content}"
+                context_texts.append(block)
+        except Exception as e:
+            pass # Nastavlja dalje ukoliko je Qdrant baza trenutno nedostupna
             
-            block = f"Izvor: {source_file}\n{text_content}"
-            context_texts.append(block)
+        # 2. PRETRAGA WEBA (TAVILY API)
+        if self.tavily_api_key:
+            try:
+                tavily_resp = requests.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": self.tavily_api_key, 
+                        "query": user_question, 
+                        "search_depth": "basic", 
+                        "include_answer": True, 
+                        "max_results": 2
+                    },
+                    timeout=5
+                )
+                if tavily_resp.status_code == 200:
+                    data = tavily_resp.json()
+                    tavily_answer = data.get("answer", "")
+                    
+                    if not tavily_answer:
+                        snippets = [res["content"] for res in data.get("results", [])]
+                        tavily_answer = " ".join(snippets)
+                    
+                    if tavily_answer:
+                        context_texts.append(f"Izvor: Web Pretraga (Tavily)\n{tavily_answer}")
+                        if "Web Pretraga (Tavily)" not in sources:
+                            sources.append("Web Pretraga (Tavily)")
+            except Exception as e:
+                pass
+
+        if not context_texts:
+            return {"answer": "Nažalost, nisam pronašao relevantne informacije ni u bazi ni na webu.", "source_documents": []}
             
         context = "\n\n---\n\n".join(context_texts)
         
-        # Tvrdo ograničenje konteksta na max 3500 karaktera (~850 tokena)
+        # Limit tokena za Groq
         if len(context) > 3500:
-            context = context[:3500] + "\n...[Kontekst skraćen radi limita]"
+            context = context[:3500] + "\n...[Kontekst skraćen]"
         
         system_prompt = (
-            "Ti si BiroChat, korporativni asistent za pretragu dokumentacije. "
-            "Odgovori kratko i precizno na pitanje koristeći ISKLJUČIVO navedeni kontekst. "
-            "Ako u kontekstu nema traženog podatka, napiši da podatak nije direktno naveden u dokumentima."
+            "Ti si BiroChat, korporativni asistent. "
+            "Odgovori kratko i precizno na pitanje koristeći ISKLJUČIVO navedeni kontekst (koji uključuje lokalne dokumente i/ili web pretragu). "
+            "Ako u kontekstu nema traženog podatka, napiši da podatak nije dostupan."
         )
         
-        user_prompt = f"Kontekst iz baze:\n{context}\n\nPitanje: {user_question}"
+        user_prompt = f"Kontekst:\n{context}\n\nPitanje: {user_question}"
         
         try:
             response = self.groq_client.chat.completions.create(
@@ -89,7 +118,7 @@ class RAGEngine:
                 "sources": sources
             }
         except Exception as e:
-            return {"answer": f"⚠️ Greška prilikom generisanja odgovora: {e}", "source_documents": []}
+            return {"answer": f"⚠️ Greška prilikom generisanja odgovora od strane LLM-a: {e}", "source_documents": []}
 
 _engine_instance = RAGEngine()
 
