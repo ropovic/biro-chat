@@ -86,23 +86,16 @@ def load_personnel_catalog_from_r2():
         text_files = [k for k in all_keys if k.lower().endswith('.txt')]
 
         catalog = []
-        seen_identifiers = set()
+        seen_identities = set() # Stroga deduplikacija
 
         for img_key in image_files:
             img_base = os.path.splitext(img_key)[0]
             img_norm = normalize_text(img_base).replace("_", " ").replace("-", " ")
-            img_tokens = [w for w in img_norm.split() if len(w) > 1]
-
-            person_id = next((token for token in img_tokens if token not in ["foto", "direktor", "zamenik"]), img_tokens[0] if img_tokens else img_base)
-            
-            if person_id in seen_identifiers:
-                continue
-            seen_identifiers.add(person_id)
 
             matching_txt_key = None
             for txt_key in text_files:
-                txt_norm = normalize_text(txt_key).replace("_", " ").replace("-", " ")
-                if all(token in txt_norm for token in img_tokens):
+                txt_base = os.path.splitext(txt_key)[0]
+                if normalize_text(txt_base) in img_norm or img_norm in normalize_text(txt_base):
                     matching_txt_key = txt_key
                     break
 
@@ -121,11 +114,23 @@ def load_personnel_catalog_from_r2():
 
             role = "direktor" if is_director else ("zamenik" if is_deputy else "zaposleni")
 
-            title = img_base.replace("_", " ").replace("Foto", "").strip()
-            if not title or len(title) < 3:
-                title = person_id.title()
+            # Određivanje ključnog ID-ja identiteta (Direktor je 1, zamenici po prezimenu)
+            if role == "direktor":
+                person_id = "direktor_glavni"
+            elif "caldovic" in search_corpus or "goran" in search_corpus:
+                person_id = "zamenik_caldovic"
+            elif "mihajlovic" in search_corpus or "svetlana" in search_corpus:
+                person_id = "zamenik_mihajlovic"
             else:
-                title = title.title()
+                person_id = img_norm.strip()
+
+            if person_id in seen_identities:
+                continue
+            seen_identities.add(person_id)
+
+            title = img_base.replace("_", " ").replace("Foto", "").replace("foto", "").strip().title()
+            if not title or len(title) < 3:
+                title = person_id.replace("_", " ").title()
 
             if role == "direktor" and "direktor" not in title.lower():
                 title += " (Direktor)"

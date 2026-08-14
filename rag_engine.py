@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 import unicodedata
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -7,12 +8,16 @@ from qdrant_client import QdrantClient
 from groq import Groq
 
 def normalize_text(text: str) -> str:
+    if not text: return ""
     text = text.lower().replace("đ", "dj")
     nfkd = unicodedata.normalize('NFKD', text)
     return "".join([c for c in nfkd if not unicodedata.combining(c)])
 
-# Ključne reči koje označavaju da se traži interni dokument (isključuje web)
-INTERNAL_WORDS = ["biro", "ugovor", "kolektivni", "stampac", "toner", "zaposlen", "oprema", "clan", "pravilnik", "srbijasum", "direktor", "odmor", "radni", "katalog", "ploter"]
+INTERNAL_WORDS = [
+    "biro", "ugovor", "kolektivni", "stampac", "toner", "zaposlen", 
+    "oprema", "clan", "pravilnik", "srbijasum", "direktor", "odmor", 
+    "radni", "katalog", "ploter", "hp", "kyocera", "canon"
+]
 
 class RAGEngine:
     def __init__(self):
@@ -42,6 +47,14 @@ class RAGEngine:
         self.llm_model = "llama-3.1-8b-instant"
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")
 
+    def _expand_query(self, query: str) -> str:
+        """ Proširuje sinonime da vektorska baza lakše pronađe sve štampače/plotere """
+        q_norm = normalize_text(query)
+        expanded = query
+        if any(w in q_norm for w in ["stampac", "stampaci", "printer", "oprema"]):
+            expanded += " ploter hp800 hp designjet kyocera canon mf uređaj"
+        return expanded
+
     def query(self, user_question: str) -> dict:
         context_texts = []
         sources = []
@@ -49,25 +62,49 @@ class RAGEngine:
         q_norm = normalize_text(user_question)
         is_internal_query = any(w in q_norm for w in INTERNAL_WORDS)
         
-        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT)
+        # Detekcija specifičnog člana (npr. "clan 14" ili "član 14")
+        article_match = re.search(r'(?:clan|član)\s*(\d+)', q_norm)
+        target_article = article_match.group(1) if article_match else None
+
+        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT) - Povećano k=15
         try:
-            docs = self.vector_store.similarity_search(user_question, k=5)
+            search_query = self._expand_query(user_question)
+            docs = self.vector_store.similarity_search(search_query, k=15)
+            
+            extracted_chunks = []
             for doc in docs:
                 text_content = doc.page_content.strip()
-                # Dozvoljavamo duže isečke (1200 karaktera) da se ne bi gubili članovi ugovora i liste opreme
-                if len(text_content) > 1200:
-                    text_content = text_content[:1200] + "..."
-                    
                 source_file = doc.metadata.get("source", "Lokalni dokument")
-                if source_file not in sources:
-                    sources.append(source_file)
+                extracted_chunks.append({
+                    "text": text_content,
+                    "source": source_file
+                })
+
+            # HIBRIDNO RE-RANGIRANJE ZA ČLANOVE: Ako se traži Član X, poguraj ga na vrh!
+            if target_article:
+                def score_chunk(chunk):
+                    c_norm = normalize_text(chunk["text"])
+                    if f"clan {target_article}" in c_norm or f"clan{target_article}" in c_norm:
+                        return 100
+                    return 0
+                extracted_chunks.sort(key=score_chunk, reverse=True)
+
+            # Sastavljanje konteksta
+            for item in extracted_chunks[:8]:  # Uzimamo najboljih 8 nakon re-rangiranja
+                text_content = item["text"]
+                if len(text_content) > 1500:
+                    text_content = text_content[:1500] + "..."
+                    
+                if item["source"] not in sources:
+                    sources.append(item["source"])
                 
-                block = f"Izvor: {source_file}\n{text_content}"
+                block = f"Izvor: {item['source']}\n{text_content}"
                 context_texts.append(block)
+
         except Exception as e:
             pass 
             
-        # 2. PRETRAGA WEBA (TAVILY API) - Samo za opšta pitanja van biroa
+        # 2. PRETRAGA WEBA (TAVILY API) - Samo za opšta spoljna pitanja
         if self.tavily_api_key and not is_internal_query:
             try:
                 tavily_resp = requests.post(
@@ -84,7 +121,6 @@ class RAGEngine:
                 if tavily_resp.status_code == 200:
                     data = tavily_resp.json()
                     tavily_answer = data.get("answer", "")
-                    
                     if not tavily_answer:
                         snippets = [res["content"] for res in data.get("results", [])]
                         tavily_answer = " ".join(snippets)
@@ -100,15 +136,15 @@ class RAGEngine:
             return {"answer": "Nažalost, podatak nije pronađen u dokumentima baze.", "source_documents": []}
             
         context = "\n\n---\n\n".join(context_texts)
-        
-        if len(context) > 4500:
-            context = context[:4500] + "\n...[Kontekst skraćen]"
+        if len(context) > 6000:
+            context = context[:6000] + "\n...[Kontekst skraćen]"
         
         system_prompt = (
             "Ti si BiroChat, korporativni asistent za pretragu dokumentacije. "
             "Odgovori precizno koristeći ISKLJUČIVO navedeni kontekst. "
-            "Ako u kontekstu nema odgovora, reci da podatak nije dostupan. "
-            "Nikada ne izmišljaj članove zakona, pravilnika, članove ugovora ili liste opreme ukoliko ih nema u kontekstu."
+            "Uvek navedi SVE štampače, plotere i opremu koji se pominju u kontekstu (uključujući HP, Kyocera, Canon). "
+            "Ako se traži konkretan član ugovora, prepiši ili detaljno sumiraj taj član iz konteksta. "
+            "Ako u kontekstu nema traženih podataka, jasno navedi da podatak nije dostupan."
         )
         
         user_prompt = f"Kontekst:\n{context}\n\nPitanje: {user_question}"
@@ -121,7 +157,7 @@ class RAGEngine:
                 ],
                 model=self.llm_model,
                 temperature=0.0,
-                max_tokens=600
+                max_tokens=800
             )
             answer_text = response.choices[0].message.content
             
