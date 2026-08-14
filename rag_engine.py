@@ -7,9 +7,24 @@ from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from groq import Groq
 
+def cyrillic_to_latin(text: str) -> str:
+    cyr_map = {
+        'а':'a', 'б':'b', 'в':'v', 'г':'g', 'д':'d', 'ђ':'dj', 'е':'e', 'ж':'z',
+        'з':'z', 'и':'i', 'ј':'j', 'к':'k', 'л':'l', 'љ':'lj', 'м':'m', 'н':'n',
+        'њ':'nj', 'о':'o', 'п':'p', 'р':'r', 'с':'s', 'т':'t', 'ћ':'c', 'у':'u',
+        'ф':'f', 'х':'h', 'ц':'c', 'ч':'c', 'џ':'dz', 'ш':'s',
+        'А':'A', 'Б':'B', 'В':'V', 'Г':'G', 'Д':'D', 'Ђ':'Dj', 'Е':'E', 'Ж':'Z',
+        'З':'Z', 'И':'I', 'Ј':'J', 'К':'K', 'Л':'L', 'Љ':'Lj', 'М':'M', 'Н':'N',
+        'Њ':'Nj', 'О':'O', 'П':'P', 'Р':'R', 'С':'S', 'Т':'T', 'Ћ':'C', 'У':'U',
+        'Ф':'F', 'Х':'H', 'Ц':'C', 'Ч':'C', 'Џ':'Dz', 'Ш':'S'
+    }
+    for cyr, lat in cyr_map.items():
+        text = text.replace(cyr, lat)
+    return text
+
 def normalize_text(text: str) -> str:
     if not text: return ""
-    text = text.lower().replace("đ", "dj")
+    text = cyrillic_to_latin(text).lower().replace("đ", "dj")
     nfkd = unicodedata.normalize('NFKD', text)
     return "".join([c for c in nfkd if not unicodedata.combining(c)])
 
@@ -48,20 +63,20 @@ class RAGEngine:
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")
 
     def _generate_search_queries(self, user_question: str) -> list:
-        """ Generiše više ciljanih upita za sigurniji obuhvat iz Qdrant-a """
         q_norm = normalize_text(user_question)
         queries = [user_question]
 
-        # Ako se traže štampači/oprema, forsira povlačenje svih brand-ova i plotera
         if any(w in q_norm for w in ["stampac", "stampaci", "printer", "oprema", "ploter"]):
             queries.append("HP Designjet Canon TX Kyocera ploter štampač oprema toneri")
 
-        # Ako se traži konkretan član (npr. član 14)
-        article_match = re.search(r'(?:clan|član)\s*(\d+)', q_norm)
+        # Detekcija člana (i na ćirilici i na latinici)
+        article_match = re.search(r'(?:clan|član|члан|cl|čl|чл)\.?\s*(\d+)', q_norm)
         if article_match:
             art_num = article_match.group(1)
-            queries.append(f"Kolektivni ugovor Član {art_num}. clan {art_num}")
-            queries.append(f"član {art_num} clan {art_num}")
+            queries.append(f"Kolektivni ugovor Član {art_num}")
+            queries.append(f"Колективни уговор Члан {art_num}")
+            queries.append(f"Član {art_num}. clan {art_num} čl {art_num}")
+            queries.append(f"Члан {art_num} чл {art_num}")
 
         return queries
 
@@ -71,17 +86,18 @@ class RAGEngine:
         
         q_norm = normalize_text(user_question)
         is_internal_query = any(w in q_norm for w in INTERNAL_WORDS)
-        article_match = re.search(r'(?:clan|član)\s*(\d+)', q_norm)
+        
+        article_match = re.search(r'(?:clan|član|члан|cl|čl|чл)\.?\s*(\d+)', q_norm)
         target_article = article_match.group(1) if article_match else None
 
-        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT) - Multi-Query Engine
+        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT)
         try:
             search_queries = self._generate_search_queries(user_question)
             all_retrieved_docs = []
             seen_contents = set()
 
             for q_str in search_queries:
-                docs = self.vector_store.similarity_search(q_str, k=12)
+                docs = self.vector_store.similarity_search(q_str, k=15)
                 for doc in docs:
                     content_head = doc.page_content.strip()[:100]
                     if content_head not in seen_contents:
@@ -97,16 +113,23 @@ class RAGEngine:
                     "source": source_file
                 })
 
-            # HIBRIDNO RE-RANGIRANJE ZA ČLANOVE UGOVORA
+            # HIBRIDNO RE-RANGIRANJE ZA ČLANOVE (Uključuje i Ćirilicu)
             if target_article:
                 def score_chunk(chunk):
                     c_norm = normalize_text(chunk["text"])
-                    if f"clan {target_article}" in c_norm or f"clan{target_article}" in c_norm:
+                    # Provera prisustva broja člana i ključnih reči za ugovor
+                    has_num = re.search(r'\b' + re.escape(target_article) + r'\b', c_norm)
+                    has_clan = any(w in c_norm for w in ["clan", "cl", "claba"])
+                    has_ugovor = "kolektivn" in c_norm or "ugovor" in c_norm
+                    
+                    if has_num and (has_clan or has_ugovor):
+                        if re.search(r'\b(?:clan|cl)\.?\s*' + re.escape(target_article) + r'\b', c_norm):
+                            return 200
                         return 100
                     return 0
+
                 extracted_chunks.sort(key=score_chunk, reverse=True)
 
-            # Sastavljanje finalnog konteksta za LLM
             for item in extracted_chunks[:10]:
                 text_content = item["text"]
                 if len(text_content) > 1500:
@@ -121,7 +144,7 @@ class RAGEngine:
         except Exception as e:
             pass 
             
-        # 2. PRETRAGA WEBA (TAVILY API) - Za opšta pitanja
+        # 2. PRETRAGA WEBA (TAVILY API)
         if self.tavily_api_key and not is_internal_query:
             try:
                 tavily_resp = requests.post(
@@ -159,12 +182,12 @@ class RAGEngine:
         system_prompt = (
             "Ti si BiroChat, korporativni asistent za pretragu dokumentacije Biroa za planiranje i projektovanje u šumarstvu.\n"
             "Odgovori precizno koristeći ISKLJUČIVO navedeni kontekst.\n\n"
-            "VAŽNA PRAVILA ZA STRUKTURU ODGOVORA:\n"
+            "STRUKTURA ODGOVORA:\n"
             "1. KADA JE PITANJE 'Koji štampači se koriste u Birou?' ili opšte o štampačima/opremi:\n"
-            "   - Izvuci i navedi SAMO čiste nazive modela štampača i plotera (npr. HP Designjet 800PS, Canon TX-3000, Kyocera FS-9530dn, Kyocera M3655idn, Kyocera P2040dn).\n"
-            "   - NIKADA nemoj navoditi šifre tonera (poput TK-710, HP C4844A) niti količine komada kada korisnik pita koji se štampači koriste.\n"
+            "   - Navedi SAMO nazive modela uređaja (HP Designjet 800PS, Canon TX-3000, Kyocera FS-9530dn, Kyocera M3655idn, Kyocera P2040dn).\n"
+            "   - NIKADA nemoj navoditi šifre tonera i količine ako se pitaju samo štampači.\n"
             "2. KADA SE TRAŽI KONKRETAN ČLAN (npr. Član 14 Kolektivnog ugovora):\n"
-            "   - Pronađi taj član u kontekstu i navedi njegov pun tekst ili detaljno sumiraj sve njegove odredbe.\n"
+            "   - Pronađi taj član u kontekstu i citiraj ili detaljno sumiraj sve njegove odredbe.\n"
             "3. Ako podatak zaista ne postoji u kontekstu, odgovori sa 'Podatak nije dostupan.'"
         )
         

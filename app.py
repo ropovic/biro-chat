@@ -2,12 +2,10 @@ import os
 import re
 import unicodedata
 import boto3
+import st_express as st
 import streamlit as st
 from rag_engine import ask_birochat
 
-# ==========================================
-# 1. PODEŠAVANJA STRANICE I DIZAJNA
-# ==========================================
 st.set_page_config(page_title="BiroChat", page_icon="🌲", layout="wide")
 
 st.markdown("""
@@ -20,9 +18,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# 2. KONFIGURACIJA CLOUDFLARE R2 BUCKETA
-# ==========================================
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "TVOJ_R2_ACCOUNT_ID")
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "TVOJ_R2_ACCESS_KEY")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "TVOJ_R2_SECRET_KEY")
@@ -30,9 +25,24 @@ R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "fotografijebiro")
 
 DEPUTIES_TOKENS = ["caldovic", "mihajlovic", "goran", "svetlana"]
 
+def cyrillic_to_latin(text: str) -> str:
+    cyr_map = {
+        'а':'a', 'б':'b', 'в':'v', 'г':'g', 'д':'d', 'ђ':'dj', 'е':'e', 'ж':'z',
+        'з':'z', 'и':'i', 'ј':'j', 'к':'k', 'л':'l', 'љ':'lj', 'м':'m', 'н':'n',
+        'њ':'nj', 'о':'o', 'п':'p', 'р':'r', 'с':'s', 'т':'t', 'ћ':'c', 'у':'u',
+        'ф':'f', 'х':'h', 'ц':'c', 'ч':'c', 'џ':'dz', 'ш':'s',
+        'А':'A', 'Б':'B', 'В':'V', 'Г':'G', 'Д':'D', 'Ђ':'Dj', 'Е':'E', 'Ж':'Z',
+        'З':'Z', 'И':'I', 'Ј':'J', 'К':'K', 'Л':'L', 'Љ':'Lj', 'М':'M', 'Н':'N',
+        'Њ':'Nj', 'О':'O', 'П':'P', 'Р':'R', 'С':'S', 'Т':'T', 'Ћ':'C', 'У':'U',
+        'Ф':'F', 'Х':'H', 'Ц':'C', 'Ч':'C', 'Џ':'Dz', 'Ш':'S'
+    }
+    for cyr, lat in cyr_map.items():
+        text = text.replace(cyr, lat)
+    return text
+
 def normalize_text(text: str) -> str:
     if not text: return ""
-    text = text.lower().replace("đ", "dj")
+    text = cyrillic_to_latin(text).lower().replace("đ", "dj")
     nfkd = unicodedata.normalize('NFKD', text)
     return "".join([c for c in nfkd if not unicodedata.combining(c)])
 
@@ -73,7 +83,7 @@ def fetch_system_logos():
     return logos
 
 @st.cache_data(ttl=300)
-def load_personnel_catalog_from_r2():
+def load_media_catalog_from_r2():
     s3 = get_r2_client()
     if not s3: return []
 
@@ -86,7 +96,7 @@ def load_personnel_catalog_from_r2():
         text_files = [k for k in all_keys if k.lower().endswith('.txt')]
 
         catalog = []
-        seen_identities = set() # Stroga deduplikacija
+        seen_identities = set()
 
         for img_key in image_files:
             img_base = os.path.splitext(img_key)[0]
@@ -109,24 +119,31 @@ def load_personnel_catalog_from_r2():
 
             search_corpus = normalize_text(f"{img_key} {matching_txt_key or ''} {description_content}")
 
+            # Detekcija kategorije: Dijagram / Ruža vetrova VS Osoblje
+            is_diagram = any(k in search_corpus for k in ["ruza", "vetro", "vetar", "dijagram", "grafik", "karta", "skica"])
+            
             is_deputy = any(dep in search_corpus for dep in DEPUTIES_TOKENS) or "zamenik" in search_corpus
             is_director = "direktor" in search_corpus and not is_deputy
+            is_personnel = (is_director or is_deputy or "zaposlen" in search_corpus or "radnik" in search_corpus or "foto" in search_corpus) and not is_diagram
 
+            category = "diagram" if is_diagram else ("personnel" if is_personnel else "other")
             role = "direktor" if is_director else ("zamenik" if is_deputy else "zaposleni")
 
-            # Određivanje ključnog ID-ja identiteta (Direktor je 1, zamenici po prezimenu)
-            if role == "direktor":
-                person_id = "direktor_glavni"
-            elif "caldovic" in search_corpus or "goran" in search_corpus:
-                person_id = "zamenik_caldovic"
-            elif "mihajlovic" in search_corpus or "svetlana" in search_corpus:
-                person_id = "zamenik_mihajlovic"
-            else:
-                person_id = img_norm.strip()
+            if category == "personnel":
+                if role == "direktor":
+                    person_id = "direktor_glavni"
+                elif "caldovic" in search_corpus or "goran" in search_corpus:
+                    person_id = "zamenik_caldovic"
+                elif "mihajlovic" in search_corpus or "svetlana" in search_corpus:
+                    person_id = "zamenik_mihajlovic"
+                else:
+                    person_id = img_norm.strip()
 
-            if person_id in seen_identities:
-                continue
-            seen_identities.add(person_id)
+                if person_id in seen_identities:
+                    continue
+                seen_identities.add(person_id)
+            else:
+                person_id = img_key
 
             title = img_base.replace("_", " ").replace("Foto", "").replace("foto", "").strip().title()
             if not title or len(title) < 3:
@@ -144,6 +161,7 @@ def load_personnel_catalog_from_r2():
                 "image_url": image_presigned_url,
                 "title": title,
                 "description": description_content,
+                "category": category,
                 "role": role,
                 "search_corpus": search_corpus
             })
@@ -176,61 +194,61 @@ with st.sidebar:
     if st.button("🧹 Obriši poruke", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
-        
-    st.markdown("---")
-    st.markdown("### 🧠 Sistemski moduli")
-    st.info("""
-    **LLM Model:**
-    Groq Llama-3.1-8b-instant
-    
-    **Vektorska Baza:**
-    Qdrant Vector Store
-    
-    **Embedder:**
-    paraphrase-multilingual-MiniLM-L12-v2
-    
-    **Orkestrator:**
-    LangChain
-    
-    **Web Ekstenzija:**
-    Tavily API
-    """)
 
-# ==========================================
-# 4. CHAT I LOGIKA PRETRAGE
-# ==========================================
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+MEDIA_KEYWORDS = [
+    "direktor", "direktora", "zamenik", "zamenika", "zamenici", 
+    "zaposlen", "zaposleni", "zaposlenih", "radnik", "radnici", 
+    "uprava", "slika", "slike", "fotografija", "fotografije", 
+    "ruza", "ruze", "vetar", "vetrova", "dijagram", "dijagrami", 
+    "grafik", "grafikoni", "karta", "karte", "prikaz"
+]
 
-PERSONNEL_KEYWORDS = ["direktor", "direktora", "zamenik", "zamenika", "zamenici", "zaposlen", "zaposleni", "zaposlenih", "radnik", "radnici", "uprava", "slika", "fotografija"]
-
-def is_personnel_query(question: str) -> bool:
+def is_media_query(question: str) -> bool:
     q_norm = normalize_text(question)
-    return any(re.search(r'\b' + re.escape(kw) + r'\b', q_norm) for kw in PERSONNEL_KEYWORDS)
+    return any(re.search(r'\b' + re.escape(kw) + r'\b', q_norm) for kw in MEDIA_KEYWORDS)
 
-def filter_personnel(catalog, query: str):
+def filter_media(catalog, query: str):
     q_norm = normalize_text(query)
-    
+
+    # 1. Traženje dijagrama ruža vetrova
+    if any(k in q_norm for k in ["ruza", "ruze", "vetar", "vetrova", "dijagram", "dijagrami"]):
+        diagrams = [p for p in catalog if p["category"] == "diagram" or any(w in p["search_corpus"] for w in ["ruza", "vetro", "vetar", "dijagram"])]
+        return diagrams
+
+    # 2. Traženje direktora
     if "direktor" in q_norm and not any(k in q_norm for k in ["zamenik", "zamenika", "zamenici"]):
         res = [p for p in catalog if p["role"] == "direktor"]
         if res: return res
 
+    # 3. Traženje zamenika
     if any(k in q_norm for k in ["zamenik", "zamenika", "zamenici", "goran", "caldovic", "svetlana", "mihajlovic"]):
         res = [p for p in catalog if p["role"] == "zamenik"]
         if res: return res
 
-    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa"]]
+    # 4. Traženje svih zaposlenih (VRAĆA SAMO OSOBLJE, NIKADA DIJAGRAME!)
+    if any(k in q_norm for k in ["zaposlen", "zaposleni", "radnik", "radnici", "osoblje"]):
+        personnel = [p for p in catalog if p["category"] == "personnel" or p["role"] in ["direktor", "zamenik", "zaposleni"]]
+        return personnel
+
+    # 5. Opšta pretraga po rečima u korpusu
+    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa", "pokazi", "daj", "slike"]]
     matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
-    return matched if matched else catalog
+    return matched
+
+# ==========================================
+# 4. CHAT INTERFEJS
+# ==========================================
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 st.markdown("##### 💡 Brza pitanja:")
 quick_questions = [
     "Ko je direktor Biroa?",
-    "Ko su zamenici direktora?",
+    "Ko su zaposleni u Birou?",
+    "Pokaži dijagrame ruža vetrova.",
     "Koji štampači se koriste u Birou?",
     "Navedi član 14 Kolektivnog ugovora.",
-    "Spisak opreme i tonera",
-    "Ko je ministar zdravstva u Srbiji?"
+    "Spisak opreme i tonera"
 ]
 
 col1, col2, col3 = st.columns(3)
@@ -247,7 +265,7 @@ for msg in st.session_state.messages:
             st.markdown(msg["content"])
         if "images" in msg and msg["images"]:
             for img in msg["images"]:
-                st.image(img["image_url"], caption=img["title"], width=250)
+                st.image(img["image_url"], caption=img["title"], width=300)
 
 chat_input_val = st.chat_input("Postavite pitanje o dokumentima ili zaposlenima...")
 user_input = selected_quick_q or chat_input_val
@@ -258,29 +276,29 @@ if user_input:
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        if is_personnel_query(user_input):
-            st.info("🔍 Pretražujem registar fotografija u R2 bazi...")
-            catalog = load_personnel_catalog_from_r2()
+        if is_media_query(user_input):
+            st.info("🔍 Pretražujem registar medija i fotografija u R2 bazi...")
+            catalog = load_media_catalog_from_r2()
             
             if not catalog:
-                answer_text = "⚠️ Nije moguće pristupiti R2 bucketu ili bucket nema slika."
+                answer_text = "⚠️ Nije moguće pristupiti R2 bucketu ili bucket nema sadržaja."
                 st.warning(answer_text)
                 st.session_state.messages.append({"role": "assistant", "content": answer_text})
             else:
-                filtered_photos = filter_personnel(catalog, user_input)
-                if filtered_photos:
-                    answer_text = f"Pronađeno u registru fotografija Biroa:"
+                filtered_media = filter_media(catalog, user_input)
+                if filtered_media:
+                    answer_text = f"Pronađeno u registru R2 baze ({len(filtered_media)} stavki):"
                     st.markdown(answer_text)
-                    for img in filtered_photos:
-                        st.image(img["image_url"], caption=img["title"], width=250)
+                    for img in filtered_media:
+                        st.image(img["image_url"], caption=img["title"], width=300)
                     
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": answer_text,
-                        "images": filtered_photos
+                        "images": filtered_media
                     })
                 else:
-                    answer_text = "⚠️ U R2 bucketu nisu pronađene odgovarajuće fotografije."
+                    answer_text = "⚠️ U R2 bucketu nisu pronađene odgovarajuće fotografije ili dijagrami."
                     st.warning(answer_text)
                     st.session_state.messages.append({"role": "assistant", "content": answer_text})
         
