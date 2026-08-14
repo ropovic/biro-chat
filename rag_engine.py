@@ -11,8 +11,8 @@ def normalize_text(text: str) -> str:
     nfkd = unicodedata.normalize('NFKD', text)
     return "".join([c for c in nfkd if not unicodedata.combining(c)])
 
-# Ključne reči koje označavaju da se traži lokalni dokument
-INTERNAL_WORDS = ["biro", "ugovor", "kolektivni", "stampac", "toner", "zaposlen", "oprema", "clan", "pravilnik", "srbijasum", "direktor", "odmor", "radni", "katalog"]
+# Ključne reči koje označavaju da se traži interni dokument (isključuje web)
+INTERNAL_WORDS = ["biro", "ugovor", "kolektivni", "stampac", "toner", "zaposlen", "oprema", "clan", "pravilnik", "srbijasum", "direktor", "odmor", "radni", "katalog", "ploter"]
 
 class RAGEngine:
     def __init__(self):
@@ -46,18 +46,17 @@ class RAGEngine:
         context_texts = []
         sources = []
         
-        # Provera da li je upit isključivo interni
         q_norm = normalize_text(user_question)
         is_internal_query = any(w in q_norm for w in INTERNAL_WORDS)
         
-        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT) - Povećano k=8
+        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT)
         try:
-            docs = self.vector_store.similarity_search(user_question, k=8)
+            docs = self.vector_store.similarity_search(user_question, k=5)
             for doc in docs:
                 text_content = doc.page_content.strip()
-                # Skraćujemo isečke na optimalnih 600 karaktera da stane HP800 i sve ostalo
-                if len(text_content) > 600:
-                    text_content = text_content[:600] + "..."
+                # Dozvoljavamo duže isečke (1200 karaktera) da se ne bi gubili članovi ugovora i liste opreme
+                if len(text_content) > 1200:
+                    text_content = text_content[:1200] + "..."
                     
                 source_file = doc.metadata.get("source", "Lokalni dokument")
                 if source_file not in sources:
@@ -68,7 +67,7 @@ class RAGEngine:
         except Exception as e:
             pass 
             
-        # 2. PRETRAGA WEBA (TAVILY API) - Samo ako upit nije interni
+        # 2. PRETRAGA WEBA (TAVILY API) - Samo za opšta pitanja van biroa
         if self.tavily_api_key and not is_internal_query:
             try:
                 tavily_resp = requests.post(
@@ -98,11 +97,10 @@ class RAGEngine:
                 pass
 
         if not context_texts:
-            return {"answer": "Nažalost, nisam pronašao relevantne informacije u dostupnim izvorima.", "source_documents": []}
+            return {"answer": "Nažalost, podatak nije pronađen u dokumentima baze.", "source_documents": []}
             
         context = "\n\n---\n\n".join(context_texts)
         
-        # Ograničenje za stabilnost tokena (4500 karaktera)
         if len(context) > 4500:
             context = context[:4500] + "\n...[Kontekst skraćen]"
         
@@ -110,7 +108,7 @@ class RAGEngine:
             "Ti si BiroChat, korporativni asistent za pretragu dokumentacije. "
             "Odgovori precizno koristeći ISKLJUČIVO navedeni kontekst. "
             "Ako u kontekstu nema odgovora, reci da podatak nije dostupan. "
-            "Nikada ne izmišljaj članove zakona, pravilnika ili liste opreme ukoliko ih nema u kontekstu."
+            "Nikada ne izmišljaj članove zakona, pravilnika, članove ugovora ili liste opreme ukoliko ih nema u kontekstu."
         )
         
         user_prompt = f"Kontekst:\n{context}\n\nPitanje: {user_question}"
@@ -123,7 +121,7 @@ class RAGEngine:
                 ],
                 model=self.llm_model,
                 temperature=0.0,
-                max_tokens=500
+                max_tokens=600
             )
             answer_text = response.choices[0].message.content
             
@@ -133,7 +131,7 @@ class RAGEngine:
                 "sources": sources
             }
         except Exception as e:
-            return {"answer": f"⚠️ Greška prilikom generisanja odgovora od strane LLM-a: {e}", "source_documents": []}
+            return {"answer": f"⚠️ Greška prilikom generisanja odgovora: {e}", "source_documents": []}
 
 _engine_instance = RAGEngine()
 
