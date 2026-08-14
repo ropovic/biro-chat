@@ -8,12 +8,12 @@ class RAGEngine:
     def __init__(self):
         # Parametri za Qdrant Cloud
         self.qdrant_url = "https://09ffa5ef-2765-45c8-bfcf-29bc6bf90f08.eu-west-2-0.aws.cloud.qdrant.io"
-        self.qdrant_api_key = os.getenv("QDRANT_API_KEY", "VAŠ_API_KLJUČ_OVDE") # Obavezno unesite ključ
+        self.qdrant_api_key = os.getenv("QDRANT_API_KEY", "TVOJ_QDRANT_API_KLJUČ")
         self.collection_name = "Baza_biro"
         
-        # 1. Inicijalizacija istog embedding modela korišćenog pri indeksiranju
+        # 1. Isti multijezički embedding model koji je korišćen pri indeksiranju
         self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
             model_kwargs={'device': 'cpu'}, 
             encode_kwargs={'normalize_embeddings': True}
         )
@@ -25,25 +25,25 @@ class RAGEngine:
             check_compatibility=False
         )
         
-        # 3. Langchain omotač za pretragu (eliminiše 'search' attribute error)
+        # 3. Langchain Vector Store
         self.vector_store = QdrantVectorStore(
             client=self.client,
             collection_name=self.collection_name,
             embedding=self.embeddings
         )
         
-        # 4. Groq klijent
+        # 4. Groq klijent i aktuelni Llama 3.1 model
         self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         self.llm_model = "llama-3.1-8b-instant"
 
     def query(self, user_question: str) -> dict:
-        """Pretražuje Bazu_biro preko Langchain-a i vraća rečnik."""
+        """Pretražuje bazu i šalje do 15 najsličnijih celina Groq LLM-u."""
         
         try:
-            # Pretraga preko Langchain-a (metoda similarity_search)
-            docs = self.vector_store.similarity_search(user_question, k=5)
+            # Povlačimo 15 najsličnijih chunk-ova (k=15) da ne bi promakli članovi ugovora i spiskovi
+            docs = self.vector_store.similarity_search(user_question, k=15)
         except Exception as e:
-            return {"answer": f"⚠️ Greška prilikom pretrage: {e}", "source_documents": []}
+            return {"answer": f"⚠️ Greška prilikom pretrage baze: {e}", "source_documents": []}
             
         if not docs:
             return {"answer": "Nažalost, nisam pronašao relevantne informacije u bazi podataka.", "source_documents": []}
@@ -51,12 +51,10 @@ class RAGEngine:
         context_texts = []
         sources = []
         
-        # Langchain automatski kreira objekte sa .page_content i .metadata
         for doc in docs:
             text_content = doc.page_content
             source_file = doc.metadata.get("source", "Nepoznat dokument")
             
-            # Filtriranje kako ne bismo dodavali iste izvore više puta u listu
             if source_file not in sources:
                 sources.append(source_file)
             
@@ -68,13 +66,13 @@ class RAGEngine:
         # Sistemski prompt
         system_prompt = (
             "Ti si BiroChat, korporativni asistent za pretragu dokumentacije. "
-            "Odgovori precizno na korisničko pitanje koristeći ISKLJUČIVO priloženi kontekst iz baze. "
-            "Ako podatak ne postoji u kontekstu, jasno reci da ga nema. Nemoj izmišljati."
+            "Odgovori precizno i detaljno na korisničko pitanje koristeći ISKLJUČIVO priloženi kontekst iz baze. "
+            "Ako se u kontekstu nalazi spisak ili više stavki (npr. štampači, toneri, POGŠ), navedi IH SVE. "
+            "Ako podatak zaista ne postoji u kontekstu, jasno reci da ga nema. Nemoj izmišljati."
         )
         
         user_prompt = f"Kontekst iz baze:\n{context}\n\nPitanje: {user_question}"
         
-        # Poziv Groq API-ja
         try:
             response = self.groq_client.chat.completions.create(
                 messages=[
@@ -82,8 +80,8 @@ class RAGEngine:
                     {"role": "user", "content": user_prompt}
                 ],
                 model=self.llm_model,
-                temperature=0.1,
-                max_tokens=1024
+                temperature=0.0,  # 0.0 osigurava striktne i uvek iste odgovore
+                max_tokens=1500
             )
             answer_text = response.choices[0].message.content
             
@@ -98,6 +96,6 @@ class RAGEngine:
 # Globalna instanca klase
 _engine_instance = RAGEngine()
 
-# Funkcija koju app.py očekuje
+# Funkcija koju app.py poziva
 def ask_birochat(question: str) -> dict:
     return _engine_instance.query(question)
