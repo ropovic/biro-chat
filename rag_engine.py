@@ -34,7 +34,7 @@ class RAGEngine:
         
         # 4. Groq klijent
         self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.llm_model = "llama3-8b-8192"
+        self.llm_model = "llama-3.1-8b-instant"
 
     def query(self, user_question: str) -> dict:
         """Pretražuje Bazu_biro preko Langchain-a i vraća rečnik."""
