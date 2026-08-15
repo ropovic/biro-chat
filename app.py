@@ -217,13 +217,13 @@ def normalize_text(text: str) -> str:
 col_l1, col_l2, col_l3 = st.columns([1, 4, 1])
 with col_l1:
     if SYSTEM_LOGOS["biro"]:
-        st.image(SYSTEM_LOGOS["biro"], use_container_width=True)
+        st.image(SYSTEM_LOGOS["biro"], width=100)
 with col_l2:
     st.markdown("<h1 class='title-text' style='text-align: center;'>🌲 BiroChat</h1>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: #2e7d32; font-size: 1.2rem; font-weight: bold;'>Korporativni Asistent</p>", unsafe_allow_html=True)
 with col_l3:
     if SYSTEM_LOGOS["srbijasume"]:
-        st.image(SYSTEM_LOGOS["srbijasume"], use_container_width=True)
+        st.image(SYSTEM_LOGOS["srbijasume"], width=100)
 
 st.markdown("---")
 
@@ -255,11 +255,18 @@ with st.sidebar:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-PERSONNEL_KEYWORDS = ["direktor", "direktora", "zamenik", "zamenika", "zamenici", "zaposlen", "zaposleni", "zaposlenih", "radnik", "radnici", "uprava", "spisak"]
-
 def is_personnel_query(question: str) -> bool:
     q_norm = normalize_text(question)
-    return any(re.search(r'\b' + re.escape(kw) + r'\b', q_norm) for kw in PERSONNEL_KEYWORDS)
+    # Ignoriši pitanja o opremi, štampačima ili tonerima
+    if any(w in q_norm for w in ["oprema", "opreme", "toner", "tonera", "stampac", "stampaci"]):
+        return False
+        
+    keywords = ["direktor", "direktora", "zamenik", "zamenika", "zamenici", "zaposlen", "zaposleni", "zaposlenih", "radnik", "radnici", "uprava", "spisak zaposlenih"]
+    names = ["brane", "goran", "svetlana", "aleksandra", "arsenije", "biljana", "bojana", "bosko", "darko", "dragana", "marina", "mirko", "nebojsa", "nenad", "predrag", "radoje", "sasa", "snezana", "vedrana", "vladimir", "vuk", "zoran", "cedo", "vamovic", "katic", "simic", "mirkovic", "jelic", "malesevic", "zivanovic", "miladinovic", "djukelic", "kovacevic", "ivosevic", "veres", "dedijer", "scekic", "perduh", "dubovac", "mihajlovic", "miljkovic", "milovanovic", "ceperkovic", "petrovic", "vukovic"]
+    
+    has_keyword = any(re.search(r'\b' + re.escape(kw) + r'\b', q_norm) for kw in keywords)
+    has_name = any(name in q_norm for name in names)
+    return has_keyword or has_name
 
 def filter_personnel(catalog, query: str):
     q_norm = normalize_text(query)
@@ -274,7 +281,7 @@ def filter_personnel(catalog, query: str):
         res = [p for p in catalog if p["role"] == "zamenik"]
         if res: return res
 
-    # 3. Spisak zaposlenih (vraća sortirani katalog)
+    # 3. Spisak zaposlenih
     if any(k in q_norm for k in ["zaposlen", "spisak", "radnik", "radnici", "uprava"]):
         return catalog
 
@@ -310,12 +317,15 @@ for msg in st.session_state.messages:
         if "images" in msg and msg["images"]:
             imgs = msg["images"]
             if len(imgs) == 1:
-                st.image(imgs[0]["image_url"], caption=imgs[0]["full_title"], use_container_width=True)
+                st.image(imgs[0]["image_url"], caption=imgs[0]["full_title"], width=300)
+            elif len(imgs) <= 2:
+                for img in imgs:
+                    st.image(img["image_url"], caption=img["full_title"], width=300)
             else:
                 grid_cols = st.columns(3)
                 for idx, img_item in enumerate(imgs):
                     with grid_cols[idx % 3]:
-                        st.image(img_item["image_url"], caption=img_item["title"], use_container_width=True)
+                        st.image(img_item["image_url"], caption=img_item["title"], width=200)
 
 chat_input_val = st.chat_input("Postavite pitanje o dokumentima ili zaposlenima...")
 user_input = selected_quick_q or chat_input_val
@@ -337,15 +347,14 @@ if user_input:
                 answer_text = f"Pronađeno u registru zaposlenih Biroa ({len(filtered_photos)} zaposlenih):"
                 st.markdown(answer_text)
                 
-                # Prikaz slika: ako je 1 ili 2 (direktor/zamenici), prikaži veće; ako je spisak, prikaži u 3 kolone (grid)
                 if len(filtered_photos) <= 2:
                     for img in filtered_photos:
-                        st.image(img["image_url"], caption=img["full_title"], use_container_width=True)
+                        st.image(img["image_url"], caption=img["full_title"], width=300)
                 else:
                     grid_cols = st.columns(3)
                     for idx, img in enumerate(filtered_photos):
                         with grid_cols[idx % 3]:
-                            st.image(img["image_url"], caption=img["title"], use_container_width=True)
+                            st.image(img["image_url"], caption=img["title"], width=200)
                 
                 st.session_state.messages.append({
                     "role": "assistant",
