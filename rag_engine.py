@@ -48,15 +48,15 @@ class RAGEngine:
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")
 
     def _generate_search_queries(self, user_question: str) -> list:
+        """ Generiše više ciljanih upita za sigurniji obuhvat iz Qdrant-a """
         q_norm = normalize_text(user_question)
         queries = [user_question]
 
+        # Ako se traže štampači/oprema, forsira povlačenje svih brand-ova i plotera
         if any(w in q_norm for w in ["stampac", "stampaci", "printer", "oprema", "ploter"]):
             queries.append("HP Designjet Canon TX Kyocera ploter štampač oprema toneri")
 
-        if any(w in q_norm for w in ["toner", "toneri"]):
-            queries.append("toner toneri sifra model štampač oprema")
-
+        # Ako se traži konkretan član (npr. član 14)
         article_match = re.search(r'(?:clan|član)\s*(\d+)', q_norm)
         if article_match:
             art_num = article_match.group(1)
@@ -74,16 +74,16 @@ class RAGEngine:
         article_match = re.search(r'(?:clan|član)\s*(\d+)', q_norm)
         target_article = article_match.group(1) if article_match else None
 
-        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT)
+        # 1. PRETRAGA LOKALNE DOKUMENTACIJE (QDRANT) - Multi-Query Engine
         try:
             search_queries = self._generate_search_queries(user_question)
             all_retrieved_docs = []
             seen_contents = set()
 
             for q_str in search_queries:
-                docs = self.vector_store.similarity_search(q_str, k=6)
+                docs = self.vector_store.similarity_search(q_str, k=12)
                 for doc in docs:
-                    content_head = doc.page_content.strip()[:150]
+                    content_head = doc.page_content.strip()[:100]
                     if content_head not in seen_contents:
                         seen_contents.add(content_head)
                         all_retrieved_docs.append(doc)
@@ -97,6 +97,7 @@ class RAGEngine:
                     "source": source_file
                 })
 
+            # HIBRIDNO RE-RANGIRANJE ZA ČLANOVE UGOVORA
             if target_article:
                 def score_chunk(chunk):
                     c_norm = normalize_text(chunk["text"])
@@ -105,7 +106,8 @@ class RAGEngine:
                     return 0
                 extracted_chunks.sort(key=score_chunk, reverse=True)
 
-            for item in extracted_chunks[:5]:
+            # Sastavljanje finalnog konteksta za LLM
+            for item in extracted_chunks[:10]:
                 text_content = item["text"]
                 if len(text_content) > 1500:
                     text_content = text_content[:1500] + "..."
@@ -119,8 +121,8 @@ class RAGEngine:
         except Exception as e:
             pass 
             
-        # 2. PRETRAGA WEBA (TAVILY API)
-        if self.tavily_api_key and (not is_internal_query or "ministar" in q_norm or "srbiji" in q_norm):
+        # 2. PRETRAGA WEBA (TAVILY API) - Za opšta pitanja
+        if self.tavily_api_key and not is_internal_query:
             try:
                 tavily_resp = requests.post(
                     "https://api.tavily.com/search",
@@ -155,18 +157,15 @@ class RAGEngine:
             context = context[:7000] + "\n...[Kontekst skraćen]"
         
         system_prompt = (
-            "Ti si BiroChat, korporativni asistent za pretragu dokumentacije Biroa za planiranje i projektovanje u šumarstvu, kao i opšte pretrage.\n"
-            "Odgovori precizno koristeći navedeni kontekst, bez ponavljanja istih informacija.\n\n"
+            "Ti si BiroChat, korporativni asistent za pretragu dokumentacije Biroa za planiranje i projektovanje u šumarstvu.\n"
+            "Odgovori precizno koristeći ISKLJUČIVO navedeni kontekst.\n\n"
             "VAŽNA PRAVILA ZA STRUKTURU ODGOVORA:\n"
-            "1. KADA JE PITANJE 'Koji štampači se koriste u Birou?':\n"
-            "   - Izvuci i navedi SAMO čiste nazive modela štampača i plotera.\n"
-            "   - Nemoj navoditi šifre tonera.\n"
-            "2. KADA JE PITANJE 'Spisak opreme i tonera':\n"
-            "   - Navedi štampače i pripadajuće tonere jedinstveno, bez dupliranja sekcija u odgovoru.\n"
-            "3. KADA SE TRAŽI KONKRETAN ČLAN (npr. Član 14 Kolektivnog ugovora):\n"
-            "   - Pronađi taj član u kontekstu i navedi njegov pun tekst.\n"
-            "4. Za opšta pitanja koristi podatke iz Web Pretrage.\n"
-            "5. Ako podatak zaista ne postoji u kontekstu, odgovori sa 'Podatak nije dostupan.'"
+            "1. KADA JE PITANJE 'Koji štampači se koriste u Birou?' ili opšte o štampačima/opremi:\n"
+            "   - Izvuci i navedi SAMO čiste nazive modela štampača i plotera (npr. HP Designjet 800PS, Canon TX-3000, Kyocera FS-9530dn, Kyocera M3655idn, Kyocera P2040dn).\n"
+            "   - NIKADA nemoj navoditi šifre tonera (poput TK-710, HP C4844A) niti količine komada kada korisnik pita koji se štampači koriste.\n"
+            "2. KADA SE TRAŽI KONKRETAN ČLAN (npr. Član 14 Kolektivnog ugovora):\n"
+            "   - Pronađi taj član u kontekstu i navedi njegov pun tekst ili detaljno sumiraj sve njegove odredbe.\n"
+            "3. Ako podatak zaista ne postoji u kontekstu, odgovori sa 'Podatak nije dostupan.'"
         )
         
         user_prompt = f"Kontekst:\n{context}\n\nPitanje: {user_question}"

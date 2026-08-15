@@ -1,6 +1,7 @@
 import os
 import re
 import unicodedata
+import boto3
 import streamlit as st
 from rag_engine import ask_birochat
 
@@ -20,190 +21,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. HARDKODOVANI LOGOTIPI I KATALOG ZAPOSLENIH
+# 2. KONFIGURACIJA CLOUDFLARE R2 BUCKETA
 # ==========================================
-SYSTEM_LOGOS = {
-    "biro": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Biro%20Logo.jpg",
-    "srbijasume": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Srbija%C5%A1ume%20logo.jpg"
-}
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "TVOJ_R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "TVOJ_R2_ACCESS_KEY")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "TVOJ_R2_SECRET_KEY")
+R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "fotografijebiro")
 
-PERSONNEL_CATALOG = [
-    {
-        "title": "Brane Vamović, direktor",
-        "full_title": "Fotografija Brane Vamovića, direktor u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Brano%20Vamovi%C4%87%20-%20direktor.jpg",
-        "role": "direktor",
-        "search_corpus": "fotografija brane vamovića, direktor u birou za planiranje, pd srbijašume brano vamović direktor"
-    },
-    {
-        "title": "Goran Ćaldović, viši projektant",
-        "full_title": "Fotografija Gorana Ćaldovića, viši projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Goran%20%C4%86aldovi%C4%87.jpg",
-        "role": "zamenik",
-        "search_corpus": "fotografija gorana ćaldovića, viši projektant u birou za planiranje, pd srbijašume goran ćaldović zamenik"
-    },
-    {
-        "title": "Svetlana Mihajlović, samostalni projektant",
-        "full_title": "Fotografija Svetlane Mihajlović, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Svetlana%20Mihajlovi%C4%87.jpg",
-        "role": "zamenik",
-        "search_corpus": "fotografija svetlane mihajlović, samostalni projektant u birou za planiranje, pd srbijašume svetlana mihajlović zamenik"
-    },
-    {
-        "title": "Aleksandra Katić",
-        "full_title": "Fotografija Aleksandre Katić, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Aleksandra%20Kati%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija aleksandre katić, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Arsenije Simić",
-        "full_title": "Fotografija Arsenija Simića, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Arsenije%20Simi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija arsenija simića, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Biljana Mirković",
-        "full_title": "Fotografija Biljane Mirković, šef računovodstva u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Biljana%20Mirkovi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija biljane mirković, šef računovodstva u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Bojana Jelić",
-        "full_title": "Fotografija Bojane Jelić, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Bojana%20Jeli%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija bojane jelić, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Boško Malešević",
-        "full_title": "Fotografija Boška Maleševića, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Bo%C5%A1ko%20Male%C5%A1evi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija boška maleševića, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Darko Živanović",
-        "full_title": "Fotografija Darka Živanovića, viši projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Darko%20%C5%BDivanovi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija darka živanovića, viši projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Dragana Miladinović",
-        "full_title": "Fotografija Dragane Miladinović, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Dragana%20Miladinovi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija dragane miladinović, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Marina Đukelić",
-        "full_title": "Fotografija Marine Đukelić, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Marina%20D%C5%BEukeli%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija marine đukelić, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Mirko Kovačević",
-        "full_title": "Fotografija Mirka Kovačevića, viši projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Mirko%20Kova%C4%8Devi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija mirka kovačevića, viši projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Mirko Simonović",
-        "full_title": "Fotografija Mirka Simonovića, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Mirko%20Simonovi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija mirka simonovića, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Nebojša Ivošević",
-        "full_title": "Fotografija Nebojše Ivoševića, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Neboj%C5%A1a%20Ivo%C5%A1evi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija nebojše ivoševića, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Nenad Vamović",
-        "full_title": "Fotografija Nenada Vamovića, viši projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Nenad%20Vamovi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija nenada vamovića, viši projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Nenad Vereš",
-        "full_title": "Fotografija Nenada Vereša, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Nenad%20Vere%C5%A1.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija nenada vereša, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Predrag Dedijer",
-        "full_title": "Fotografija Predraga Dedijera, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Predrag%20Dedijer.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija predraga dedijera, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Radoje Ščekić",
-        "full_title": "Fotografija Radoja Ščekića, viši projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Radoje%20%C5%A0%C4%8Deki%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija radoja ščekića, viši projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Saša Perduh",
-        "full_title": "Fotografija Saše Perduha, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Sa%C5%A1a%20Perduh.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija saše perduha, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Snežana Dubovac",
-        "full_title": "Fotografija Snežane Dubovac, geodete u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Sne%C5%BEana%20Dubovac.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija snežane dubovac, geodete u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Vedrana Miljković",
-        "full_title": "Fotografija Vedrane Miljković, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Vedrana%20Miljkovi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija vedrane miljković, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Vladimir Milovanović",
-        "full_title": "Fotografija Vladimira Milovanovića, radnik u računovodstvu u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Vladimir%20Milovanovi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija vladimira milovanovića, radnik u računovodstvu u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Vuk Čeperković",
-        "full_title": "Fotografija Vuka Čeperkovića, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Vuk%20%C4%8Ceperkovi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija vuka čeperkovića, samostalni projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Zoran Petrović",
-        "full_title": "Fotografija Zorana Petrovića, viši projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/Zoran%20Petrovi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija zorana petrovića, viši projektant u birou za planiranje, pd srbijašume"
-    },
-    {
-        "title": "Čedo Vuković",
-        "full_title": "Fotografija Čede Vukovića, samostalni projektant u Birou za planiranje, PD Srbijašume",
-        "image_url": "https://pub-49fb3cc788a74e0a9edbac7e11305b94.r2.dev/%C4%8Cedo%20Vukovi%C4%87.jpg",
-        "role": "zaposleni",
-        "search_corpus": "fotografija čede vukovića, samostalni projektant u birou za planiranje, pd srbijašume"
-    }
-]
+DEPUTIES_TOKENS = ["caldovic", "mihajlovic", "goran", "svetlana"]
 
 def normalize_text(text: str) -> str:
     if not text: return ""
@@ -211,19 +36,138 @@ def normalize_text(text: str) -> str:
     nfkd = unicodedata.normalize('NFKD', text)
     return "".join([c for c in nfkd if not unicodedata.combining(c)])
 
+@st.cache_resource
+def get_r2_client():
+    if not R2_ACCESS_KEY_ID or R2_ACCESS_KEY_ID == "TVOJ_R2_ACCESS_KEY": return None
+    try:
+        return boto3.client(
+            service_name="s3", endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+            aws_access_key_id=R2_ACCESS_KEY_ID, aws_secret_access_key=R2_SECRET_ACCESS_KEY, region_name="auto"
+        )
+    except Exception as e:
+        st.error(f"Greška pri povezivanju na Cloudflare R2: {e}")
+        return None
+
+def get_presigned_url(s3_client, key: str) -> str:
+    try:
+        return s3_client.generate_presigned_url('get_object', Params={'Bucket': R2_BUCKET_NAME, 'Key': key}, ExpiresIn=3600)
+    except Exception:
+        return ""
+
+@st.cache_data(ttl=3600)
+def fetch_system_logos():
+    s3 = get_r2_client()
+    logos = {"biro": None, "srbijasume": None}
+    if not s3: return logos
+    try:
+        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME)
+        if "Contents" in response:
+            for obj in response["Contents"]:
+                key_lower = obj["Key"].lower()
+                if "biro_logo" in key_lower:
+                    logos["biro"] = get_presigned_url(s3, obj["Key"])
+                elif "srbijasume_logo" in key_lower:
+                    logos["srbijasume"] = get_presigned_url(s3, obj["Key"])
+    except Exception:
+        pass
+    return logos
+
+@st.cache_data(ttl=300)
+def load_personnel_catalog_from_r2():
+    s3 = get_r2_client()
+    if not s3: return []
+
+    try:
+        response = s3.list_objects_v2(Bucket=R2_BUCKET_NAME)
+        if "Contents" not in response: return []
+
+        all_keys = [obj["Key"] for obj in response["Contents"]]
+        image_files = [k for k in all_keys if k.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'logo' not in k.lower()]
+        text_files = [k for k in all_keys if k.lower().endswith('.txt')]
+
+        catalog = []
+        seen_identities = set() # Stroga deduplikacija
+
+        for img_key in image_files:
+            img_base = os.path.splitext(img_key)[0]
+            img_norm = normalize_text(img_base).replace("_", " ").replace("-", " ")
+
+            matching_txt_key = None
+            for txt_key in text_files:
+                txt_base = os.path.splitext(txt_key)[0]
+                if normalize_text(txt_base) in img_norm or img_norm in normalize_text(txt_base):
+                    matching_txt_key = txt_key
+                    break
+
+            description_content = ""
+            if matching_txt_key:
+                try:
+                    txt_obj = s3.get_object(Bucket=R2_BUCKET_NAME, Key=matching_txt_key)
+                    description_content = txt_obj['Body'].read().decode('utf-8', errors='ignore').strip()
+                except Exception:
+                    pass
+
+            search_corpus = normalize_text(f"{img_key} {matching_txt_key or ''} {description_content}")
+
+            is_deputy = any(dep in search_corpus for dep in DEPUTIES_TOKENS) or "zamenik" in search_corpus
+            is_director = "direktor" in search_corpus and not is_deputy
+
+            role = "direktor" if is_director else ("zamenik" if is_deputy else "zaposleni")
+
+            # Određivanje ključnog ID-ja identiteta (Direktor je 1, zamenici po prezimenu)
+            if role == "direktor":
+                person_id = "direktor_glavni"
+            elif "caldovic" in search_corpus or "goran" in search_corpus:
+                person_id = "zamenik_caldovic"
+            elif "mihajlovic" in search_corpus or "svetlana" in search_corpus:
+                person_id = "zamenik_mihajlovic"
+            else:
+                person_id = img_norm.strip()
+
+            if person_id in seen_identities:
+                continue
+            seen_identities.add(person_id)
+
+            title = img_base.replace("_", " ").replace("Foto", "").replace("foto", "").strip().title()
+            if not title or len(title) < 3:
+                title = person_id.replace("_", " ").title()
+
+            if role == "direktor" and "direktor" not in title.lower():
+                title += " (Direktor)"
+            elif role == "zamenik" and "zamenik" not in title.lower():
+                title += " (Zamenik direktora)"
+
+            image_presigned_url = get_presigned_url(s3, img_key)
+
+            catalog.append({
+                "image_key": img_key,
+                "image_url": image_presigned_url,
+                "title": title,
+                "description": description_content,
+                "role": role,
+                "search_corpus": search_corpus
+            })
+
+        return catalog
+    except Exception as e:
+        st.error(f"Greška pri skeniranju R2 bucketa: {e}")
+        return []
+
 # ==========================================
 # 3. ZAGLAVLJE I SIDEBAR
 # ==========================================
+system_logos = fetch_system_logos()
+
 col_l1, col_l2, col_l3 = st.columns([1, 4, 1])
 with col_l1:
-    if SYSTEM_LOGOS["biro"]:
-        st.image(SYSTEM_LOGOS["biro"], width=100)
+    if system_logos["biro"]:
+        st.image(system_logos["biro"], use_container_width=True)
 with col_l2:
     st.markdown("<h1 class='title-text' style='text-align: center;'>🌲 BiroChat</h1>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: #2e7d32; font-size: 1.2rem; font-weight: bold;'>Korporativni Asistent</p>", unsafe_allow_html=True)
 with col_l3:
-    if SYSTEM_LOGOS["srbijasume"]:
-        st.image(SYSTEM_LOGOS["srbijasume"], width=100)
+    if system_logos["srbijasume"]:
+        st.image(system_logos["srbijasume"], use_container_width=True)
 
 st.markdown("---")
 
@@ -247,6 +191,9 @@ with st.sidebar:
     
     **Orkestrator:**
     LangChain
+    
+    **Web Ekstenzija:**
+    Tavily API
     """)
 
 # ==========================================
@@ -255,48 +202,33 @@ with st.sidebar:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+PERSONNEL_KEYWORDS = ["direktor", "direktora", "zamenik", "zamenika", "zamenici", "zaposlen", "zaposleni", "zaposlenih", "radnik", "radnici", "uprava", "slika", "fotografija"]
+
 def is_personnel_query(question: str) -> bool:
     q_norm = normalize_text(question)
-    # Ignoriši pitanja o opremi, štampačima ili tonerima
-    if any(w in q_norm for w in ["oprema", "opreme", "toner", "tonera", "stampac", "stampaci"]):
-        return False
-        
-    keywords = ["direktor", "direktora", "zamenik", "zamenika", "zamenici", "zaposlen", "zaposleni", "zaposlenih", "radnik", "radnici", "uprava", "spisak zaposlenih"]
-    names = ["brane", "goran", "svetlana", "aleksandra", "arsenije", "biljana", "bojana", "bosko", "darko", "dragana", "marina", "mirko", "nebojsa", "nenad", "predrag", "radoje", "sasa", "snezana", "vedrana", "vladimir", "vuk", "zoran", "cedo", "vamovic", "katic", "simic", "mirkovic", "jelic", "malesevic", "zivanovic", "miladinovic", "djukelic", "kovacevic", "ivosevic", "veres", "dedijer", "scekic", "perduh", "dubovac", "mihajlovic", "miljkovic", "milovanovic", "ceperkovic", "petrovic", "vukovic"]
-    
-    has_keyword = any(re.search(r'\b' + re.escape(kw) + r'\b', q_norm) for kw in keywords)
-    has_name = any(name in q_norm for name in names)
-    return has_keyword or has_name
+    return any(re.search(r'\b' + re.escape(kw) + r'\b', q_norm) for kw in PERSONNEL_KEYWORDS)
 
 def filter_personnel(catalog, query: str):
     q_norm = normalize_text(query)
     
-    # 1. Direktor
     if "direktor" in q_norm and not any(k in q_norm for k in ["zamenik", "zamenika", "zamenici"]):
         res = [p for p in catalog if p["role"] == "direktor"]
         if res: return res
 
-    # 2. Zamenici
     if any(k in q_norm for k in ["zamenik", "zamenika", "zamenici", "goran", "caldovic", "svetlana", "mihajlovic"]):
         res = [p for p in catalog if p["role"] == "zamenik"]
         if res: return res
 
-    # 3. Spisak zaposlenih
-    if any(k in q_norm for k in ["zaposlen", "spisak", "radnik", "radnici", "uprava"]):
-        return catalog
-
-    # 4. Pretraga po imenu
-    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa", "prikazi", "sliku", "slika", "zaposlenih", "zaposleni"]]
+    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa"]]
     matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
-    
     return matched if matched else catalog
 
 st.markdown("##### 💡 Brza pitanja:")
 quick_questions = [
     "Ko je direktor Biroa?",
     "Ko su zamenici direktora?",
-    "Spisak zaposlenih",
     "Koji štampači se koriste u Birou?",
+    "Ko su zaposleni u Birou?",
     "Spisak opreme i tonera",
     "Ko je ministar zdravstva u Srbiji?"
 ]
@@ -309,23 +241,13 @@ for idx, q in enumerate(quick_questions):
     if q_cols[idx].button(q, key=f"quick_btn_{idx}", use_container_width=True):
         selected_quick_q = q
 
-# Prikaz istorije poruka
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         if "content" in msg and msg["content"]:
             st.markdown(msg["content"])
         if "images" in msg and msg["images"]:
-            imgs = msg["images"]
-            if len(imgs) == 1:
-                st.image(imgs[0]["image_url"], caption=imgs[0]["full_title"], width=300)
-            elif len(imgs) <= 2:
-                for img in imgs:
-                    st.image(img["image_url"], caption=img["full_title"], width=300)
-            else:
-                grid_cols = st.columns(3)
-                for idx, img_item in enumerate(imgs):
-                    with grid_cols[idx % 3]:
-                        st.image(img_item["image_url"], caption=img_item["title"], width=200)
+            for img in msg["images"]:
+                st.image(img["image_url"], caption=img["title"], width=250)
 
 chat_input_val = st.chat_input("Postavite pitanje o dokumentima ili zaposlenima...")
 user_input = selected_quick_q or chat_input_val
@@ -337,34 +259,30 @@ if user_input:
 
     with st.chat_message("assistant"):
         if is_personnel_query(user_input):
-            st.info("🔍 Učitavam registar zaposlenih sa fotografijama...")
+            st.info("🔍 Pretražujem registar fotografija u R2 bazi...")
+            catalog = load_personnel_catalog_from_r2()
             
-            role_order = {"direktor": 0, "zamenik": 1, "zaposleni": 2}
-            sorted_catalog = sorted(PERSONNEL_CATALOG, key=lambda x: (role_order[x["role"]], x["title"]))
-            
-            filtered_photos = filter_personnel(sorted_catalog, user_input)
-            if filtered_photos:
-                answer_text = f"Pronađeno u registru zaposlenih Biroa ({len(filtered_photos)} zaposlenih):"
-                st.markdown(answer_text)
-                
-                if len(filtered_photos) <= 2:
-                    for img in filtered_photos:
-                        st.image(img["image_url"], caption=img["full_title"], width=300)
-                else:
-                    grid_cols = st.columns(3)
-                    for idx, img in enumerate(filtered_photos):
-                        with grid_cols[idx % 3]:
-                            st.image(img["image_url"], caption=img["title"], width=200)
-                
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer_text,
-                    "images": filtered_photos
-                })
-            else:
-                answer_text = "⚠️ U registru nisu pronađeni odgovarajući zaposleni."
+            if not catalog:
+                answer_text = "⚠️ Nije moguće pristupiti R2 bucketu ili bucket nema slika."
                 st.warning(answer_text)
                 st.session_state.messages.append({"role": "assistant", "content": answer_text})
+            else:
+                filtered_photos = filter_personnel(catalog, user_input)
+                if filtered_photos:
+                    answer_text = f"Pronađeno u registru fotografija Biroa:"
+                    st.markdown(answer_text)
+                    for img in filtered_photos:
+                        st.image(img["image_url"], caption=img["title"], width=250)
+                    
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": answer_text,
+                        "images": filtered_photos
+                    })
+                else:
+                    answer_text = "⚠️ U R2 bucketu nisu pronađene odgovarajuće fotografije."
+                    st.warning(answer_text)
+                    st.session_state.messages.append({"role": "assistant", "content": answer_text})
         
         else:
             with st.spinner("Pretražujem bazu dokumenata..."):
