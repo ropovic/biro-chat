@@ -229,7 +229,7 @@ quick_questions = [
     "Koji štampači se koriste u Birou?",
     "Ko su zaposleni u Birou?",
     "Koji toneri se koriste u Birou?",
-    "Ko je ministar zdravstva u Srbiji?"
+    "Pretraži internet i nađi ko je ministar zdravlja u Srbiji?"
 ]
 
 col1, col2, col3 = st.columns(3)
