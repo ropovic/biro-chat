@@ -201,10 +201,27 @@ with st.sidebar:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-PERSONNEL_KEYWORDS = ["direktor", "direktora", "zamenik", "zamenika", "zamenici", "zaposlen", "zaposleni", "zaposlenih", "radnik", "radnici", "uprava", "slika", "fotografija"]
+# Proširena lista ključnih reči i fraza za pretragu zaposlenih i osoba (uključujući "ima li", "ko je", imena itd.)
+PERSONNEL_KEYWORDS = [
+    "direktor", "direktora", "zamenik", "zamenika", "zamenici", 
+    "zaposlen", "zaposleni", "zaposlenih", "radnik", "radnici", 
+    "uprava", "slika", "fotografija", "ima li", "ko je", "kolega", 
+    "koleginica", "bojan", "bojana", "jelic"
+]
 
 def is_personnel_query(question: str) -> bool:
     q_norm = normalize_text(question)
+    
+    # Indikatori za pretragu osoba / zaposlenih
+    indicators = ["direktor", "zamenik", "zaposlen", "radnik", "uprava", "slika", "fotografija", "ima li", "ko je", "koleg", "bojan", "bojana"]
+    if any(ind in q_norm for ind in indicators):
+        return True
+        
+    # Ako upit ne sadrži interne tehničke reči i kratak je (provera imena/osobe)
+    technical_words = ["stampac", "toner", "ugovor", "clan", "oprema", "ploter", "ministar", "zdravstva"]
+    if not any(tech in q_norm for tech in technical_words) and len(q_norm.split()) <= 4:
+        return True
+        
     return any(re.search(r'\b' + re.escape(kw) + r'\b', q_norm) for kw in PERSONNEL_KEYWORDS)
 
 def filter_personnel(catalog, query: str):
@@ -218,7 +235,7 @@ def filter_personnel(catalog, query: str):
         res = [p for p in catalog if p["role"] == "zamenik"]
         if res: return res
 
-    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa"]]
+    query_words = [w for w in q_norm.split() if len(w) > 2 and w not in ["ko", "je", "su", "u", "biro", "biroa", "ima", "li"]]
     matched = [p for p in catalog if any(word in p["search_corpus"] for word in query_words)]
     return matched if matched else catalog
 
@@ -279,7 +296,7 @@ if user_input:
                         "images": filtered_photos
                     })
                 else:
-                    answer_text = "⚠️ U R2 bucketu nisu pronađene odgovarajuće fotografije."
+                    answer_text = "⚠️ U R2 bucketu nisu pronađene odgovarajuće fotografije za zadati upit."
                     st.warning(answer_text)
                     st.session_state.messages.append({"role": "assistant", "content": answer_text})
         
