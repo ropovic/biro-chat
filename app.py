@@ -86,7 +86,7 @@ def load_personnel_catalog_from_r2():
         text_files = [k for k in all_keys if k.lower().endswith('.txt')]
 
         catalog = []
-        seen_identities = set() # Stroga deduplikacija
+        seen_identities = set()
 
         for img_key in image_files:
             img_base = os.path.splitext(img_key)[0]
@@ -114,7 +114,6 @@ def load_personnel_catalog_from_r2():
 
             role = "direktor" if is_director else ("zamenik" if is_deputy else "zaposleni")
 
-            # Određivanje ključnog ID-ja identiteta (Direktor je 1, zamenici po prezimenu)
             if role == "direktor":
                 person_id = "direktor_glavni"
             elif "caldovic" in search_corpus or "goran" in search_corpus:
@@ -229,7 +228,7 @@ quick_questions = [
     "Ko su zamenici direktora?",
     "Koji štampači se koriste u Birou?",
     "Ko su zaposleni u Birou?",
-    "Spisak opreme u Birou?",
+    "Koji toneri se koriste u Birou?",
     "Ko je ministar zdravstva u Srbiji?"
 ]
 

@@ -52,9 +52,13 @@ class RAGEngine:
         q_norm = normalize_text(user_question)
         queries = [user_question]
 
-        # Ako se traže štampači/oprema, forsira povlačenje svih brand-ova i plotera
-        if any(w in q_norm for w in ["stampac", "stampaci", "printer", "oprema", "ploter"]):
-            queries.append("HP Designjet Canon TX Kyocera ploter štampač oprema toneri")
+        # Ako se traže štampači
+        if any(w in q_norm for w in ["stampac", "stampaci", "printer", "ploter"]):
+            queries.append("HP Designjet Canon TX Kyocera ploter štampač")
+
+        # Ako se traže toneri
+        if any(w in q_norm for w in ["toner", "toneri"]):
+            queries.append("toner toneri kertridž šifra model")
 
         # Ako se traži konkretan član (npr. član 14)
         article_match = re.search(r'(?:clan|član)\s*(\d+)', q_norm)
@@ -160,12 +164,14 @@ class RAGEngine:
             "Ti si BiroChat, korporativni asistent za pretragu dokumentacije Biroa za planiranje i projektovanje u šumarstvu.\n"
             "Odgovori precizno koristeći ISKLJUČIVO navedeni kontekst.\n\n"
             "VAŽNA PRAVILA ZA STRUKTURU ODGOVORA:\n"
-            "1. KADA JE PITANJE 'Koji štampači se koriste u Birou?' ili opšte o štampačima/opremi:\n"
+            "1. KADA JE PITANJE 'Koji štampači se koriste u Birou?':\n"
             "   - Izvuci i navedi SAMO čiste nazive modela štampača i plotera (npr. HP Designjet 800PS, Canon TX-3000, Kyocera FS-9530dn, Kyocera M3655idn, Kyocera P2040dn).\n"
-            "   - NIKADA nemoj navoditi šifre tonera (poput TK-710, HP C4844A) niti količine komada kada korisnik pita koji se štampači koriste.\n"
-            "2. KADA SE TRAŽI KONKRETAN ČLAN (npr. Član 14 Kolektivnog ugovora):\n"
+            "   - NIKADA nemoj navoditi šifre tonera.\n"
+            "2. KADA JE PITANJE 'Koji toneri se koriste u Birou?':\n"
+            "   - Izvuci i navedi spisak tonera i kertridža koji se koriste u Birou sa njihovim oznakama/šiframa iz dokumentacije.\n"
+            "3. KADA SE TRAŽI KONKRETAN ČLAN (npr. Član 14 Kolektivnog ugovora):\n"
             "   - Pronađi taj član u kontekstu i navedi njegov pun tekst ili detaljno sumiraj sve njegove odredbe.\n"
-            "3. Ako podatak zaista ne postoji u kontekstu, odgovori sa 'Podatak nije dostupan.'"
+            "4. Ako podatak zaista ne postoji u kontekstu, odgovori sa 'Podatak nije dostupan.'"
         )
         
         user_prompt = f"Kontekst:\n{context}\n\nPitanje: {user_question}"
