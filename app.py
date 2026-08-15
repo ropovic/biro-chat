@@ -229,7 +229,7 @@ quick_questions = [
     "Ko su zamenici direktora?",
     "Koji štampači se koriste u Birou?",
     "Ko su zaposleni u Birou?",
-    "Spisak opreme i tonera",
+    "Spisak opreme u Birou?",
     "Ko je ministar zdravstva u Srbiji?"
 ]
 
